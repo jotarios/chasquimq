@@ -9,8 +9,11 @@ pub struct Args {
     #[arg(long, value_delimiter = ',', default_values_t = vec![
         "queue-add".to_string(),
         "queue-add-bulk".to_string(),
+        "queue-add-delayed".to_string(),
         "worker-generic".to_string(),
         "worker-concurrent".to_string(),
+        "worker-delayed-end-to-end".to_string(),
+        "worker-retry-throughput".to_string(),
     ])]
     pub scenario: Vec<String>,
 

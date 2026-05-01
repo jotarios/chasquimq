@@ -21,6 +21,7 @@ Measured on Apple M3, Redis 8.6 (Docker, loopback), single host. BullMQ 5.76.4 b
 
 - [`baseline-bullmq.md`](baseline-bullmq.md) — full BullMQ baseline methodology, raw numbers, lessons from running the suite (notably: `enableAutoPipelining` *hurts* on loopback).
 - [`chasquimq-phase1.md`](chasquimq-phase1.md) — full ChasquiMQ Phase 1 results, post-critique iterations, and harness improvements (distribution stats, `--scale` flag, slowest-discard).
+- [`chasquimq-phase2-slice2.md`](chasquimq-phase2-slice2.md) — Phase 2 slices 1 (delayed jobs) and 2 (retry backoff). No-regression check on Phase 1 hot-path scenarios + three new scenarios for the delayed and retry paths.
 
 ## Reproducing
 
