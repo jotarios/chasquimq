@@ -1,5 +1,3 @@
-//! Engine error types.
-
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(thiserror::Error, Debug)]
@@ -19,3 +17,12 @@ pub enum Error {
 #[derive(thiserror::Error, Debug)]
 #[error("handler: {0}")]
 pub struct HandlerError(pub Box<dyn std::error::Error + Send + Sync>);
+
+impl HandlerError {
+    pub fn new<E>(err: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self(Box::new(err))
+    }
+}

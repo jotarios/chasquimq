@@ -1,5 +1,3 @@
-//! Producer / Consumer configuration.
-
 #[derive(Debug, Clone)]
 pub struct ProducerConfig {
     pub queue_name: String,
