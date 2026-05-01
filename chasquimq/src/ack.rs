@@ -82,7 +82,7 @@ async fn flush_once(
     args.push(Value::from("IDS"));
     args.push(Value::from(ids.len() as i64));
     for id in ids {
-        args.push(Value::from(id.as_str()));
+        args.push(Value::from(id.as_ref()));
     }
     let cmd = CustomCommand::new_static("XACKDEL", ClusterHash::FirstKey, false);
     client.custom::<Value, _>(cmd, args).await?;

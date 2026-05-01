@@ -90,6 +90,8 @@ async fn shutdown_drains_in_flight() {
         ack_batch: 32,
         ack_idle_ms: 5,
         shutdown_deadline_secs: 5,
+        max_payload_bytes: 1_048_576,
+        dlq_inflight: 32,
     };
 
     let started = Arc::new(AtomicUsize::new(0));

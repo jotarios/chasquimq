@@ -111,4 +111,26 @@ The refactor is **correctness-positive but not a perf win**: numbers are within 
 
 Raw log: `benchmarks/runs/chasquimq-phase1-2026-05-01-postcritique.log`.
 
+## Post-critique 2 fixes (2026-05-01)
+
+After the second self-critique, four more issues were addressed:
+
+1. **DLQ relocation made idempotent.** Previously `XADD <dlq> + XACKDEL <main>` retried as a unit on failure — if XADD landed but the connection dropped before XACKDEL, the retry posted a *second* entry to DLQ. Now the DLQ XADD includes `IDMP <consumer-side-pid> <source-entry-id>` so retries dedupe server-side.
+2. **DLQ moves fanned out off the reader's hot path.** Previously a flaky DLQ relocation (up to 350ms across retries) blocked the rest of the batch from being dispatched to workers. Added a dedicated `run_dlq_relocator` task with a bounded `mpsc<DlqRelocate>` (`dlq_inflight` config, default 32). Reader pushes work and moves on.
+3. **`max_payload_bytes` cap on consumer.** Stream payloads are attacker-controllable in some deployments; `rmp_serde::from_slice` on huge bytes can OOM the worker. Default cap = 1 MiB; oversize entries are routed to DLQ (with reason `oversize_payload`) before any decode attempt.
+4. **`StreamEntryId` switched from `String` to `Arc<str>`.** Previously the per-job hot path did 3 String allocations (one per entry parsed, one per dispatched job's entry_id, one per worker's job_id clone). Arc<str> drops two of them.
+
+Re-bench (3 repeats, post-fixes-2):
+
+| Scenario | jobs/s | CPU% | × BullMQ |
+|---|---:|---:|---:|
+| `queue-add`         | 17,546  | 26%  | 1.26× |
+| `queue-add-bulk`    | 193,271 | 62%  | 3.18× |
+| `worker-generic`    | 416,160 | 67%  | 31.4× |
+| `worker-concurrent` | 317,988 | 133% | 6.66× |
+
+5-repeat run on `worker-concurrent` alone: 342,418 mean, range 245k–440k. The wide variance is intrinsic to a 10k-job bench window on this single-host setup, not a regression — pre-fix runs showed the same range character. Headline claim (≥3× on `queue-add-bulk` and `worker-concurrent`) holds.
+
+The fixes are correctness wins (#1 prevents DLQ duplicates, #2 prevents reader stalls, #3 closes an OOM vector, #4 reduces per-job allocations) without measurable perf regression. Raw log: `benchmarks/runs/chasquimq-phase1-2026-05-01-postcritique2.log`.
+
 ## Phase 1 verified ✓

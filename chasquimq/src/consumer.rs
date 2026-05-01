@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-pub(crate) type StreamEntryId = String;
+pub(crate) type StreamEntryId = Arc<str>;
 
 pub(crate) struct DispatchedJob<T> {
     pub entry_id: StreamEntryId,
@@ -66,6 +66,8 @@ where
         let concurrency = self.cfg.concurrency.max(1);
         let (job_tx, job_rx) = async_channel::bounded::<DispatchedJob<T>>(concurrency * 2);
         let (ack_tx, ack_rx) = mpsc::channel::<StreamEntryId>(concurrency * 4);
+        let (dlq_tx, dlq_rx) =
+            mpsc::channel::<DlqRelocate>(self.cfg.dlq_inflight.max(1));
 
         let ack_handle = tokio::spawn(run_ack_flusher(
             ack_client,
@@ -78,16 +80,27 @@ where
             ack_rx,
         ));
 
+        let dlq_producer_id: Arc<str> = Arc::from(uuid::Uuid::new_v4().to_string());
+        let dlq_handle = tokio::spawn(run_dlq_relocator(
+            dlq_writer,
+            DlqRelocatorConfig {
+                stream_key: self.stream_key.clone(),
+                dlq_key: self.dlq_key.clone(),
+                group: self.cfg.group.clone(),
+                producer_id: dlq_producer_id,
+            },
+            dlq_rx,
+        ));
+
         let workers = spawn_workers(concurrency, handler, job_rx, ack_tx.clone());
         drop(ack_tx);
 
         let read_state = ReadState {
             reader,
-            dlq_writer,
-            stream_key: self.stream_key.clone(),
-            dlq_key: self.dlq_key.clone(),
+            stream_key: Arc::<str>::from(self.stream_key.clone()),
             cfg: self.cfg.clone(),
             job_tx,
+            dlq_tx,
             shutdown: shutdown.clone(),
         };
         let reader_outcome = reader_loop::<T>(read_state).await;
@@ -101,6 +114,9 @@ where
         if let Err(e) = ack_handle.await {
             tracing::warn!(error = %e, "ack flusher join error");
         }
+        if let Err(e) = dlq_handle.await {
+            tracing::warn!(error = %e, "dlq relocator join error");
+        }
 
         reader_outcome
     }
@@ -108,11 +124,10 @@ where
 
 struct ReadState<T> {
     reader: Client,
-    dlq_writer: Client,
-    stream_key: String,
-    dlq_key: String,
+    stream_key: Arc<str>,
     cfg: ConsumerConfig,
     job_tx: async_channel::Sender<DispatchedJob<T>>,
+    dlq_tx: mpsc::Sender<DlqRelocate>,
     shutdown: CancellationToken,
 }
 
@@ -122,11 +137,10 @@ where
 {
     let ReadState {
         reader,
-        dlq_writer,
         stream_key,
-        dlq_key,
         cfg,
         job_tx,
+        dlq_tx,
         shutdown,
     } = state;
 
@@ -170,22 +184,7 @@ where
                 EntryShape::Ok(e) => e,
                 EntryShape::MalformedWithId { id, reason } => {
                     tracing::warn!(entry_id = %id, reason, "malformed stream entry; routing to DLQ");
-                    let placeholder = ParsedEntry {
-                        id,
-                        payload: Bytes::new(),
-                        delivery_count: 0,
-                    };
-                    if let Err(e) = move_to_dlq_with_retry(
-                        &dlq_writer,
-                        &dlq_key,
-                        &stream_key,
-                        &cfg.group,
-                        &placeholder,
-                    )
-                    .await
-                    {
-                        tracing::error!(entry_id = %placeholder.id, error = %e, "malformed entry DLQ relocation failed permanently");
-                    }
+                    enqueue_dlq(&dlq_tx, id, Bytes::new(), DlqReason::Malformed { reason }).await;
                     continue;
                 }
                 EntryShape::Unrecoverable => {
@@ -194,21 +193,23 @@ where
                 }
             };
 
-            let attempt = entry.delivery_count.saturating_add(1);
-            if attempt as u32 > cfg.max_attempts {
-                if let Err(e) =
-                    move_to_dlq_with_retry(&dlq_writer, &dlq_key, &stream_key, &cfg.group, &entry)
-                        .await
-                {
-                    tracing::error!(entry_id = %entry.id, error = %e, "DLQ relocation failed permanently; entry remains pending and will be retried on next CLAIM tick");
-                }
+            let attempt: u32 = u32::try_from(entry.delivery_count.saturating_add(1))
+                .unwrap_or(u32::MAX);
+            if attempt > cfg.max_attempts {
+                enqueue_dlq(&dlq_tx, entry.id, entry.payload, DlqReason::RetriesExhausted).await;
+                continue;
+            }
+
+            if entry.payload.len() > cfg.max_payload_bytes {
+                tracing::warn!(entry_id = %entry.id, size = entry.payload.len(), max = cfg.max_payload_bytes, "payload exceeds max_payload_bytes; routing to DLQ");
+                enqueue_dlq(&dlq_tx, entry.id, entry.payload, DlqReason::OversizePayload).await;
                 continue;
             }
 
             match rmp_serde::from_slice::<Job<T>>(&entry.payload) {
                 Ok(job) => {
                     let dispatched = DispatchedJob {
-                        entry_id: entry.id.clone(),
+                        entry_id: entry.id,
                         job,
                     };
                     if job_tx.send(dispatched).await.is_err() {
@@ -217,23 +218,32 @@ where
                 }
                 Err(decode_err) => {
                     tracing::warn!(entry_id = %entry.id, error = %decode_err, "decode failed; routing to DLQ");
-                    if let Err(e) = move_to_dlq_with_retry(
-                        &dlq_writer,
-                        &dlq_key,
-                        &stream_key,
-                        &cfg.group,
-                        &entry,
-                    )
-                    .await
-                    {
-                        tracing::error!(entry_id = %entry.id, error = %e, "poison entry DLQ relocation failed permanently");
-                    }
+                    enqueue_dlq(&dlq_tx, entry.id, entry.payload, DlqReason::DecodeFailed).await;
                 }
             }
         }
     }
 
     Ok(())
+}
+
+async fn enqueue_dlq(
+    dlq_tx: &mpsc::Sender<DlqRelocate>,
+    entry_id: StreamEntryId,
+    payload: Bytes,
+    reason: DlqReason,
+) {
+    if dlq_tx
+        .send(DlqRelocate {
+            entry_id,
+            payload,
+            reason,
+        })
+        .await
+        .is_err()
+    {
+        tracing::error!("dlq relocator channel closed; relocation dropped");
+    }
 }
 
 fn build_xreadgroup_args(
@@ -298,10 +308,10 @@ fn parse_entry(value: &Value) -> EntryShape {
         Value::Array(items) => items,
         _ => return EntryShape::Unrecoverable,
     };
-    let id = match items.first() {
-        Some(Value::String(s)) => s.to_string(),
-        Some(Value::Bytes(b)) => match String::from_utf8(b.to_vec()) {
-            Ok(s) => s,
+    let id: StreamEntryId = match items.first() {
+        Some(Value::String(s)) => Arc::from(&**s),
+        Some(Value::Bytes(b)) => match std::str::from_utf8(b) {
+            Ok(s) => Arc::from(s),
             Err(_) => return EntryShape::Unrecoverable,
         },
         _ => return EntryShape::Unrecoverable,
@@ -357,30 +367,111 @@ fn extract_payload_field(fields: &[Value]) -> Option<Bytes> {
     None
 }
 
-async fn move_to_dlq_once(
-    dlq_writer: &Client,
-    dlq_key: &str,
-    stream_key: &str,
-    group: &str,
-    entry: &ParsedEntry,
+#[derive(Debug)]
+enum DlqReason {
+    RetriesExhausted,
+    DecodeFailed,
+    Malformed { reason: &'static str },
+    OversizePayload,
+}
+
+impl DlqReason {
+    fn as_str(&self) -> &'static str {
+        match self {
+            DlqReason::RetriesExhausted => "retries_exhausted",
+            DlqReason::DecodeFailed => "decode_failed",
+            DlqReason::Malformed { .. } => "malformed",
+            DlqReason::OversizePayload => "oversize_payload",
+        }
+    }
+
+    fn detail(&self) -> Option<&'static str> {
+        if let DlqReason::Malformed { reason } = self {
+            Some(reason)
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Debug)]
+struct DlqRelocate {
+    entry_id: StreamEntryId,
+    payload: Bytes,
+    reason: DlqReason,
+}
+
+struct DlqRelocatorConfig {
+    stream_key: String,
+    dlq_key: String,
+    group: String,
+    producer_id: Arc<str>,
+}
+
+async fn run_dlq_relocator(
+    client: Client,
+    cfg: DlqRelocatorConfig,
+    mut rx: mpsc::Receiver<DlqRelocate>,
+) {
+    while let Some(relocate) = rx.recv().await {
+        if let Err(e) = relocate_with_retry(&client, &cfg, &relocate).await {
+            tracing::error!(entry_id = %relocate.entry_id, reason = %relocate.reason.as_str(), error = %e, "DLQ relocation failed permanently; entry remains pending and will be retried on next CLAIM tick");
+        }
+    }
+}
+
+async fn relocate_with_retry(
+    client: &Client,
+    cfg: &DlqRelocatorConfig,
+    relocate: &DlqRelocate,
 ) -> Result<()> {
-    let pipeline = dlq_writer.pipeline();
+    let mut last_err: Option<Error> = None;
+    for attempt in 0..DLQ_RETRY_ATTEMPTS {
+        match relocate_once(client, cfg, relocate).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                let backoff = DLQ_RETRY_BASE_MS << attempt;
+                tracing::warn!(entry_id = %relocate.entry_id, attempt = attempt + 1, error = %e, backoff_ms = backoff, "DLQ relocation failed; retrying");
+                last_err = Some(e);
+                tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| Error::Config("DLQ relocation exhausted retries".into())))
+}
+
+async fn relocate_once(
+    client: &Client,
+    cfg: &DlqRelocatorConfig,
+    relocate: &DlqRelocate,
+) -> Result<()> {
+    let pipeline = client.pipeline();
     let xadd = CustomCommand::new_static("XADD", ClusterHash::FirstKey, false);
     let xackdel = CustomCommand::new_static("XACKDEL", ClusterHash::FirstKey, false);
-    let xadd_args: Vec<Value> = vec![
-        Value::from(dlq_key),
-        Value::from("*"),
-        Value::from(PAYLOAD_FIELD),
-        Value::Bytes(entry.payload.clone()),
-        Value::from("source_id"),
-        Value::from(entry.id.as_str()),
-    ];
+
+    let mut xadd_args: Vec<Value> = Vec::with_capacity(12);
+    xadd_args.push(Value::from(cfg.dlq_key.as_str()));
+    xadd_args.push(Value::from("IDMP"));
+    xadd_args.push(Value::from(cfg.producer_id.as_ref()));
+    xadd_args.push(Value::from(relocate.entry_id.as_ref()));
+    xadd_args.push(Value::from("*"));
+    xadd_args.push(Value::from(PAYLOAD_FIELD));
+    xadd_args.push(Value::Bytes(relocate.payload.clone()));
+    xadd_args.push(Value::from("source_id"));
+    xadd_args.push(Value::from(relocate.entry_id.as_ref()));
+    xadd_args.push(Value::from("reason"));
+    xadd_args.push(Value::from(relocate.reason.as_str()));
+    if let Some(detail) = relocate.reason.detail() {
+        xadd_args.push(Value::from("detail"));
+        xadd_args.push(Value::from(detail));
+    }
+
     let xackdel_args: Vec<Value> = vec![
-        Value::from(stream_key),
-        Value::from(group),
+        Value::from(cfg.stream_key.as_str()),
+        Value::from(cfg.group.as_str()),
         Value::from("IDS"),
         Value::from(1_i64),
-        Value::from(entry.id.as_str()),
+        Value::from(relocate.entry_id.as_ref()),
     ];
     let _: () = pipeline
         .custom(xadd, xadd_args)
@@ -392,28 +483,6 @@ async fn move_to_dlq_once(
         .map_err(Error::Redis)?;
     let _: Vec<Value> = pipeline.all().await.map_err(Error::Redis)?;
     Ok(())
-}
-
-async fn move_to_dlq_with_retry(
-    dlq_writer: &Client,
-    dlq_key: &str,
-    stream_key: &str,
-    group: &str,
-    entry: &ParsedEntry,
-) -> Result<()> {
-    let mut last_err: Option<Error> = None;
-    for attempt in 0..DLQ_RETRY_ATTEMPTS {
-        match move_to_dlq_once(dlq_writer, dlq_key, stream_key, group, entry).await {
-            Ok(()) => return Ok(()),
-            Err(e) => {
-                let backoff = DLQ_RETRY_BASE_MS << attempt;
-                tracing::warn!(entry_id = %entry.id, attempt = attempt + 1, error = %e, backoff_ms = backoff, "DLQ relocation failed; retrying");
-                last_err = Some(e);
-                tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
-            }
-        }
-    }
-    Err(last_err.unwrap_or_else(|| Error::Config("DLQ relocation exhausted retries".into())))
 }
 
 struct WorkerPool {

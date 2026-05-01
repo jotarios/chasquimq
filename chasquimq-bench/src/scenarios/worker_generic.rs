@@ -45,6 +45,8 @@ pub async fn run(redis_url: &str, queue: &str) -> ScenarioReport {
         ack_batch: 64,
         ack_idle_ms: 5,
         shutdown_deadline_secs: 5,
+        max_payload_bytes: 1_048_576,
+        dlq_inflight: 32,
     };
 
     drive_worker_scenario(redis_url, consumer_cfg, warmup, bench, "worker-generic").await

@@ -28,6 +28,8 @@ pub struct ConsumerConfig {
     pub ack_batch: usize,
     pub ack_idle_ms: u64,
     pub shutdown_deadline_secs: u64,
+    pub max_payload_bytes: usize,
+    pub dlq_inflight: usize,
 }
 
 impl Default for ConsumerConfig {
@@ -44,6 +46,8 @@ impl Default for ConsumerConfig {
             ack_batch: 256,
             ack_idle_ms: 5,
             shutdown_deadline_secs: 30,
+            max_payload_bytes: 1_048_576,
+            dlq_inflight: 32,
         }
     }
 }

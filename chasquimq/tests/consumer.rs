@@ -93,6 +93,8 @@ fn consumer_cfg(queue: &str, consumer_id: &str) -> ConsumerConfig {
         ack_batch: 64,
         ack_idle_ms: 5,
         shutdown_deadline_secs: 5,
+        max_payload_bytes: 1_048_576,
+        dlq_inflight: 32,
     }
 }
 
