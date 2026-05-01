@@ -36,6 +36,7 @@ pub async fn run(redis_url: &str, queue: &str, scale: u32) -> ScenarioReport {
         shutdown_deadline_secs: 5,
         max_payload_bytes: 1_048_576,
         dlq_inflight: 64,
+        dlq_max_stream_len: 100_000,
         retry: RetryConfig {
             initial_backoff_ms: 1,
             max_backoff_ms: 5,

@@ -21,6 +21,32 @@ redis.call('ZADD', KEYS[2], tonumber(ARGV[3]), ARGV[4])
 return 1
 "#;
 
+/// Replays up to ARGV[1] entries from the DLQ stream (KEYS[1]) back into the
+/// main stream (KEYS[2]). For each entry, the script extracts the payload field
+/// `d` and re-XADDs it (with MAXLEN ~ ARGV[2]) — payload bytes carry the
+/// original encoded `Job<T>` minus its `attempt` reset, which the caller does
+/// in Rust before invoking this script. Entries are XDEL'd from the DLQ as
+/// they're successfully republished.
+///
+/// ARGV[3..] = pairs of (dlq_entry_id, replay_payload_bytes) — one per entry to
+/// replay, already attempt-reset by the caller.
+pub(crate) const REPLAY_DLQ_SCRIPT: &str = r#"
+local dlq = KEYS[1]
+local stream = KEYS[2]
+local max_stream_len = ARGV[1]
+local replayed = 0
+local i = 2
+while i <= #ARGV do
+  local dlq_id = ARGV[i]
+  local payload = ARGV[i + 1]
+  redis.call('XADD', stream, 'MAXLEN', '~', max_stream_len, '*', 'd', payload)
+  redis.call('XDEL', dlq, dlq_id)
+  replayed = replayed + 1
+  i = i + 2
+end
+return replayed
+"#;
+
 pub(crate) const ACQUIRE_LOCK_SCRIPT: &str = r#"
 local cur = redis.call('GET', KEYS[1])
 if cur == false then
@@ -100,12 +126,16 @@ pub(crate) fn xadd_dlq_args(
     payload: Bytes,
     reason: &str,
     detail: Option<&str>,
+    max_stream_len: u64,
 ) -> Vec<Value> {
-    let mut args: Vec<Value> = Vec::with_capacity(13 + detail.is_some() as usize * 2);
+    let mut args: Vec<Value> = Vec::with_capacity(16 + detail.is_some() as usize * 2);
     args.push(Value::from(dlq_key));
     args.push(Value::from("IDMP"));
     args.push(Value::from(producer_id));
     args.push(Value::from(source_id));
+    args.push(Value::from("MAXLEN"));
+    args.push(Value::from("~"));
+    args.push(Value::from(max_stream_len as i64));
     args.push(Value::from("*"));
     args.push(Value::from(PAYLOAD_FIELD));
     args.push(Value::Bytes(payload));
@@ -164,6 +194,56 @@ pub(crate) fn eval_promote_args(
 
 pub(crate) fn script_load_args(script: &str) -> Vec<Value> {
     vec![Value::from("LOAD"), Value::from(script)]
+}
+
+pub(crate) fn xrange_args(stream_key: &str, limit: usize) -> Vec<Value> {
+    vec![
+        Value::from(stream_key),
+        Value::from("-"),
+        Value::from("+"),
+        Value::from("COUNT"),
+        Value::from(limit as i64),
+    ]
+}
+
+pub(crate) fn evalsha_replay_args(
+    sha: &str,
+    dlq_key: &str,
+    stream_key: &str,
+    max_stream_len: u64,
+    pairs: &[(String, Bytes)],
+) -> Vec<Value> {
+    let mut args: Vec<Value> = Vec::with_capacity(5 + pairs.len() * 2);
+    args.push(Value::from(sha));
+    args.push(Value::from(2_i64));
+    args.push(Value::from(dlq_key));
+    args.push(Value::from(stream_key));
+    args.push(Value::from(max_stream_len as i64));
+    for (id, bytes) in pairs {
+        args.push(Value::from(id.as_str()));
+        args.push(Value::Bytes(bytes.clone()));
+    }
+    args
+}
+
+pub(crate) fn eval_replay_args(
+    script: &str,
+    dlq_key: &str,
+    stream_key: &str,
+    max_stream_len: u64,
+    pairs: &[(String, Bytes)],
+) -> Vec<Value> {
+    let mut args: Vec<Value> = Vec::with_capacity(5 + pairs.len() * 2);
+    args.push(Value::from(script));
+    args.push(Value::from(2_i64));
+    args.push(Value::from(dlq_key));
+    args.push(Value::from(stream_key));
+    args.push(Value::from(max_stream_len as i64));
+    for (id, bytes) in pairs {
+        args.push(Value::from(id.as_str()));
+        args.push(Value::Bytes(bytes.clone()));
+    }
+    args
 }
 
 pub(crate) fn evalsha_retry_args(

@@ -85,6 +85,7 @@ where
                 dlq_key: self.dlq_key.clone(),
                 group: self.cfg.group.clone(),
                 producer_id: dlq_producer_id,
+                max_stream_len: self.cfg.dlq_max_stream_len,
             },
             dlq_rx,
         ));
