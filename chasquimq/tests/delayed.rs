@@ -753,3 +753,45 @@ async fn promoter_releases_lock_on_shutdown() {
 
     let _: () = admin.quit().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires REDIS_URL"]
+async fn promoter_does_not_release_lock_owned_by_other() {
+    let admin = admin().await;
+    let queue = "delayed_e17";
+    flush_all(&admin, queue).await;
+
+    let lock_key = promoter_lock_key(queue);
+    // Plant a lock owned by "other-holder" with a long TTL.
+    let _: fred::types::Value = admin
+        .custom(
+            CustomCommand::new_static("SET", ClusterHash::FirstKey, false),
+            vec![
+                fred::types::Value::from(lock_key.as_str()),
+                fred::types::Value::from("other-holder"),
+                fred::types::Value::from("EX"),
+                fred::types::Value::from(30_i64),
+            ],
+        )
+        .await
+        .expect("SET");
+
+    // Spin up a promoter named "p1". It can't acquire (held by other-holder).
+    // On shutdown it must NOT delete the lock.
+    let shutdown = CancellationToken::new();
+    let promoter = Promoter::new(redis_url(), promoter_cfg(queue, "p1"));
+    let handle = tokio::spawn(promoter.run(shutdown.clone()));
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+
+    assert_eq!(
+        get_string(&admin, &lock_key).await,
+        Some("other-holder".to_string()),
+        "promoter shutdown must not have deleted another holder's lock"
+    );
+
+    let _: () = admin.quit().await.unwrap();
+}

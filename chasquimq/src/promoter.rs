@@ -1,8 +1,9 @@
 use crate::config::PromoterConfig;
 use crate::error::{Error, Result};
 use crate::redis::commands::{
-    ACQUIRE_LOCK_SCRIPT, PROMOTE_SCRIPT, del_args, eval_acquire_lock_args, eval_promote_args,
-    evalsha_acquire_lock_args, evalsha_promote_args, script_load_args,
+    ACQUIRE_LOCK_SCRIPT, PROMOTE_SCRIPT, RELEASE_LOCK_SCRIPT, eval_acquire_lock_args,
+    eval_promote_args, eval_release_lock_args, evalsha_acquire_lock_args, evalsha_promote_args,
+    script_load_args,
 };
 use crate::redis::conn::connect;
 use crate::redis::keys::{delayed_key, promoter_lock_key, stream_key};
@@ -170,9 +171,12 @@ impl Promoter {
         }
     }
 
+    /// Best-effort: only deletes the lock if its current value still matches
+    /// our holder_id. A paused promoter whose lease expired and was taken
+    /// over by another holder must not delete the new holder's lock.
     async fn release_lock_best_effort(&self, client: &Client) {
-        let cmd = CustomCommand::new_static("DEL", ClusterHash::FirstKey, false);
-        let args = del_args(&self.lock_key);
+        let cmd = CustomCommand::new_static("EVAL", ClusterHash::FirstKey, false);
+        let args = eval_release_lock_args(RELEASE_LOCK_SCRIPT, &self.lock_key, &self.cfg.holder_id);
         let _: std::result::Result<Value, _> = client.custom(cmd, args).await;
     }
 }

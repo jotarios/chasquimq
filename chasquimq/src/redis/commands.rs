@@ -13,12 +13,29 @@ end
 return #due
 "#;
 
+/// Atomically acknowledge-and-delete a stream entry from the consumer group's
+/// pending list, then re-schedule it onto the delayed sorted set. The XACKDEL
+/// gate (only ZADD on successful ack-and-delete) is what makes this script
+/// idempotent under client-side retry: if the relocator's first EVALSHA
+/// committed server-side but its reply was lost, the client's retry sees
+/// XACKDEL return -1 (or 0) for the already-removed id and correctly skips
+/// the ZADD — preventing a duplicate scheduled retry.
+///
+/// KEYS[1] = stream, KEYS[2] = delayed
+/// ARGV[1] = group, ARGV[2] = entry_id, ARGV[3] = run_at_ms, ARGV[4] = encoded_bytes
 pub(crate) const RETRY_RESCHEDULE_SCRIPT: &str = r#"
--- KEYS[1] = stream, KEYS[2] = delayed
--- ARGV[1] = group, ARGV[2] = entry_id, ARGV[3] = run_at_ms, ARGV[4] = encoded_bytes
-redis.call('XACKDEL', KEYS[1], ARGV[1], 'IDS', 1, ARGV[2])
-redis.call('ZADD', KEYS[2], tonumber(ARGV[3]), ARGV[4])
-return 1
+local result = redis.call('XACKDEL', KEYS[1], ARGV[1], 'IDS', 1, ARGV[2])
+local first
+if type(result) == 'table' then
+  first = tonumber(result[1])
+else
+  first = tonumber(result)
+end
+if first == 1 then
+  redis.call('ZADD', KEYS[2], tonumber(ARGV[3]), ARGV[4])
+  return 1
+end
+return 0
 "#;
 
 /// Replays up to ARGV[1] entries from the DLQ stream (KEYS[1]) back into the
@@ -52,6 +69,17 @@ while i <= #ARGV do
   i = i + 2
 end
 return replayed
+"#;
+
+/// Releases the lock at KEYS[1] only if its current value is ARGV[1] — i.e.
+/// only if we still hold it. A paused promoter that wakes up after its lease
+/// expired and another holder took over must NOT delete the new holder's
+/// lock. Returns 1 if released, 0 if held by someone else (or absent).
+pub(crate) const RELEASE_LOCK_SCRIPT: &str = r#"
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0
 "#;
 
 pub(crate) const ACQUIRE_LOCK_SCRIPT: &str = r#"
@@ -310,6 +338,15 @@ pub(crate) fn eval_acquire_lock_args(
     ]
 }
 
+pub(crate) fn eval_release_lock_args(script: &str, lock_key: &str, holder_id: &str) -> Vec<Value> {
+    vec![
+        Value::from(script),
+        Value::from(1_i64),
+        Value::from(lock_key),
+        Value::from(holder_id),
+    ]
+}
+
 pub(crate) fn evalsha_acquire_lock_args(
     sha: &str,
     lock_key: &str,
@@ -323,8 +360,4 @@ pub(crate) fn evalsha_acquire_lock_args(
         Value::from(holder_id),
         Value::from(ttl_secs as i64),
     ]
-}
-
-pub(crate) fn del_args(key: &str) -> Vec<Value> {
-    vec![Value::from(key)]
 }
