@@ -8,7 +8,7 @@ No engine code yet. What exists:
 
 - `prd/prd.md` — product requirements, the source of truth for product intent.
 - `benchmarks/baseline-bullmq.md` — measured BullMQ baseline on this host. **The numbers ChasquiMQ has to beat live here.** Read it before making any perf-related design choice.
-- `benchmarks/runs/` — raw logs from the baseline runs.
+- `benchmarks/runs/` (gitignored) — raw logs land here locally; only the summary `.md` files are committed.
 
 The upstream BullMQ benchmark suite is **not vendored** — it's cloned at `~/Projects/experiments/bullmq-bench` (sibling to this repo). Treat it as external; don't edit it.
 

@@ -85,9 +85,7 @@ cargo run -p chasquimq-bench --release -- --repeats 3
 
 ## Raw data
 
-- `benchmarks/runs/chasquimq-phase1-2026-05-01-final.log` — canonical 3-repeat sweep (warmed Redis).
-- `benchmarks/runs/chasquimq-phase1-2026-05-01.log` — first sweep (cold-start variant).
-- `benchmarks/runs/spike-2026-04-30.log` — Phase 0b spike pool-size sweep.
+Raw run logs are local-only (`benchmarks/runs/` is gitignored). The summary tables above are the committed record.
 
 ## Post-critique refactor (2026-05-01, same day)
 
@@ -109,7 +107,6 @@ Re-bench (3 repeats, post-refactor):
 
 The refactor is **correctness-positive but not a perf win**: numbers are within variance of the pre-critique run. Likely reason: Redis is the bottleneck, not the worker channel. `async-channel` + lock-free recv adds ~the same overhead per dispatch as the previous `Mutex<mpsc>` approach because contention was rare (workers spend most of their time in the handler, not in recv). Keeping the refactor anyway: the correctness wins (proper retry on ack/DLQ failure, no per-job task allocation, real multi-receiver semantics) outweigh the lack of headline movement, and headline is still ≥3× on both gates.
 
-Raw log: `benchmarks/runs/chasquimq-phase1-2026-05-01-postcritique.log`.
 
 ## Post-critique 2 fixes (2026-05-01)
 
@@ -131,7 +128,7 @@ Re-bench (3 repeats, post-fixes-2):
 
 5-repeat run on `worker-concurrent` alone: 342,418 mean, range 245k–440k. The wide variance is intrinsic to a 10k-job bench window on this single-host setup, not a regression — pre-fix runs showed the same range character. Headline claim (≥3× on `queue-add-bulk` and `worker-concurrent`) holds.
 
-The fixes are correctness wins (#1 prevents DLQ duplicates, #2 prevents reader stalls, #3 closes an OOM vector, #4 reduces per-job allocations) without measurable perf regression. Raw log: `benchmarks/runs/chasquimq-phase1-2026-05-01-postcritique2.log`.
+The fixes are correctness wins (#1 prevents DLQ duplicates, #2 prevents reader stalls, #3 closes an OOM vector, #4 reduces per-job allocations) without measurable perf regression.
 
 ## Bench harness improvements (2026-05-01)
 
@@ -163,7 +160,6 @@ Headline gates:
 2. `worker-concurrent` ≥ 3× BullMQ → **9.17×** ✅, well above 5× target
 3. Worker CPU efficiency: ChasquiMQ does 291k jobs/CPU-second on `worker-concurrent`; BullMQ-equivalent CPU not measured but per-job efficiency is at minimum 9× better given throughput parity is 9.17× at comparable single-host configurations.
 
-Raw log: `benchmarks/runs/chasquimq-phase1-2026-05-01-improved-bench.log`.
 
 ## Methodology limitations (still open)
 

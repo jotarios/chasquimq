@@ -10,4 +10,5 @@ Cargo.lock.bak
 # Spike (throwaway, not part of the engine; keep results)
 /spike/target
 
-# Bench logs are KEPT in benchmarks/runs/ — do not ignore.
+# Bench run logs are local-only; summaries live in benchmarks/*.md
+benchmarks/runs/

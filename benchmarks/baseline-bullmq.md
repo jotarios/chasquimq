@@ -99,12 +99,7 @@ The PRD also calls for **≥50% less worker CPU** under load. We need to capture
 
 ## Raw data
 
-Logs are in `benchmarks/runs/`:
-- `baseline-no-pipeline.log` — first standalone no-pipeline run
-- `baseline-pipelined.log` — first standalone pipelined run
-- `repeats.log` — 3 alternating no-pipeline / pipelined runs
-
-The `bullmq-bench` checkout lives at `~/Projects/experiments/bullmq-bench` (sibling to this repo, not vendored).
+Raw run logs are local-only (`benchmarks/runs/` is gitignored). The summary numbers above are the committed record. The `bullmq-bench` checkout lives at `~/Projects/experiments/bullmq-bench` (sibling to this repo, not vendored).
 
 ## Re-running
 
