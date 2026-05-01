@@ -6,7 +6,7 @@ ChasquiMQ is a Rust-native job queue / message broker built on **Redis**, Messag
 
 Named after the *chasquis* — the relay runners of the Inca road system who carried messages across the Andes.
 
-> **Status:** Phase 1 (MVP). Producer, consumer pool, batched acks, DLQ, graceful shutdown — usable, but the public API is pre-1.0 and will change.
+> **Status:** Phase 2 in progress. Phase 1 (MVP) shipped: producer, consumer pool, batched acks, DLQ, graceful shutdown. Phase 2 slice 1 lands delayed jobs (`add_in` / `add_at` / `add_in_bulk`) backed by Redis Sorted Sets and a leader-elected promoter. Public API is still pre-1.0 and will change.
 
 ## Headline numbers
 
@@ -61,6 +61,12 @@ async fn main() -> anyhow::Result<()> {
         subject: "hello from chasqui".into(),
     }).await?;
 
+    // Schedule a job for one minute from now:
+    producer.add_in(std::time::Duration::from_secs(60), EmailJob {
+        to: "grace@example.com".into(),
+        subject: "scheduled hi".into(),
+    }).await?;
+
     Ok(())
 }
 ```
@@ -90,6 +96,20 @@ async fn main() -> anyhow::Result<()> {
 
 Failed jobs are retried up to `max_attempts` times; exhausted jobs land in the `<queue>:dlq` stream with their failure reason.
 
+### Delayed jobs
+
+`Producer::add_in(delay, payload)` and `Producer::add_at(when, payload)` schedule jobs to fire later. Bulk variant is `Producer::add_in_bulk`. A `delay` of zero (or `add_at` in the past) fast-paths straight to the stream.
+
+By default any `Consumer` with `delayed_enabled = true` (the default) runs an embedded promoter that moves due jobs from the delayed sorted set into the stream. Multiple consumers coordinate via a per-queue lock so only one promotes per tick. For producer-only deployments where no consumer runs locally, run a standalone [`Promoter`](chasquimq/examples/standalone_promoter.rs).
+
+`max_delay_secs` on `ProducerConfig` (default 30 days) caps how far in the future jobs can be scheduled. Set to `0` to disable the cap.
+
+### Operational notes
+
+- **Stream MAXLEN trim is approximate.** Both Phase 1 and the delayed-job promoter use `XADD MAXLEN ~ N`. If consumers fall sustainedly behind producers, entries near the cap can be trimmed before they are read. Monitor `XLEN` against your consume rate; the silent failure mode is "job vanished."
+- **No `cancel_delayed` in v1.** Once `add_in`/`add_at` returns, there is no API to undo the schedule. Tracked for Phase 3.
+- **Key format uses Redis Cluster hash tags** — every chasqui key looks like `{chasqui:<queue>}:<suffix>`. This is a pre-1.0 breaking change from earlier preview builds; redeploying against a Redis instance that holds old-format keys requires draining or manually renaming. New deployments are unaffected.
+
 ## Feature comparison
 
 ChasquiMQ is perf-first and Phase 1; the table is honest about what isn't there yet. See the [Roadmap](#roadmap) for what's coming.
@@ -106,7 +126,7 @@ ChasquiMQ is perf-first and Phase 1; the table is honest about what isn't there 
 | Idempotent produce (`IDMP`)   | ✓                | —      | —      | —       |
 | Dead-letter queue             | ✓                | ✓      | ✓      | —       |
 | Graceful shutdown             | ✓                | ✓      | ✓      | ✓       |
-| Delayed jobs                  | Phase 2          | ✓      | ✓      | —       |
+| Delayed jobs                  | ✓                | ✓      | ✓      | —       |
 | Retries (exponential backoff) | basic (Phase 1)  | ✓      | ✓      | ✓       |
 | Priorities                    | Phase 2+         | ✓      | ✓      | —       |
 | Rate limiter                  | Phase 2+         | ✓      | ✓      | —       |
@@ -133,8 +153,8 @@ spike/             exploratory throwaway code (not part of the engine)
 
 ## Roadmap
 
-- **Phase 1 (current):** Producer, consumer pool, batched pipelined acks, DLQ, graceful shutdown. ✅
-- **Phase 2:** Delayed jobs (sorted sets), automatic retries with exponential backoff, richer DLQ tooling.
+- **Phase 1:** Producer, consumer pool, batched pipelined acks, DLQ, graceful shutdown. ✅
+- **Phase 2 (in progress):** Delayed jobs via sorted sets + Lua promoter ✅. Next: exponential retry backoff, richer DLQ tooling.
 - **Phase 3:** Node.js bindings via NAPI-RS — JS handlers driven by the Rust engine.
 - **Phase 4:** Python bindings via PyO3, CLI monitoring dashboard.
 

@@ -22,20 +22,7 @@ Deferred work tracked outside of phase plans. Each entry: what, why, pros, cons,
 - **Context:** Methodology critique #7.
 - **Depends on / blocked by:** None.
 
-### External-process bench harness (carry-over from earlier TODO entry)
-
-See "External-process bench harness" entry below — already captured.
-
 ## Phase 2
-
-### `Producer::add_with_id(id, payload)`
-
-- **What:** Add a `Producer::add_with_id(id: JobId, payload: T) -> Result<JobId>` method that uses the caller-supplied id as both the in-payload `Job.id` and the `IDMP <producer-id> <id>` idempotent-id, instead of generating a fresh ULID internally.
-- **Why:** Phase 1's `Producer::add(payload)` generates the ULID internally. If a user wraps `add()` in their own retry loop (above the library), the second call gets a fresh ULID and Redis-side `IDMP` dedup does not fire — the job is double-published. `add_with_id` lets the user hold the id stable across retries.
-- **Pros:** Closes the user-driven retry loophole. ~30 LOC + one test. Composes cleanly with the existing `Producer::add` (which can call into `add_with_id` internally with a generated id).
-- **Cons:** Two API entry points instead of one. Caller must know not to reuse ids across logically-different jobs. Marginal Phase 1 value because no internal retry loop exists yet.
-- **Context:** Phase 1 review surfaced the gap. Phase 2 introduces engine-side retries, which makes user-driven retry less common — but power users will still want the escape hatch.
-- **Depends on / blocked by:** Phase 1 must ship `Producer::add` first. No Redis-side dependency.
 
 ### Multi-stream sharding decision
 
@@ -45,6 +32,51 @@ See "External-process bench harness" entry below — already captured.
 - **Cons:** Significant API and implementation complexity (partitioning, rebalance, ordering guarantees within partition vs. across partitions). Doubles or triples the consumer code. Changes the user's mental model.
 - **Context:** Outside-voice review raised this as a likely necessity given single-host contention. Phase 1 spike is the deciding signal: if we miss target on `worker-concurrent` AND flamegraph shows time spent in Redis-side waits (not ChasquiMQ code), sharding is on the table.
 - **Depends on / blocked by:** Phase 1 spike results. Phase 1 final benchmark.
+
+### Delayed-job ZSET memory encoding bench
+
+- **What:** Benchmark the current "store full MessagePack-encoded `Job<T>` as ZSET member" approach against the alternative of storing `<26-byte ULID>` as the member with payload bytes in a companion `HSET` keyed by ULID. Compare memory per delayed job, promotion throughput, and `add_in` latency.
+- **Why:** Redis ZSET encoding flips from compact ziplist to per-entry skiplist once any member exceeds `zset-max-ziplist-value` (default 64 bytes). Most non-trivial jobs cross that threshold, so today's encoding is permanently in skiplist mode. The id-plus-hash split keeps small queues in ziplist but adds a round trip on insert and an `HGET`/`HDEL` pair inside the promote script.
+- **Pros:** Decision-quality data for a possible Phase 3 encoding switch; current approach can stand as documented if numbers favor it.
+- **Cons:** ~200 LOC of harness + analysis. Will land after the basic delayed-jobs bench scenarios.
+- **Depends on / blocked by:** Phase 2 slice 1 must be merged.
+
+### Cancel / reschedule a delayed job
+
+- **What:** `Producer::cancel_delayed(job_id)` and `Producer::reschedule(job_id, new_run_at)` for jobs already in the delayed sorted set.
+- **Why:** Real apps need "user changed their mind, undo the scheduled email," "support is intervening, fire it now," etc. v1 of delayed jobs intentionally omitted these to ship faster.
+- **Pros:** Closes a feature parity gap with BullMQ. Required for any product that exposes delayed scheduling to end-users.
+- **Cons:** Requires a companion `id → bytes` hash so we can locate by id without scanning the ZSET. Touches the producer surface and the promote script. Forces a decision on the encoding question above.
+- **Context:** Outside-voice review flagged this as a likely follow-up.
+- **Depends on / blocked by:** ZSET memory encoding bench. Phase 3 work.
+
+### Promoter observability surface
+
+- **What:** Counters and gauges so operators can answer "is the promoter healthy?":
+  - `chasquimq_promoter_promoted_total` — counter of jobs promoted per tick.
+  - `chasquimq_delayed_zset_depth` — gauge from `ZCARD <delayed-key>`.
+  - `chasquimq_promoter_lag_ms` — `now - min_score_in_zset`; tells you how late you are.
+- **Why:** Today the only signal is "is the lock held? and is ZCARD trending down?" via `redis-cli`. Production deployments need machine-readable metrics.
+- **Pros:** One-shot Prometheus integration, ~80 LOC.
+- **Cons:** Adds a `metrics` crate dependency or a metrics-trait abstraction; bikeshed risk.
+- **Context:** Outside-voice review surfaced this. Phase 2.5 work — after retry-with-backoff lands.
+- **Depends on / blocked by:** None.
+
+### Strict-MAXLEN policy for queues that can't tolerate eviction
+
+- **What:** A `ConsumerConfig` / `ProducerConfig` knob that switches stream `XADD` from `MAXLEN ~ N` (approximate) to `MAXLEN = N` (strict), guaranteeing entries aren't evicted before consumers read them.
+- **Why:** Both Phase 1 and the delayed-job promoter today use approximate trim. If consumers fall behind producers, near-cap entries can be silently lost. Strict trim costs more per `XADD` (Redis must do exact bookkeeping) but eliminates the silent-loss class of bug.
+- **Pros:** Correctness option for use cases that prefer back-pressure to data loss.
+- **Cons:** Per-`XADD` cost; not a fit for the throughput-first default. Adds a dimension to the test matrix.
+- **Depends on / blocked by:** None.
+
+### Fencing tokens for leader election
+
+- **What:** Redlock-style fencing tokens so a paused leader can't run a stale tick after another leader takes over.
+- **Why:** Today the script's atomicity prevents double-*promotion*, but a long-paused leader can do a tick of duplicated *work* (one EVALSHA worth). Acceptable in normal operation; unacceptable if duplicated work has side effects (it doesn't here, but might once we add metrics emission).
+- **Pros:** Tightens the correctness story for distributed deployments.
+- **Cons:** Real fencing requires monotonic per-key counters (e.g., `INCR`) and including the token in every Redis op the leader does. Significant complexity for a problem we haven't measured.
+- **Depends on / blocked by:** Need a measured incident or metric showing duplicated-work is hurting.
 
 ### External-process bench harness
 

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository status
 
-Phase 1 (MVP) is shipped: Cargo workspace with `chasquimq` (engine) and `chasquimq-bench` (harness). API is pre-1.0 — breaking changes allowed but must be flagged in the commit (see [Commit conventions](#commit-conventions) below).
+Phase 2 in progress. Phase 1 (MVP) shipped — Cargo workspace with `chasquimq` (engine) and `chasquimq-bench` (harness). Phase 2 slice 1 has landed delayed jobs (`add_in` / `add_at` / `add_in_bulk` on `Producer`, plus a standalone `Promoter` with `SET NX EX` leader election and a Lua promote script that uses `redis.call('TIME')` for clock-skew immunity). Key format migrated to Redis Cluster hash-tag form (`{chasqui:<queue>}:<suffix>`). API is pre-1.0 — breaking changes allowed but must be flagged in the commit (see [Commit conventions](#commit-conventions) below).
 
 Key files for context:
 
