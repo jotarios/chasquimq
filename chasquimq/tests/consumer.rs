@@ -129,6 +129,57 @@ fn init_tracing() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires REDIS_URL"]
+async fn busygroup_is_idempotent() {
+    init_tracing();
+    let admin = admin().await;
+    let queue = "c_busygroup";
+    flush_all(&admin, queue).await;
+
+    let producer: Producer<Sample> = Producer::connect(&redis_url(), producer_cfg(queue))
+        .await
+        .expect("connect producer");
+    producer.add(Sample { n: 0 }).await.expect("add");
+
+    let counter = Arc::new(AtomicUsize::new(0));
+
+    for run in 0..2 {
+        let counter_h = counter.clone();
+        let consumer: Consumer<Sample> =
+            Consumer::new(redis_url(), consumer_cfg(queue, &format!("c{run}")));
+        let shutdown = CancellationToken::new();
+        let shutdown_clone = shutdown.clone();
+        let join = tokio::spawn(async move {
+            consumer
+                .run(
+                    move |_job| {
+                        let counter = counter_h.clone();
+                        async move {
+                            counter.fetch_add(1, Ordering::SeqCst);
+                            Ok(())
+                        }
+                    },
+                    shutdown_clone,
+                )
+                .await
+        });
+        if run == 0 {
+            wait_until(Duration::from_secs(5), || {
+                let counter = counter.clone();
+                async move { counter.load(Ordering::SeqCst) == 1 }
+            })
+            .await;
+        } else {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+        shutdown.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(5), join).await;
+    }
+
+    let _: () = admin.quit().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires REDIS_URL"]
 async fn two_consumers_split_work() {
     init_tracing();
     let admin = admin().await;

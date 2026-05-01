@@ -275,6 +275,71 @@ async fn panic_treated_as_err() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires REDIS_URL"]
+async fn malformed_entry_without_payload_field_lands_in_dlq() {
+    let admin = admin().await;
+    let queue = "dlq_malformed";
+    flush_all(&admin, queue).await;
+
+    let main_key = stream_key(queue);
+    let _: Value = admin
+        .custom(
+            CustomCommand::new_static("XADD", ClusterHash::FirstKey, false),
+            vec![
+                Value::from(main_key.as_str()),
+                Value::from("*"),
+                Value::from("not_d"),
+                Value::from("nope"),
+            ],
+        )
+        .await
+        .expect("XADD with wrong field name");
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_h = calls.clone();
+    let consumer: Consumer<Sample> = Consumer::new(redis_url(), consumer_cfg(queue, "c1", 3));
+    let shutdown = CancellationToken::new();
+    let shutdown_clone = shutdown.clone();
+    let join = tokio::spawn(async move {
+        consumer
+            .run(
+                move |_: Job<Sample>| {
+                    let calls = calls_h.clone();
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    }
+                },
+                shutdown_clone,
+            )
+            .await
+    });
+
+    let dlq = dlq_key(queue);
+    wait_until(Duration::from_secs(10), || {
+        let admin = admin.clone();
+        let main_key = main_key.clone();
+        let dlq = dlq.clone();
+        async move {
+            xlen(&admin, &dlq).await >= 1
+                && xpending_count(&admin, &main_key, "default").await == 0
+                && xlen(&admin, &main_key).await == 0
+        }
+    })
+    .await;
+
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "handler must never see a malformed entry"
+    );
+
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), join).await;
+    let _: () = admin.quit().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires REDIS_URL"]
 async fn poison_message_lands_in_dlq() {
     let admin = admin().await;
     let queue = "dlq_poison";

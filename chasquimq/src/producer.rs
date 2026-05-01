@@ -94,7 +94,7 @@ impl<T: Serialize> Producer<T> {
             encoded.push((id, bytes));
         }
 
-        let client = self.pool.next();
+        let client = self.pool.next_connected();
         let pipeline = client.pipeline();
         let cmd = CustomCommand::new_static("XADD", ClusterHash::FirstKey, false);
         for (iid, bytes) in &encoded {
@@ -115,7 +115,7 @@ impl<T: Serialize> Producer<T> {
     }
 
     async fn xadd(&self, iid: &str, bytes: Bytes) -> Result<()> {
-        let client = self.pool.next();
+        let client = self.pool.next_connected();
         let args = build_xadd_args(
             self.stream_key.as_ref(),
             self.producer_id.as_ref(),

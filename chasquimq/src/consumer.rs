@@ -165,7 +165,35 @@ where
             continue;
         }
 
-        for entry in entries {
+        for shape in entries {
+            let entry = match shape {
+                EntryShape::Ok(e) => e,
+                EntryShape::MalformedWithId { id, reason } => {
+                    tracing::warn!(entry_id = %id, reason, "malformed stream entry; routing to DLQ");
+                    let placeholder = ParsedEntry {
+                        id,
+                        payload: Bytes::new(),
+                        delivery_count: 0,
+                    };
+                    if let Err(e) = move_to_dlq_with_retry(
+                        &dlq_writer,
+                        &dlq_key,
+                        &stream_key,
+                        &cfg.group,
+                        &placeholder,
+                    )
+                    .await
+                    {
+                        tracing::error!(entry_id = %placeholder.id, error = %e, "malformed entry DLQ relocation failed permanently");
+                    }
+                    continue;
+                }
+                EntryShape::Unrecoverable => {
+                    tracing::error!("XREADGROUP returned an entry with no recoverable id; cannot DLQ — skipping");
+                    continue;
+                }
+            };
+
             let attempt = entry.delivery_count.saturating_add(1);
             if attempt as u32 > cfg.max_attempts {
                 if let Err(e) =
@@ -239,7 +267,17 @@ struct ParsedEntry {
     delivery_count: i64,
 }
 
-fn parse_xreadgroup_response(value: &Value) -> Vec<ParsedEntry> {
+#[derive(Debug)]
+enum EntryShape {
+    Ok(ParsedEntry),
+    MalformedWithId {
+        id: StreamEntryId,
+        reason: &'static str,
+    },
+    Unrecoverable,
+}
+
+fn parse_xreadgroup_response(value: &Value) -> Vec<EntryShape> {
     let outer = match value {
         Value::Array(items) => items,
         _ => return Vec::new(),
@@ -252,24 +290,40 @@ fn parse_xreadgroup_response(value: &Value) -> Vec<ParsedEntry> {
         Value::Array(items) => items,
         _ => return Vec::new(),
     };
-    entries.iter().filter_map(parse_entry).collect()
+    entries.iter().map(parse_entry).collect()
 }
 
-fn parse_entry(value: &Value) -> Option<ParsedEntry> {
+fn parse_entry(value: &Value) -> EntryShape {
     let items = match value {
         Value::Array(items) => items,
-        _ => return None,
+        _ => return EntryShape::Unrecoverable,
     };
-    let id = match items.first()? {
-        Value::String(s) => s.to_string(),
-        Value::Bytes(b) => String::from_utf8(b.to_vec()).ok()?,
-        _ => return None,
+    let id = match items.first() {
+        Some(Value::String(s)) => s.to_string(),
+        Some(Value::Bytes(b)) => match String::from_utf8(b.to_vec()) {
+            Ok(s) => s,
+            Err(_) => return EntryShape::Unrecoverable,
+        },
+        _ => return EntryShape::Unrecoverable,
     };
-    let fields = match items.get(1)? {
-        Value::Array(items) => items,
-        _ => return None,
+    let fields = match items.get(1) {
+        Some(Value::Array(items)) => items,
+        _ => {
+            return EntryShape::MalformedWithId {
+                id,
+                reason: "fields not an array",
+            };
+        }
     };
-    let payload = extract_payload_field(fields)?;
+    let payload = match extract_payload_field(fields) {
+        Some(b) => b,
+        None => {
+            return EntryShape::MalformedWithId {
+                id,
+                reason: "missing or non-bytes payload field",
+            };
+        }
+    };
     let delivery_count = items
         .get(3)
         .and_then(|v| match v {
@@ -277,7 +331,7 @@ fn parse_entry(value: &Value) -> Option<ParsedEntry> {
             _ => None,
         })
         .unwrap_or(0);
-    Some(ParsedEntry {
+    EntryShape::Ok(ParsedEntry {
         id,
         payload,
         delivery_count,
