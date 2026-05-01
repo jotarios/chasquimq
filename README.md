@@ -10,7 +10,7 @@ Named after the *chasquis* — the relay runners of the Inca road system who car
 
 ## Headline numbers
 
-On Apple M3, Redis 8.6 (loopback): **3.20× BullMQ** on bulk produce, **9.17× BullMQ** on concurrent consume.
+On Apple M3, Redis 8.6 (loopback): **3.18× BullMQ** on bulk produce, **8.71× BullMQ** on concurrent consume. Phase 2 also lands delayed jobs at 705k/s end-to-end and an exponential-backoff retry path at 113k/s.
 
 Full numbers, methodology, caveats, and reproduction commands live in [`benchmarks/README.md`](benchmarks/).
 
