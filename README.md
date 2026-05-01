@@ -94,7 +94,18 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-Failed jobs are retried up to `max_attempts` times; exhausted jobs land in the `<queue>:dlq` stream with their failure reason.
+Failed jobs are retried up to `max_attempts` times with exponential backoff; exhausted jobs land in the `<queue>:dlq` stream with their failure reason.
+
+### Retry semantics
+
+When a handler returns `Err` (or panics), the worker:
+1. Encodes the job with `attempt += 1` and computes `run_at_ms = now + backoff(attempt)`.
+2. Atomically (via Lua) `XACKDEL`s the original stream entry and `ZADD`s the re-encoded job onto the queue's delayed set.
+3. The promoter promotes it back into the stream when due. Next handler invocation sees `job.attempt` incremented.
+
+If `next_attempt >= max_attempts`, the entry goes straight to DLQ instead. Backoff is `min(initial * multiplier^(attempt-1), max) + jitter`. Defaults: `initial=100ms`, `multiplier=2`, `max=30s`, `jitter=100ms`. Configure via `ConsumerConfig::retry: RetryConfig`.
+
+The classic `XREADGROUP CLAIM` mechanism (Redis 8.4 idle-pending reads) remains the safety net: if a worker dies mid-handler before the retry path runs, CLAIM re-delivers the entry on the next read, and the reader compares the in-payload `attempt` counter against `delivery_count` to detect retry-exhaustion regardless of which path produced the count.
 
 ### Delayed jobs
 
@@ -129,7 +140,7 @@ ChasquiMQ is perf-first and Phase 1; the table is honest about what isn't there 
 | Dead-letter queue             | ✓                | ✓      | ✓      | —       |
 | Graceful shutdown             | ✓                | ✓      | ✓      | ✓       |
 | Delayed jobs                  | ✓                | ✓      | ✓      | —       |
-| Retries (exponential backoff) | basic (Phase 1)  | ✓      | ✓      | ✓       |
+| Retries (exponential backoff) | ✓                | ✓      | ✓      | ✓       |
 | Priorities                    | Phase 2+         | ✓      | ✓      | —       |
 | Rate limiter                  | Phase 2+         | ✓      | ✓      | —       |
 | Pause/Resume                  | Phase 2+         | ✓      | ✓      | —       |
@@ -156,7 +167,7 @@ spike/             exploratory throwaway code (not part of the engine)
 ## Roadmap
 
 - **Phase 1:** Producer, consumer pool, batched pipelined acks, DLQ, graceful shutdown. ✅
-- **Phase 2 (in progress):** Delayed jobs via sorted sets + Lua promoter ✅. Next: exponential retry backoff, richer DLQ tooling.
+- **Phase 2 (in progress):** Delayed jobs via sorted sets + Lua promoter ✅. Exponential retry backoff via delayed-ZSET re-scheduling ✅. Next: richer DLQ tooling.
 - **Phase 3:** Node.js bindings via NAPI-RS — JS handlers driven by the Rust engine.
 - **Phase 4:** Python bindings via PyO3, CLI monitoring dashboard.
 

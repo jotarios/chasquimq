@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository status
 
-Phase 2 in progress. Phase 1 (MVP) shipped — Cargo workspace with `chasquimq` (engine) and `chasquimq-bench` (harness). Phase 2 slice 1 has landed delayed jobs (`add_in` / `add_at` / `add_in_bulk` on `Producer`, plus a standalone `Promoter` with `SET NX EX` leader election and a Lua promote script that uses `redis.call('TIME')` for clock-skew immunity). Key format migrated to Redis Cluster hash-tag form (`{chasqui:<queue>}:<suffix>`). API is pre-1.0 — breaking changes allowed but must be flagged in the commit (see [Commit conventions](#commit-conventions) below).
+Phase 2 in progress. Phase 1 (MVP) shipped. Phase 2 slice 1 landed delayed jobs (`add_in` / `add_at` / `add_in_bulk` on `Producer`, plus a standalone `Promoter` with `SET NX EX` leader election and a Lua promote script that uses `redis.call('TIME')` for clock-skew immunity). Slice 2 landed exponential retry backoff via delayed-ZSET re-scheduling — handler errors ack-and-reschedule atomically with `attempt+1` carried in the encoded payload, eliminating the fixed-30s `claim_min_idle_ms` retry interval; the CLAIM path remains as the safety net for crashed workers. Key format migrated to Redis Cluster hash-tag form (`{chasqui:<queue>}:<suffix>`). Cargo workspace: `chasquimq` (engine) and `chasquimq-bench` (harness). API is pre-1.0 — breaking changes allowed but must be flagged in the commit (see [Commit conventions](#commit-conventions) below).
 
 Key files for context:
 
@@ -53,7 +53,7 @@ Pick one client and stick with it across the engine. `redis-rs` (with `tokio-com
 Stay inside the current phase unless the user asks to expand. Building Phase 2 features while Phase 1 is incomplete is scope creep.
 
 - **Phase 1 (MVP):** Producer (`XADD` of MessagePack-serialized `Job` struct), tokio-based consumer pool (`XREADGROUP` batches dispatched to async workers), batched pipelined `XACK`. Out of scope: delayed jobs, retries, any non-Rust SDK.
-- **Phase 2:** Delayed jobs (sorted sets), automatic retries with exponential backoff, dead-letter queue.
+- **Phase 2:** Delayed jobs (sorted sets) ✅, automatic retries with exponential backoff ✅, richer DLQ tooling.
 - **Phase 3:** Node.js bindings via NAPI-RS — JS workers process jobs pulled by the Rust engine.
 - **Phase 4:** Python bindings via PyO3, CLI monitoring dashboard.
 
