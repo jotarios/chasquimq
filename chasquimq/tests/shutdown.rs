@@ -1,7 +1,7 @@
+use chasquimq::Job;
 use chasquimq::config::{ConsumerConfig, ProducerConfig};
 use chasquimq::consumer::Consumer;
 use chasquimq::producer::{Producer, stream_key};
-use chasquimq::Job;
 use fred::clients::Client;
 use fred::interfaces::ClientLike;
 use fred::prelude::Config;
@@ -29,8 +29,8 @@ async fn admin() -> Client {
 }
 
 async fn flush_all(admin: &Client, queue: &str) {
-    for suffix in ["stream", "dlq"] {
-        let key = format!("chasqui:{queue}:{suffix}");
+    for suffix in ["stream", "dlq", "delayed", "promoter:lock"] {
+        let key = format!("{{chasqui:{queue}}}:{suffix}");
         let _: Value = admin
             .custom(
                 CustomCommand::new_static("DEL", ClusterHash::FirstKey, false),

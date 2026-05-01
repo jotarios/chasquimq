@@ -69,7 +69,10 @@ async fn flush_with_retry(client: &Client, cfg: &AckFlusherConfig, ids: &[Stream
             }
         }
     }
-    tracing::error!(count = ids.len(), "xackdel batch failed after retries; entries will reclaim via CLAIM (handler may run again)");
+    tracing::error!(
+        count = ids.len(),
+        "xackdel batch failed after retries; entries will reclaim via CLAIM (handler may run again)"
+    );
 }
 
 async fn flush_once(

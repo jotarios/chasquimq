@@ -72,7 +72,10 @@ where
         }
 
         for shape in entries {
-            if dispatch_one::<T>(shape, &cfg, &job_tx, &dlq_tx).await.is_break() {
+            if dispatch_one::<T>(shape, &cfg, &job_tx, &dlq_tx)
+                .await
+                .is_break()
+            {
                 return Ok(());
             }
         }
@@ -109,7 +112,9 @@ where
             return DispatchFlow::Continue;
         }
         EntryShape::Unrecoverable => {
-            tracing::error!("XREADGROUP returned an entry with no recoverable id; cannot DLQ — skipping");
+            tracing::error!(
+                "XREADGROUP returned an entry with no recoverable id; cannot DLQ — skipping"
+            );
             return DispatchFlow::Continue;
         }
     };

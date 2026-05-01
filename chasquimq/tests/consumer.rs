@@ -28,8 +28,8 @@ async fn admin() -> Client {
 }
 
 async fn flush_all(admin: &Client, queue: &str) {
-    for suffix in ["stream", "dlq"] {
-        let key = format!("chasqui:{queue}:{suffix}");
+    for suffix in ["stream", "dlq", "delayed", "promoter:lock"] {
+        let key = format!("{{chasqui:{queue}}}:{suffix}");
         let _: Value = admin
             .custom(
                 CustomCommand::new_static("DEL", ClusterHash::FirstKey, false),
@@ -238,9 +238,7 @@ async fn two_consumers_split_work() {
     wait_until(Duration::from_secs(15), || {
         let count_a = count_a.clone();
         let count_b = count_b.clone();
-        async move {
-            count_a.load(Ordering::SeqCst) + count_b.load(Ordering::SeqCst) == 1_000
-        }
+        async move { count_a.load(Ordering::SeqCst) + count_b.load(Ordering::SeqCst) == 1_000 }
     })
     .await;
 
@@ -303,8 +301,7 @@ async fn consumer_happy_path_acks_all() {
         let admin = admin.clone();
         let key = key.clone();
         async move {
-            xlen(&admin, &key).await == 0
-                && xpending_count(&admin, &key, "default").await == 0
+            xlen(&admin, &key).await == 0 && xpending_count(&admin, &key, "default").await == 0
         }
     })
     .await;

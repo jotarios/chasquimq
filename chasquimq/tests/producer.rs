@@ -66,7 +66,13 @@ async fn add_then_xlen_is_one() {
     let producer: Producer<Sample> = Producer::connect(&redis_url(), cfg(queue, 1_000))
         .await
         .expect("connect producer");
-    producer.add(Sample { n: 1, s: "x".into() }).await.expect("add");
+    producer
+        .add(Sample {
+            n: 1,
+            s: "x".into(),
+        })
+        .await
+        .expect("add");
 
     assert_eq!(xlen(&admin, &key).await, 1);
 
@@ -84,7 +90,12 @@ async fn add_bulk_xlen_matches_n() {
     let producer: Producer<Sample> = Producer::connect(&redis_url(), cfg(queue, 100_000))
         .await
         .expect("connect producer");
-    let payloads: Vec<Sample> = (0..1_000).map(|i| Sample { n: i, s: format!("x{i}") }).collect();
+    let payloads: Vec<Sample> = (0..1_000)
+        .map(|i| Sample {
+            n: i,
+            s: format!("x{i}"),
+        })
+        .collect();
     let ids = producer.add_bulk(payloads).await.expect("add_bulk");
     assert_eq!(ids.len(), 1_000);
 
@@ -125,15 +136,31 @@ async fn idempotent_retry_dedupes() {
         .expect("connect producer");
     let id = "stable-id-1".to_string();
     let id1 = producer
-        .add_with_id(id.clone(), Sample { n: 1, s: "x".into() })
+        .add_with_id(
+            id.clone(),
+            Sample {
+                n: 1,
+                s: "x".into(),
+            },
+        )
         .await
         .expect("add_with_id 1");
     let id2 = producer
-        .add_with_id(id.clone(), Sample { n: 1, s: "x".into() })
+        .add_with_id(
+            id.clone(),
+            Sample {
+                n: 1,
+                s: "x".into(),
+            },
+        )
         .await
         .expect("add_with_id 2");
     assert_eq!(id1, id2);
-    assert_eq!(xlen(&admin, &key).await, 1, "IDMP must dedupe identical iid");
+    assert_eq!(
+        xlen(&admin, &key).await,
+        1,
+        "IDMP must dedupe identical iid"
+    );
 
     let _: () = admin.quit().await.unwrap();
 }
@@ -154,15 +181,17 @@ async fn add_bulk_partial_encode_fails_atomically() {
     let key = stream_key(queue);
     flush_stream(&admin, &key).await;
 
-    let producer: Producer<AlwaysFailEncode> =
-        Producer::connect(&redis_url(), cfg(queue, 1_000))
-            .await
-            .expect("connect producer");
+    let producer: Producer<AlwaysFailEncode> = Producer::connect(&redis_url(), cfg(queue, 1_000))
+        .await
+        .expect("connect producer");
 
     let res = producer
         .add_bulk(vec![AlwaysFailEncode, AlwaysFailEncode])
         .await;
-    assert!(matches!(res, Err(chasquimq::Error::Encode(_))), "got {res:?}");
+    assert!(
+        matches!(res, Err(chasquimq::Error::Encode(_))),
+        "got {res:?}"
+    );
     assert_eq!(xlen(&admin, &key).await, 0, "no XADD should reach Redis");
 
     let _: () = admin.quit().await.unwrap();
@@ -179,7 +208,12 @@ async fn maxlen_trim_caps_stream_growth() {
     let producer: Producer<Sample> = Producer::connect(&redis_url(), cfg(queue, 100))
         .await
         .expect("connect producer");
-    let payloads: Vec<Sample> = (0..500).map(|i| Sample { n: i, s: "x".into() }).collect();
+    let payloads: Vec<Sample> = (0..500)
+        .map(|i| Sample {
+            n: i,
+            s: "x".into(),
+        })
+        .collect();
     let _ = producer.add_bulk(payloads).await.expect("add_bulk 500");
 
     let len = xlen(&admin, &key).await;
@@ -187,10 +221,7 @@ async fn maxlen_trim_caps_stream_growth() {
         len <= 200,
         "approximate trim allows overshoot but should be near cap, got {len}"
     );
-    assert!(
-        len >= 100,
-        "should retain at least the cap, got {len}"
-    );
+    assert!(len >= 100, "should retain at least the cap, got {len}");
 
     let _: () = admin.quit().await.unwrap();
 }

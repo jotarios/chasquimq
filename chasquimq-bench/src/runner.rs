@@ -24,12 +24,7 @@ pub async fn flush_queue(admin: &Client, queue: &str) {
     }
 }
 
-pub async fn run_scenario(
-    name: &str,
-    redis_url: &str,
-    queue: &str,
-    scale: u32,
-) -> ScenarioReport {
+pub async fn run_scenario(name: &str, redis_url: &str, queue: &str, scale: u32) -> ScenarioReport {
     match name {
         "queue-add" => scenarios::queue_add::run(redis_url, queue, scale).await,
         "queue-add-bulk" => scenarios::queue_add_bulk::run(redis_url, queue, scale).await,

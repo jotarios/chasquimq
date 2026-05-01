@@ -120,7 +120,11 @@ async fn relocate_once(
         relocate.reason.as_str(),
         relocate.reason.detail(),
     );
-    let xackdel_args = xackdel_args(&cfg.stream_key, &cfg.group, std::slice::from_ref(&relocate.entry_id));
+    let xackdel_args = xackdel_args(
+        &cfg.stream_key,
+        &cfg.group,
+        std::slice::from_ref(&relocate.entry_id),
+    );
 
     let _: () = pipeline
         .custom(xadd, xadd_args)

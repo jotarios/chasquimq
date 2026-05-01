@@ -24,7 +24,10 @@ async fn connect() -> Client {
 
 async fn raw(client: &Client, cmd: &'static str, args: Vec<Value>) -> Value {
     client
-        .custom(CustomCommand::new_static(cmd, ClusterHash::FirstKey, false), args)
+        .custom(
+            CustomCommand::new_static(cmd, ClusterHash::FirstKey, false),
+            args,
+        )
         .await
         .unwrap_or_else(|e| panic!("{cmd}: {e}"))
 }
@@ -76,7 +79,10 @@ async fn xadd_idmp_xgroup_xreadgroup_claim_xackdel() {
     );
 
     let xlen = raw(&client, "XLEN", vec![Value::from(key)]).await;
-    assert!(matches!(xlen, Value::Integer(1)), "XLEN should be 1 after dedup, got {xlen:?}");
+    assert!(
+        matches!(xlen, Value::Integer(1)),
+        "XLEN should be 1 after dedup, got {xlen:?}"
+    );
 
     let create = client
         .custom::<Value, Value>(

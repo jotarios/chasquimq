@@ -60,11 +60,12 @@ where
 }
 
 pub(crate) async fn drain_workers(mut pool: WorkerPool, deadline: std::time::Duration) {
-    let drain = async {
-        while pool.set.join_next().await.is_some() {}
-    };
+    let drain = async { while pool.set.join_next().await.is_some() {} };
     if tokio::time::timeout(deadline, drain).await.is_err() {
-        tracing::warn!(?deadline, "worker drain hit deadline; aborting in-flight tasks");
+        tracing::warn!(
+            ?deadline,
+            "worker drain hit deadline; aborting in-flight tasks"
+        );
         pool.set.abort_all();
         while pool.set.join_next().await.is_some() {}
     }

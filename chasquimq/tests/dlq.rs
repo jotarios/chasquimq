@@ -29,8 +29,8 @@ async fn admin() -> Client {
 }
 
 async fn flush_all(admin: &Client, queue: &str) {
-    for suffix in ["stream", "dlq"] {
-        let key = format!("chasqui:{queue}:{suffix}");
+    for suffix in ["stream", "dlq", "delayed", "promoter:lock"] {
+        let key = format!("{{chasqui:{queue}}}:{suffix}");
         let _: Value = admin
             .custom(
                 CustomCommand::new_static("DEL", ClusterHash::FirstKey, false),
@@ -155,8 +155,7 @@ async fn err_repeated_lands_in_dlq() {
         let main_key = main_key.clone();
         let dlq = dlq.clone();
         async move {
-            xlen(&admin, &dlq).await >= 1
-                && xpending_count(&admin, &main_key, "default").await == 0
+            xlen(&admin, &dlq).await >= 1 && xpending_count(&admin, &main_key, "default").await == 0
         }
     })
     .await;
@@ -264,8 +263,7 @@ async fn panic_treated_as_err() {
         let main_key = main_key.clone();
         let dlq = dlq.clone();
         async move {
-            xlen(&admin, &dlq).await >= 1
-                && xpending_count(&admin, &main_key, "default").await == 0
+            xlen(&admin, &dlq).await >= 1 && xpending_count(&admin, &main_key, "default").await == 0
         }
     })
     .await;
@@ -456,8 +454,7 @@ async fn poison_message_lands_in_dlq() {
         let main_key = main_key.clone();
         let dlq = dlq.clone();
         async move {
-            xlen(&admin, &dlq).await >= 1
-                && xpending_count(&admin, &main_key, "default").await == 0
+            xlen(&admin, &dlq).await >= 1 && xpending_count(&admin, &main_key, "default").await == 0
         }
     })
     .await;
