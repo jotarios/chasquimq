@@ -22,14 +22,19 @@ return 1
 "#;
 
 /// Replays up to ARGV[1] entries from the DLQ stream (KEYS[1]) back into the
-/// main stream (KEYS[2]). For each entry, the script extracts the payload field
-/// `d` and re-XADDs it (with MAXLEN ~ ARGV[2]) — payload bytes carry the
-/// original encoded `Job<T>` minus its `attempt` reset, which the caller does
-/// in Rust before invoking this script. Entries are XDEL'd from the DLQ as
-/// they're successfully republished.
+/// main stream (KEYS[2]). For each entry, the caller has already decoded the
+/// DLQ payload, reset Job::attempt to 0, and re-encoded — the script just does
+/// the move atomically.
 ///
-/// ARGV[3..] = pairs of (dlq_entry_id, replay_payload_bytes) — one per entry to
-/// replay, already attempt-reset by the caller.
+/// ARGV[1] = max_stream_len (for XADD MAXLEN ~)
+/// ARGV[2..] = pairs of (dlq_entry_id, replay_payload_bytes)
+///
+/// **Concurrent-replay safety**: XDEL is checked first; XADD only happens if
+/// XDEL returned 1 (the entry actually existed and was removed). If a second
+/// concurrent replay reaches the same dlq_id, its XDEL returns 0 and that
+/// pair is skipped — no duplicate XADD to the main stream. The atomic ordering
+/// (XDEL gate, then XADD inside the same script invocation) is what makes
+/// concurrent replays correct without an external lock.
 pub(crate) const REPLAY_DLQ_SCRIPT: &str = r#"
 local dlq = KEYS[1]
 local stream = KEYS[2]
@@ -39,9 +44,11 @@ local i = 2
 while i <= #ARGV do
   local dlq_id = ARGV[i]
   local payload = ARGV[i + 1]
-  redis.call('XADD', stream, 'MAXLEN', '~', max_stream_len, '*', 'd', payload)
-  redis.call('XDEL', dlq, dlq_id)
-  replayed = replayed + 1
+  local deleted = redis.call('XDEL', dlq, dlq_id)
+  if deleted == 1 then
+    redis.call('XADD', stream, 'MAXLEN', '~', max_stream_len, '*', 'd', payload)
+    replayed = replayed + 1
+  end
   i = i + 2
 end
 return replayed

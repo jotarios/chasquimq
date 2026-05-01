@@ -255,6 +255,46 @@ async fn replay_resets_attempt_so_retries_run_again() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires REDIS_URL"]
+async fn concurrent_replay_does_not_duplicate() {
+    let admin = admin().await;
+    let queue = "dlq_replay_concurrent";
+    flush_all(&admin, queue).await;
+
+    for _ in 0..50 {
+        manually_populate_dlq(&admin, queue, 2).await;
+    }
+    let dlq = dlq_key(queue);
+    let main = stream_key(queue);
+    assert_eq!(xlen(&admin, &dlq).await, 50);
+    assert_eq!(xlen(&admin, &main).await, 0);
+
+    let mut handles = Vec::new();
+    for _ in 0..4 {
+        let url = redis_url();
+        let cfg = producer_cfg(queue);
+        handles.push(tokio::spawn(async move {
+            let producer: Producer<Sample> = Producer::connect(&url, cfg).await.expect("producer");
+            producer.replay_dlq(50).await.expect("replay_dlq")
+        }));
+    }
+    let mut total_replayed = 0_usize;
+    for h in handles {
+        total_replayed += h.await.expect("replay task");
+    }
+
+    assert_eq!(total_replayed, 50, "exactly 50 entries should be moved");
+    assert_eq!(xlen(&admin, &dlq).await, 0, "DLQ fully drained");
+    assert_eq!(
+        xlen(&admin, &main).await,
+        50,
+        "main stream gets exactly 50 entries — no duplicates"
+    );
+
+    let _: () = admin.quit().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires REDIS_URL"]
 async fn replay_empty_dlq_is_zero() {
     let admin = admin().await;
     let queue = "dlq_replay_empty";
