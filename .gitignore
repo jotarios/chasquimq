@@ -1,0 +1,13 @@
+/target
+**/target
+Cargo.lock.bak
+
+# OS / editor noise
+.DS_Store
+*.swp
+*~
+
+# Spike (throwaway, not part of the engine; keep results)
+/spike/target
+
+# Bench logs are KEPT in benchmarks/runs/ — do not ignore.

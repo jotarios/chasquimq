@@ -1,0 +1,24 @@
+[package]
+name = "chasquimq"
+version = "0.1.0"
+description = "The fastest open-source message broker for Redis."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+fred = { version = "10", features = ["i-streams"] }
+rmp-serde = "1"
+serde = { version = "1", features = ["derive"] }
+ulid = "1"
+uuid = { version = "1", features = ["v4"] }
+bytes = "1"
+thiserror = "1"
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+tracing-subscriber = "0.3"

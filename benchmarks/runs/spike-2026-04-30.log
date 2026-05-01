@@ -1,0 +1,33 @@
+    Finished `release` profile [optimized] target(s) in 0.14s
+     Running `target/release/chasquimq-spike`
+ChasquiMQ perf spike: pipelined XADD ... IDMP
+Bench window: 10000 jobs (200 pipelines × 50 cmds), warmup: 1000 jobs
+BullMQ unpinned baseline (queue-add-bulk): 60,828 jobs/s. 3× target: 182,484.
+
+  pool=1 run=1 →      93448 jobs/s
+  pool=1 run=2 →     152747 jobs/s
+  pool=1 run=3 →     131984 jobs/s
+pool= 1: mean =     126060 jobs/s  (range 93448 – 152747)
+
+  pool=2 run=1 →     209526 jobs/s
+  pool=2 run=2 →     217701 jobs/s
+  pool=2 run=3 →     237076 jobs/s
+pool= 2: mean =     221434 jobs/s  (range 209526 – 237076)
+
+  pool=4 run=1 →     305741 jobs/s
+  pool=4 run=2 →     200050 jobs/s
+  pool=4 run=3 →     301804 jobs/s
+pool= 4: mean =     269199 jobs/s  (range 200050 – 305741)
+
+  pool=8 run=1 →     366781 jobs/s
+  pool=8 run=2 →     361736 jobs/s
+  pool=8 run=3 →     369909 jobs/s
+pool= 8: mean =     366142 jobs/s  (range 361736 – 369909)
+
+  pool=16 run=1 →     467281 jobs/s
+  pool=16 run=2 →     448164 jobs/s
+  pool=16 run=3 →     451547 jobs/s
+pool=16: mean =     455664 jobs/s  (range 448164 – 467281)
+
+SPIKE RESULT: 455664 jobs/s @ pool=16
+vs BullMQ baseline (60,828 jobs/s): 7.49× (≥ 3× — proceed to scaffold)

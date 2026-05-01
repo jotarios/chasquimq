@@ -1,0 +1,16 @@
+[1777601717003] BullMQ Benchmark: Start running benchmark suites
+
+[1777601717003] BullMQ Benchmark: Running suite for: BullMQ 5.76.4
+[1777601717003] BullMQ Benchmark: Running benchmark: queue-add
+[1777601717332] BullMQ Benchmark: Tearing down...
+[1777601717365] BullMQ Benchmark: Result for queue-add : {"execution":{"executedOn":"2026-05-01T02:15:17.003Z","setUpDuration":9,"runDuration":319,"tearDownDuration":33,"finishedOn":"2026-05-01T02:15:17.365Z","totalDuration":362},"result":{"redisVersion":"8.6.2","time":142,"rate":14085,"rateUnit":"jobs/sec"},"config":{"timeout":30000,"type":"bullmq-queue-add-benchmark","warmupJobsNum":1000,"benchmarkJobsNum":1000,"bulkSize":0,"jobData":{},"name":"queue-add","generateSampleJobData":{"widthFactor":10,"depthFactor":10},"queueName":"2fe343c7-bcf3-47a8-b2f9-6a2db7d79d30"}}
+[1777601717365] BullMQ Benchmark: Running benchmark: queue-add-bulk
+[1777601717597] BullMQ Benchmark: Tearing down...
+[1777601717752] BullMQ Benchmark: Result for queue-add-bulk : {"execution":{"executedOn":"2026-05-01T02:15:17.365Z","setUpDuration":2,"runDuration":230,"tearDownDuration":155,"finishedOn":"2026-05-01T02:15:17.752Z","totalDuration":387},"result":{"redisVersion":"8.6.2","time":207,"rate":53140,"rateUnit":"jobs/sec"},"config":{"timeout":30000,"type":"bullmq-queue-add-benchmark","warmupJobsNum":1000,"benchmarkJobsNum":10000,"bulkSize":50,"jobData":{},"name":"queue-add-bulk","generateSampleJobData":{"widthFactor":1,"depthFactor":1},"queueName":"a7625e65-6e8d-4879-a5ae-e55818cdb3f5"}}
+[1777601717752] BullMQ Benchmark: Running benchmark: worker-generic
+[1777601718165] BullMQ Benchmark: Tearing down...
+[1777601718196] BullMQ Benchmark: Result for worker-generic : {"execution":{"executedOn":"2026-05-01T02:15:17.752Z","setUpDuration":40,"runDuration":373,"tearDownDuration":31,"finishedOn":"2026-05-01T02:15:18.196Z","totalDuration":444},"result":{"redisVersion":"8.6.2","time":174,"rate":11494,"rateUnit":"jobs/sec"},"config":{"timeout":30000,"type":"bullmq-worker-benchmark","warmupJobsNum":1000,"benchmarkJobsNum":1000,"jobData":{},"jobResult":{},"jobFailedReason":{},"jobFailureProbability":0,"name":"worker-generic","generateSampleJobData":{"widthFactor":1,"depthFactor":1},"generateSampleJobResult":{"widthFactor":1,"depthFactor":1},"queueName":"e68d453a-11e4-4f9e-b9b7-b5874e9adf9e"}}
+[1777601718196] BullMQ Benchmark: Running benchmark: worker-concurrent
+[1777601718856] BullMQ Benchmark: Tearing down...
+[1777601719021] BullMQ Benchmark: Result for worker-concurrent : {"execution":{"executedOn":"2026-05-01T02:15:18.196Z","setUpDuration":200,"runDuration":460,"tearDownDuration":165,"finishedOn":"2026-05-01T02:15:19.021Z","totalDuration":825},"result":{"redisVersion":"8.6.2","time":405,"rate":27160,"rateUnit":"jobs/sec"},"config":{"timeout":30000,"type":"bullmq-worker-benchmark","warmupJobsNum":1000,"benchmarkJobsNum":10000,"jobData":{},"jobResult":{},"jobFailedReason":{},"jobFailureProbability":0,"name":"worker-concurrent","generateSampleJobData":{"widthFactor":1,"depthFactor":1},"generateSampleJobResult":{"widthFactor":1,"depthFactor":1},"workerOptions":{"concurrency":100},"queueName":"c12cfb23-b5e8-4811-b9aa-c018c2c1adfd"}}
+[1777601719021] BullMQ Benchmark: Finished running suites
