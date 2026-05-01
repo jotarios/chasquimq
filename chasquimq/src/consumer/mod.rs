@@ -171,6 +171,7 @@ where
             max_stream_len: self.cfg.delayed_max_stream_len,
             lock_ttl_secs: self.cfg.delayed_lock_ttl_secs,
             holder_id: self.cfg.consumer_id.clone(),
+            metrics: self.cfg.metrics.clone(),
         };
         let promoter = Promoter::new(self.redis_url.clone(), promoter_cfg);
         Some(tokio::spawn(promoter.run(shutdown)))

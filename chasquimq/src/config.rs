@@ -36,7 +36,7 @@ impl Default for RetryConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ConsumerConfig {
     pub queue_name: String,
     pub group: String,
@@ -59,6 +59,38 @@ pub struct ConsumerConfig {
     pub delayed_promote_batch: usize,
     pub delayed_max_stream_len: u64,
     pub delayed_lock_ttl_secs: u64,
+    /// Forwarded to the inline promoter the consumer spawns when
+    /// `delayed_enabled` is true. Defaults to [`crate::metrics::NoopSink`].
+    pub metrics: std::sync::Arc<dyn crate::metrics::MetricsSink>,
+}
+
+impl std::fmt::Debug for ConsumerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConsumerConfig")
+            .field("queue_name", &self.queue_name)
+            .field("group", &self.group)
+            .field("consumer_id", &self.consumer_id)
+            .field("batch", &self.batch)
+            .field("block_ms", &self.block_ms)
+            .field("claim_min_idle_ms", &self.claim_min_idle_ms)
+            .field("concurrency", &self.concurrency)
+            .field("max_attempts", &self.max_attempts)
+            .field("ack_batch", &self.ack_batch)
+            .field("ack_idle_ms", &self.ack_idle_ms)
+            .field("shutdown_deadline_secs", &self.shutdown_deadline_secs)
+            .field("max_payload_bytes", &self.max_payload_bytes)
+            .field("dlq_inflight", &self.dlq_inflight)
+            .field("dlq_max_stream_len", &self.dlq_max_stream_len)
+            .field("retry", &self.retry)
+            .field("retry_inflight", &self.retry_inflight)
+            .field("delayed_enabled", &self.delayed_enabled)
+            .field("delayed_poll_interval_ms", &self.delayed_poll_interval_ms)
+            .field("delayed_promote_batch", &self.delayed_promote_batch)
+            .field("delayed_max_stream_len", &self.delayed_max_stream_len)
+            .field("delayed_lock_ttl_secs", &self.delayed_lock_ttl_secs)
+            .field("metrics", &"<dyn MetricsSink>")
+            .finish()
+    }
 }
 
 impl Default for ConsumerConfig {
@@ -85,11 +117,12 @@ impl Default for ConsumerConfig {
             delayed_promote_batch: 256,
             delayed_max_stream_len: 1_000_000,
             delayed_lock_ttl_secs: 5,
+            metrics: crate::metrics::noop_sink(),
         }
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PromoterConfig {
     pub queue_name: String,
     pub poll_interval_ms: u64,
@@ -97,6 +130,24 @@ pub struct PromoterConfig {
     pub max_stream_len: u64,
     pub lock_ttl_secs: u64,
     pub holder_id: String,
+    /// Receiver for promoter tick / lock-outcome events. Defaults to
+    /// [`crate::metrics::NoopSink`]; swap in your own [`MetricsSink`] to
+    /// bridge into Prometheus, OpenTelemetry, etc.
+    pub metrics: std::sync::Arc<dyn crate::metrics::MetricsSink>,
+}
+
+impl std::fmt::Debug for PromoterConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PromoterConfig")
+            .field("queue_name", &self.queue_name)
+            .field("poll_interval_ms", &self.poll_interval_ms)
+            .field("promote_batch", &self.promote_batch)
+            .field("max_stream_len", &self.max_stream_len)
+            .field("lock_ttl_secs", &self.lock_ttl_secs)
+            .field("holder_id", &self.holder_id)
+            .field("metrics", &"<dyn MetricsSink>")
+            .finish()
+    }
 }
 
 impl Default for PromoterConfig {
@@ -108,6 +159,7 @@ impl Default for PromoterConfig {
             max_stream_len: 1_000_000,
             lock_ttl_secs: 5,
             holder_id: format!("p-{}", uuid::Uuid::new_v4()),
+            metrics: crate::metrics::noop_sink(),
         }
     }
 }

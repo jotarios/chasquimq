@@ -2,6 +2,17 @@ use crate::redis::keys::PAYLOAD_FIELD;
 use bytes::Bytes;
 use fred::types::Value;
 
+/// Returns `{promoted, depth, oldest_pending_lag_ms}` so the caller can emit
+/// observability signals without paying for an extra `ZCARD` / `ZRANGE`
+/// round trip.
+///
+/// - `promoted` — number of entries moved from the delayed ZSET to the stream.
+/// - `depth` — `ZCARD` after promotion.
+/// - `oldest_pending_lag_ms` — `now - min_score_in_zset` for the oldest entry
+///   **still pending after this tick's promotion finished**, or `0` if the
+///   ZSET is empty or the oldest remaining entry is still future-dated.
+///   In a healthy steady state this is `0` most ticks — it becomes positive
+///   only when a real backlog forms.
 pub(crate) const PROMOTE_SCRIPT: &str = r#"
 local time = redis.call('TIME')
 local now_ms = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
@@ -10,7 +21,16 @@ for _, bytes in ipairs(due) do
   redis.call('XADD', KEYS[2], 'MAXLEN', '~', tonumber(ARGV[2]), '*', 'd', bytes)
   redis.call('ZREM', KEYS[1], bytes)
 end
-return #due
+local depth = redis.call('ZCARD', KEYS[1])
+local lag_ms = 0
+if depth > 0 then
+  local oldest = redis.call('ZRANGE', KEYS[1], 0, 0, 'WITHSCORES')
+  if oldest[2] then
+    local diff = now_ms - tonumber(oldest[2])
+    if diff > 0 then lag_ms = diff end
+  end
+end
+return {#due, depth, lag_ms}
 "#;
 
 /// Atomically acknowledge-and-delete a stream entry from the consumer group's

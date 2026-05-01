@@ -49,6 +49,7 @@ pub async fn run(redis_url: &str, queue: &str, scale: u32) -> ScenarioReport {
         delayed_promote_batch: 1024,
         delayed_max_stream_len: 1_000_000,
         delayed_lock_ttl_secs: 5,
+        ..Default::default()
     };
 
     drive_retry_scenario(

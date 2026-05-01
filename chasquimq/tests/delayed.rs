@@ -162,6 +162,7 @@ fn promoter_cfg(queue: &str, holder_id: &str) -> PromoterConfig {
         max_stream_len: 100_000,
         lock_ttl_secs: 5,
         holder_id: holder_id.to_string(),
+        ..Default::default()
     }
 }
 
@@ -583,6 +584,7 @@ async fn permanent_error_escalates() {
         max_stream_len: 1_000,
         lock_ttl_secs: 2,
         holder_id: "p1".to_string(),
+        ..Default::default()
     };
     let promoter = Promoter::new("redis://127.0.0.1:1", cfg);
     let shutdown = CancellationToken::new();

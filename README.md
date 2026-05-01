@@ -125,6 +125,15 @@ By default any `Consumer` with `delayed_enabled = true` (the default) runs an em
 
 DLQ growth is capped via `ConsumerConfig::dlq_max_stream_len` (default 100,000). `XADD MAXLEN ~ N` is approximate so a runaway error rate may overshoot temporarily but won't grow unboundedly.
 
+### Observability
+
+The promoter emits structured events through the `chasquimq::MetricsSink` trait. On every tick it reports `PromoterTick { promoted, depth, oldest_pending_lag_ms }`; on leader-lock transitions it reports `LockOutcome::{Acquired, Held}` (transition-only, not per-poll). Plug your own implementation in via `PromoterConfig::metrics` (or `ConsumerConfig::metrics` for the embedded promoter) — the default is a zero-cost no-op sink, and `chasquimq::metrics::testing::InMemorySink` is provided for tests. Depth and lag are computed inside the same Lua promote script, so observability adds no extra Redis round trips.
+
+The engine itself has zero observability dependencies — the trait and a no-op default are all `chasquimq` ships. Two opt-in paths, both in the separate [`chasquimq-metrics`](chasquimq-metrics/) workspace crate (so end users only pull `metrics`-related deps if they actually want them):
+
+- **`metrics-rs` facade route (recommended):** `chasquimq_metrics::MetricsFacadeSink` bridges into the [`metrics`](https://docs.rs/metrics) facade. Install your `metrics_exporter_*` recorder of choice and wire `Arc::new(MetricsFacadeSink::new())` into `PromoterConfig::metrics`. One small dep (`metrics`). Working end-to-end example with `metrics-exporter-prometheus`: [`chasquimq-metrics/examples/facade_sink.rs`](chasquimq-metrics/examples/facade_sink.rs) — `cargo run --example facade_sink -p chasquimq-metrics`.
+- **Direct Prometheus route:** [`chasquimq-metrics/examples/prometheus_sink.rs`](chasquimq-metrics/examples/prometheus_sink.rs) shows a hand-rolled `prometheus`-crate sink + `tiny_http` `/metrics` endpoint, for users who don't want the `metrics-rs` facade in the picture. Run with `cargo run --example prometheus_sink -p chasquimq-metrics`.
+
 ### Operational notes
 
 - **Stream MAXLEN trim is approximate.** Both Phase 1 and the delayed-job promoter use `XADD MAXLEN ~ N`. If consumers fall sustainedly behind producers, entries near the cap can be trimmed before they are read. Monitor `XLEN` against your consume rate; the silent failure mode is "job vanished."
@@ -175,7 +184,7 @@ spike/             exploratory throwaway code (not part of the engine)
 ## Roadmap
 
 - **Phase 1:** Producer, consumer pool, batched pipelined acks, DLQ, graceful shutdown. ✅
-- **Phase 2 (in progress):** Delayed jobs via sorted sets + Lua promoter ✅. Exponential retry backoff via delayed-ZSET re-scheduling ✅. DLQ replay + bounded growth ✅. Next: stats / observability.
+- **Phase 2 (in progress):** Delayed jobs via sorted sets + Lua promoter ✅. Exponential retry backoff via delayed-ZSET re-scheduling ✅. DLQ replay + bounded growth ✅. Promoter observability hooks (`MetricsSink` trait + `chasquimq-metrics` adapter + Prometheus example) ✅.
 - **Phase 3:** Node.js bindings via NAPI-RS — JS handlers driven by the Rust engine.
 - **Phase 4:** Python bindings via PyO3, CLI monitoring dashboard.
 
