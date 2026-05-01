@@ -1,11 +1,10 @@
-use super::{ScenarioReport, Stopwatch};
+use super::{ScenarioReport, Stopwatch, scaled_params};
 use crate::sample::{Payload, generate_sample};
 use chasquimq::Producer;
 use chasquimq::config::ProducerConfig;
 
-pub async fn run(redis_url: &str, queue: &str) -> ScenarioReport {
-    let warmup: u64 = 1_000;
-    let bench: u64 = 10_000;
+pub async fn run(redis_url: &str, queue: &str, scale: u32) -> ScenarioReport {
+    let params = scaled_params(1_000, 10_000, scale);
     let bulk_size: usize = 50;
     let payload: Payload = generate_sample(1, 1);
 
@@ -18,8 +17,8 @@ pub async fn run(redis_url: &str, queue: &str) -> ScenarioReport {
         .await
         .expect("connect producer");
 
-    let mut sw = Stopwatch::new(warmup, bench);
-    let total = warmup + bench;
+    let mut sw = Stopwatch::new(params.warmup, params.bench);
+    let total = params.warmup + params.bench;
     let mut emitted: u64 = 0;
     let mut outcome = None;
     while emitted < total && outcome.is_none() {

@@ -19,6 +19,11 @@ pub struct ScenarioReport {
     pub jobs_per_cpu_sec: f64,
 }
 
+pub struct ScenarioParams {
+    pub warmup: u64,
+    pub bench: u64,
+}
+
 pub struct Stopwatch {
     started: Option<Instant>,
     rusage_at_start: Option<Rusage>,
@@ -86,5 +91,13 @@ impl ScenarioOutcome {
                 0.0
             },
         }
+    }
+}
+
+pub fn scaled_params(base_warmup: u64, base_bench: u64, scale: u32) -> ScenarioParams {
+    let s = scale.max(1) as u64;
+    ScenarioParams {
+        warmup: base_warmup * s,
+        bench: base_bench * s,
     }
 }

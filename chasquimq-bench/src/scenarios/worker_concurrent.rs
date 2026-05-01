@@ -1,13 +1,13 @@
 use super::ScenarioReport;
+use super::scaled_params;
 use super::worker_generic::drive_worker_scenario;
 use crate::sample::{Payload, generate_sample};
 use chasquimq::Producer;
 use chasquimq::config::{ConsumerConfig, ProducerConfig};
 
-pub async fn run(redis_url: &str, queue: &str) -> ScenarioReport {
-    let warmup: u64 = 1_000;
-    let bench: u64 = 10_000;
-    let total = warmup + bench;
+pub async fn run(redis_url: &str, queue: &str, scale: u32) -> ScenarioReport {
+    let params = scaled_params(1_000, 10_000, scale);
+    let total = params.warmup + params.bench;
     let payload: Payload = generate_sample(1, 1);
 
     let producer: Producer<Payload> = Producer::connect(
@@ -46,5 +46,12 @@ pub async fn run(redis_url: &str, queue: &str) -> ScenarioReport {
         dlq_inflight: 64,
     };
 
-    drive_worker_scenario(redis_url, consumer_cfg, warmup, bench, "worker-concurrent").await
+    drive_worker_scenario(
+        redis_url,
+        consumer_cfg,
+        params.warmup,
+        params.bench,
+        "worker-concurrent",
+    )
+    .await
 }

@@ -2,6 +2,30 @@
 
 Deferred work tracked outside of phase plans. Each entry: what, why, pros, cons, context, depends-on.
 
+## Bench methodology follow-ups
+
+### Latency histogram for `worker-concurrent`
+
+- **What:** Capture per-job dispatch-to-ack latency in `worker-concurrent` and report p50/p95/p99 latency alongside throughput. Use `hdrhistogram` or a flat ring buffer + sort at end.
+- **Why:** Throughput alone hides bad tail behavior. A consumer that does 400k jobs/s with p99 of 5s is much worse for a real product than 200k with p99 of 50ms.
+- **Pros:** Closes the biggest gap in our perf claims. ~50 LOC. Lets us defend "low latency, not just high throughput" framing.
+- **Cons:** Adds per-job overhead during measurement (timestamp at handler entry, again at ack flush — needs a way to thread the timestamp through the entry_id channel without bloating the hot path).
+- **Context:** Surfaced in the bench-methodology critique. Not in Phase 1 because we lead with throughput vs. BullMQ.
+- **Depends on / blocked by:** None.
+
+### Variance-mode payload generator
+
+- **What:** Replace `payload.clone()` per job with a generator that produces structurally-similar but bytewise-distinct payloads (e.g., different UUID values per job).
+- **Why:** Today every job's MessagePack-encoded bytes are nearly identical (modulo the `Job::new` ULID + timestamp). Best-case branch prediction; encoder hits the hot cache path. Real-world payloads vary; we should bench what users will actually run.
+- **Pros:** More honest absolute numbers. Doesn't change apples-to-apples ratio (BullMQ also clones one payload).
+- **Cons:** Numbers will drop slightly; might invite unfavorable comparison against external published numbers that used the static-payload methodology.
+- **Context:** Methodology critique #7.
+- **Depends on / blocked by:** None.
+
+### External-process bench harness (carry-over from earlier TODO entry)
+
+See "External-process bench harness" entry below — already captured.
+
 ## Phase 2
 
 ### `Producer::add_with_id(id, payload)`
