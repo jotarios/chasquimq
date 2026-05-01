@@ -1,24 +1,17 @@
 use crate::config::ProducerConfig;
 use crate::error::{Error, Result};
 use crate::job::{Job, JobId};
+use crate::redis::commands::xadd_args;
+use crate::redis::conn::connect_pool;
 use bytes::Bytes;
 use fred::clients::Pool;
 use fred::interfaces::ClientLike;
-use fred::prelude::Config;
 use fred::types::{ClusterHash, CustomCommand, Value};
 use serde::Serialize;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-const PAYLOAD_FIELD: &str = "d";
-
-pub fn stream_key(queue_name: &str) -> String {
-    format!("chasqui:{queue_name}:stream")
-}
-
-pub fn dlq_key(queue_name: &str) -> String {
-    format!("chasqui:{queue_name}:dlq")
-}
+pub use crate::redis::keys::{dlq_key, stream_key};
 
 pub struct Producer<T> {
     pool: Pool,
@@ -42,12 +35,7 @@ impl<T> Clone for Producer<T> {
 
 impl<T: Serialize> Producer<T> {
     pub async fn connect(redis_url: &str, config: ProducerConfig) -> Result<Self> {
-        if config.pool_size == 0 {
-            return Err(Error::Config("pool_size must be > 0".into()));
-        }
-        let cfg = Config::from_url(redis_url).map_err(Error::Redis)?;
-        let pool = Pool::new(cfg, None, None, None, config.pool_size).map_err(Error::Redis)?;
-        std::mem::drop(pool.init().await.map_err(Error::Redis)?);
+        let pool = connect_pool(redis_url, config.pool_size).await?;
         let producer_id: Arc<str> = Arc::from(uuid::Uuid::new_v4().to_string());
         let stream_key: Arc<str> = Arc::from(stream_key(&config.queue_name));
         Ok(Self {
@@ -98,7 +86,7 @@ impl<T: Serialize> Producer<T> {
         let pipeline = client.pipeline();
         let cmd = CustomCommand::new_static("XADD", ClusterHash::FirstKey, false);
         for (iid, bytes) in &encoded {
-            let args = build_xadd_args(
+            let args = xadd_args(
                 self.stream_key.as_ref(),
                 self.producer_id.as_ref(),
                 iid,
@@ -116,7 +104,7 @@ impl<T: Serialize> Producer<T> {
 
     async fn xadd(&self, iid: &str, bytes: Bytes) -> Result<()> {
         let client = self.pool.next_connected();
-        let args = build_xadd_args(
+        let args = xadd_args(
             self.stream_key.as_ref(),
             self.producer_id.as_ref(),
             iid,
@@ -127,25 +115,4 @@ impl<T: Serialize> Producer<T> {
         let _: Value = client.custom(cmd, args).await.map_err(Error::Redis)?;
         Ok(())
     }
-}
-
-fn build_xadd_args(
-    stream_key: &str,
-    producer_id: &str,
-    iid: &str,
-    max_stream_len: u64,
-    bytes: Bytes,
-) -> Vec<Value> {
-    vec![
-        Value::from(stream_key),
-        Value::from("IDMP"),
-        Value::from(producer_id),
-        Value::from(iid),
-        Value::from("MAXLEN"),
-        Value::from("~"),
-        Value::from(max_stream_len as i64),
-        Value::from("*"),
-        Value::from(PAYLOAD_FIELD),
-        Value::Bytes(bytes),
-    ]
 }

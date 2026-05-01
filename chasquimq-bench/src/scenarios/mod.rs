@@ -1,3 +1,4 @@
+pub(crate) mod preload;
 pub mod queue_add;
 pub mod queue_add_bulk;
 pub mod worker_concurrent;

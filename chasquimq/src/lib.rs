@@ -4,6 +4,7 @@ pub mod consumer;
 pub mod error;
 pub mod job;
 pub mod producer;
+pub(crate) mod redis;
 
 pub use config::{ConsumerConfig, ProducerConfig};
 pub use consumer::Consumer;

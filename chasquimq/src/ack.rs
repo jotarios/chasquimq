@@ -1,7 +1,8 @@
-use crate::consumer::StreamEntryId;
+use crate::redis::commands::xackdel_args;
+use crate::redis::parse::StreamEntryId;
 use fred::clients::Client;
 use fred::interfaces::ClientLike;
-use fred::types::{ClusterHash, CustomCommand, Value};
+use fred::types::{ClusterHash, CustomCommand};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
@@ -76,15 +77,8 @@ async fn flush_once(
     cfg: &AckFlusherConfig,
     ids: &[StreamEntryId],
 ) -> std::result::Result<(), fred::error::Error> {
-    let mut args: Vec<Value> = Vec::with_capacity(4 + ids.len());
-    args.push(Value::from(cfg.stream_key.as_str()));
-    args.push(Value::from(cfg.group.as_str()));
-    args.push(Value::from("IDS"));
-    args.push(Value::from(ids.len() as i64));
-    for id in ids {
-        args.push(Value::from(id.as_ref()));
-    }
+    let args = xackdel_args(&cfg.stream_key, &cfg.group, ids);
     let cmd = CustomCommand::new_static("XACKDEL", ClusterHash::FirstKey, false);
-    client.custom::<Value, _>(cmd, args).await?;
+    client.custom::<fred::types::Value, _>(cmd, args).await?;
     Ok(())
 }
