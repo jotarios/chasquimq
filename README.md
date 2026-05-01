@@ -104,6 +104,8 @@ By default any `Consumer` with `delayed_enabled = true` (the default) runs an em
 
 `max_delay_secs` on `ProducerConfig` (default 30 days) caps how far in the future jobs can be scheduled. Set to `0` to disable the cap.
 
+**At-least-once under caller retry.** `add_in` / `add_at` / `add_in_bulk` are not idempotent across caller-driven retries: each call generates a fresh job id, and a retry after a network failure can land a duplicate scheduled job. (Compare with `Producer::add`, which uses Redis 8.6 `IDMP` for at-most-once delivery.) An explicit `add_in_with_id` is on the roadmap; until then, callers needing exactly-once delayed scheduling should retry only after confirming the previous call did not reach Redis (e.g., via `ZSCORE` on the delayed key).
+
 ### Operational notes
 
 - **Stream MAXLEN trim is approximate.** Both Phase 1 and the delayed-job promoter use `XADD MAXLEN ~ N`. If consumers fall sustainedly behind producers, entries near the cap can be trimmed before they are read. Monitor `XLEN` against your consume rate; the silent failure mode is "job vanished."

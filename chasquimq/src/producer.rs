@@ -114,6 +114,12 @@ impl<T: Serialize> Producer<T> {
         Ok(encoded.into_iter().map(|(id, _)| id).collect())
     }
 
+    /// Schedule a job to run after `delay`.
+    ///
+    /// At-least-once under caller-driven retry: each call generates a fresh job id, so a
+    /// retry after a network failure can land a duplicate scheduled job. Callers needing
+    /// idempotent scheduling should retry only after confirming the previous call did not
+    /// reach Redis. (`Producer::add` has Redis-side IDMP dedup; the delayed path does not.)
     pub async fn add_in(&self, delay: Duration, payload: T) -> Result<JobId> {
         self.check_delay_secs(delay.as_secs())?;
         if delay.is_zero() {
@@ -127,6 +133,9 @@ impl<T: Serialize> Producer<T> {
         self.zadd_delayed(payload, run_at_ms).await
     }
 
+    /// Schedule a job to run at `run_at` (absolute time).
+    ///
+    /// Same at-least-once-under-retry caveat as [`Producer::add_in`].
     pub async fn add_at(&self, run_at: SystemTime, payload: T) -> Result<JobId> {
         let run_at_ms = match run_at.duration_since(UNIX_EPOCH) {
             Ok(d) => u128_to_u64_or_err(d.as_millis())?,
@@ -141,6 +150,8 @@ impl<T: Serialize> Producer<T> {
         self.zadd_delayed(payload, run_at_ms).await
     }
 
+    /// Schedule a batch of jobs to all run after `delay`. Same at-least-once-under-retry
+    /// caveat as [`Producer::add_in`].
     pub async fn add_in_bulk(&self, delay: Duration, payloads: Vec<T>) -> Result<Vec<JobId>> {
         if payloads.is_empty() {
             return Ok(Vec::new());

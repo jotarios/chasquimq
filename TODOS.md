@@ -41,6 +41,15 @@ Deferred work tracked outside of phase plans. Each entry: what, why, pros, cons,
 - **Cons:** ~200 LOC of harness + analysis. Will land after the basic delayed-jobs bench scenarios.
 - **Depends on / blocked by:** Phase 2 slice 1 must be merged.
 
+### Idempotent delayed enqueue (`add_in_with_id` / `add_at_with_id`)
+
+- **What:** Caller-stable-id variants of `add_in` / `add_at` that dedup at the Redis layer. Likely shape: ZSET member becomes `<26-byte ulid><msgpack bytes>`, with the promote script slicing the ulid prefix to pass to `XADD ... IDMP <producer_id> <ulid> ...`. Or: store id in ZSET member, payload in companion hash, IDMP from the script.
+- **Why:** `add_in` / `add_at` today generate a fresh ULID per call, so a caller-driven retry after a network blip will land a duplicate scheduled job. The README documents this caveat, but it's a real gap vs. `Producer::add` (which IS idempotent via `IDMP`).
+- **Pros:** Closes the at-least-once gap. Restores symmetry with the immediate-enqueue API.
+- **Cons:** Requires a decision on the ZSET encoding (see "Delayed-job ZSET memory encoding bench" above). Touches the promote script, which has been carefully verified.
+- **Context:** Self-critique of Phase 2 slice 1 surfaced this as the most material correctness gap. Documented in the meantime.
+- **Depends on / blocked by:** Delayed-job ZSET memory encoding bench (the encoding decision drives this).
+
 ### Cancel / reschedule a delayed job
 
 - **What:** `Producer::cancel_delayed(job_id)` and `Producer::reschedule(job_id, new_run_at)` for jobs already in the delayed sorted set.
