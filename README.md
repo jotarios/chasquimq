@@ -117,6 +117,14 @@ By default any `Consumer` with `delayed_enabled = true` (the default) runs an em
 
 **At-least-once under caller retry.** `add_in` / `add_at` / `add_in_bulk` are not idempotent across caller-driven retries: each call generates a fresh job id, and a retry after a network failure can land a duplicate scheduled job. (Compare with `Producer::add`, which uses Redis 8.6 `IDMP` for at-most-once delivery.) An explicit `add_in_with_id` is on the roadmap; until then, callers needing exactly-once delayed scheduling should retry only after confirming the previous call did not reach Redis (e.g., via `ZSCORE` on the delayed key).
 
+### DLQ tooling
+
+`Producer::peek_dlq(limit)` reads up to N DLQ entries with their failure metadata (`source_id`, `reason`, optional `detail`, raw payload bytes) without removing them — the inspection API.
+
+`Producer::replay_dlq(limit)` moves up to N DLQ entries back into the main stream atomically. Each entry's `attempt` counter is reset to 0 before re-`XADD` so the replayed job gets a full retry budget (otherwise it'd land in DLQ again on first dispatch). The fix-the-bug-and-requeue workflow.
+
+DLQ growth is capped via `ConsumerConfig::dlq_max_stream_len` (default 100,000). `XADD MAXLEN ~ N` is approximate so a runaway error rate may overshoot temporarily but won't grow unboundedly.
+
 ### Operational notes
 
 - **Stream MAXLEN trim is approximate.** Both Phase 1 and the delayed-job promoter use `XADD MAXLEN ~ N`. If consumers fall sustainedly behind producers, entries near the cap can be trimmed before they are read. Monitor `XLEN` against your consume rate; the silent failure mode is "job vanished."
@@ -167,7 +175,7 @@ spike/             exploratory throwaway code (not part of the engine)
 ## Roadmap
 
 - **Phase 1:** Producer, consumer pool, batched pipelined acks, DLQ, graceful shutdown. ✅
-- **Phase 2 (in progress):** Delayed jobs via sorted sets + Lua promoter ✅. Exponential retry backoff via delayed-ZSET re-scheduling ✅. Next: richer DLQ tooling.
+- **Phase 2 (in progress):** Delayed jobs via sorted sets + Lua promoter ✅. Exponential retry backoff via delayed-ZSET re-scheduling ✅. DLQ replay + bounded growth ✅. Next: stats / observability.
 - **Phase 3:** Node.js bindings via NAPI-RS — JS handlers driven by the Rust engine.
 - **Phase 4:** Python bindings via PyO3, CLI monitoring dashboard.
 
