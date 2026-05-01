@@ -12,3 +12,6 @@ Cargo.lock.bak
 
 # Bench run logs are local-only; summaries live in benchmarks/*.md
 benchmarks/runs/
+
+# Per-user Claude Code settings
+.claude/settings.local.json
