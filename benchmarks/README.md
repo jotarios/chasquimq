@@ -4,23 +4,30 @@ ChasquiMQ's headline claim is **"the fastest open-source message broker for Redi
 
 ## Headline numbers
 
-Measured on Apple M3, Redis 8.6 (Docker, loopback), single host. BullMQ 5.76.4 baseline run on the same machine.
+Measured on Apple M3, Redis 8.6 (Docker, loopback), single host. BullMQ 5.76.4 baseline run on the same machine. Latest Phase 2 run (5 repeats × scale=5, drop-slowest):
 
-| Scenario              | BullMQ 5.76.4 | ChasquiMQ        | Ratio       |
-|-----------------------|--------------:|-----------------:|------------:|
-| `queue-add-bulk` (50) |     60,828/s  | **194,394/s**    | **3.20×**   |
-| `worker-concurrent`   |     47,707/s  | **437,683/s**    | **9.17×**   |
-| `queue-add` (single)  |     13,961/s  |       16,476/s   |     1.18×   |
-| `worker-generic` ⚠    |     13,250/s  |      431,291/s   |    32.6×    |
+| Scenario                    | BullMQ 5.76.4 | ChasquiMQ        | Ratio       |
+|-----------------------------|--------------:|-----------------:|------------:|
+| `queue-add-bulk` (50)       |     60,828/s  | **193,251/s**    | **3.18×**   |
+| `worker-concurrent` (100)   |     47,707/s  | **415,580/s**    | **8.71×**   |
+| `worker-delayed-end-to-end` |          n/a  |     **705,189/s**|         n/a |
+| `worker-retry-throughput`   |          n/a  |     **113,210/s**|         n/a |
+| `queue-add` (single)        |     13,961/s  |       17,394/s   |     1.25×   |
+| `queue-add-delayed`         |          n/a  |       17,578/s   |         n/a |
+| `worker-generic` ⚠          |     13,250/s  |      418,946/s   |    31.6×    |
 
 `queue-add` and `worker-generic` are latency-bound (single in-flight op) — they aren't the throughput claim. The two scenarios that matter for "fastest broker on Redis" are `queue-add-bulk` and `worker-concurrent`; both clear the 3× gate, and `worker-concurrent` clears 5× comfortably.
 
-⚠ `worker-generic`'s bench window is too small for stable measurement (~12ms at 430k/s); treat the ratio as direction-only. See methodology notes in [`chasquimq-phase1.md`](chasquimq-phase1.md).
+⚠ `worker-generic`'s bench window is too small for stable measurement (~12ms at 419k/s); treat the ratio as direction-only.
+
+`worker-delayed-end-to-end` and `worker-retry-throughput` are Phase 2 paths (no BullMQ counterpart in `bullmq-bench`).
 
 ## Detailed reports
 
 - [`baseline-bullmq.md`](baseline-bullmq.md) — full BullMQ baseline methodology, raw numbers, lessons from running the suite (notably: `enableAutoPipelining` *hurts* on loopback).
 - [`chasquimq-phase1.md`](chasquimq-phase1.md) — full ChasquiMQ Phase 1 results, post-critique iterations, and harness improvements (distribution stats, `--scale` flag, slowest-discard).
+- [`chasquimq-phase2-slice2.md`](chasquimq-phase2-slice2.md) — Phase 2 slices 1 (delayed jobs) and 2 (retry backoff). No-regression check on Phase 1 hot-path scenarios + three new scenarios for the delayed and retry paths.
+- [`chasquimq-phase2-final.md`](chasquimq-phase2-final.md) — **Final Phase 2 ship-readiness measurement.** All three slices (delayed jobs, retry backoff, DLQ tooling) + the daster-bug review fixes. 5 repeats × scale=5, drop-slowest applied. Both headline gates clear: `queue-add-bulk` 3.18×, `worker-concurrent` 8.71×.
 
 ## Reproducing
 

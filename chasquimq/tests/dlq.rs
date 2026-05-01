@@ -29,8 +29,8 @@ async fn admin() -> Client {
 }
 
 async fn flush_all(admin: &Client, queue: &str) {
-    for suffix in ["stream", "dlq"] {
-        let key = format!("chasqui:{queue}:{suffix}");
+    for suffix in ["stream", "dlq", "delayed", "promoter:lock"] {
+        let key = format!("{{chasqui:{queue}}}:{suffix}");
         let _: Value = admin
             .custom(
                 CustomCommand::new_static("DEL", ClusterHash::FirstKey, false),
@@ -78,6 +78,7 @@ fn producer_cfg(queue: &str) -> ProducerConfig {
         queue_name: queue.to_string(),
         pool_size: 2,
         max_stream_len: 10_000,
+        ..Default::default()
     }
 }
 
@@ -96,6 +97,9 @@ fn consumer_cfg(queue: &str, consumer_id: &str, max_attempts: u32) -> ConsumerCo
         shutdown_deadline_secs: 5,
         max_payload_bytes: 1_048_576,
         dlq_inflight: 32,
+        delayed_enabled: true,
+        delayed_poll_interval_ms: 25,
+        ..Default::default()
     }
 }
 
@@ -155,8 +159,7 @@ async fn err_repeated_lands_in_dlq() {
         let main_key = main_key.clone();
         let dlq = dlq.clone();
         async move {
-            xlen(&admin, &dlq).await >= 1
-                && xpending_count(&admin, &main_key, "default").await == 0
+            xlen(&admin, &dlq).await >= 1 && xpending_count(&admin, &main_key, "default").await == 0
         }
     })
     .await;
@@ -210,11 +213,14 @@ async fn err_then_ok_succeeds_normally() {
 
     let main_key = stream_key(queue);
     let dlq = dlq_key(queue);
+    let calls_for_check = calls.clone();
     wait_until(Duration::from_secs(15), || {
         let admin = admin.clone();
         let main_key = main_key.clone();
+        let calls = calls_for_check.clone();
         async move {
-            xlen(&admin, &main_key).await == 0
+            calls.load(Ordering::SeqCst) >= 3
+                && xlen(&admin, &main_key).await == 0
                 && xpending_count(&admin, &main_key, "default").await == 0
         }
     })
@@ -264,8 +270,7 @@ async fn panic_treated_as_err() {
         let main_key = main_key.clone();
         let dlq = dlq.clone();
         async move {
-            xlen(&admin, &dlq).await >= 1
-                && xpending_count(&admin, &main_key, "default").await == 0
+            xlen(&admin, &dlq).await >= 1 && xpending_count(&admin, &main_key, "default").await == 0
         }
     })
     .await;
@@ -456,8 +461,7 @@ async fn poison_message_lands_in_dlq() {
         let main_key = main_key.clone();
         let dlq = dlq.clone();
         async move {
-            xlen(&admin, &dlq).await >= 1
-                && xpending_count(&admin, &main_key, "default").await == 0
+            xlen(&admin, &dlq).await >= 1 && xpending_count(&admin, &main_key, "default").await == 0
         }
     })
     .await;

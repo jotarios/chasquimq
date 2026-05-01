@@ -50,6 +50,7 @@ pub(crate) struct DlqRelocatorConfig {
     pub dlq_key: String,
     pub group: String,
     pub producer_id: Arc<str>,
+    pub max_stream_len: u64,
 }
 
 pub(crate) async fn enqueue(
@@ -119,8 +120,13 @@ async fn relocate_once(
         relocate.payload.clone(),
         relocate.reason.as_str(),
         relocate.reason.detail(),
+        cfg.max_stream_len,
     );
-    let xackdel_args = xackdel_args(&cfg.stream_key, &cfg.group, std::slice::from_ref(&relocate.entry_id));
+    let xackdel_args = xackdel_args(
+        &cfg.stream_key,
+        &cfg.group,
+        std::slice::from_ref(&relocate.entry_id),
+    );
 
     let _: () = pipeline
         .custom(xadd, xadd_args)

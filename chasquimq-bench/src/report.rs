@@ -13,7 +13,9 @@ pub fn print_markdown_table(all: &BTreeMap<String, Vec<ScenarioReport>>, discard
         discard_slowest, cores
     );
     println!();
-    println!("| Scenario | Mean (jobs/s) | p50 | p95 | p99 | stddev | CPU load (× core) | jobs/CPU-sec |");
+    println!(
+        "| Scenario | Mean (jobs/s) | p50 | p95 | p99 | stddev | CPU load (× core) | jobs/CPU-sec |"
+    );
     println!("|---|---:|---:|---:|---:|---:|---:|---:|");
     for (name, runs) in all {
         if runs.is_empty() {

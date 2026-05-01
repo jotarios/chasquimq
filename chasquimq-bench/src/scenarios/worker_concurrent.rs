@@ -26,6 +26,8 @@ pub async fn run(redis_url: &str, queue: &str, scale: u32) -> ScenarioReport {
         shutdown_deadline_secs: 5,
         max_payload_bytes: 1_048_576,
         dlq_inflight: 64,
+        delayed_enabled: false,
+        ..Default::default()
     };
 
     drive_worker_scenario(

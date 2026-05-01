@@ -12,8 +12,8 @@ pub async fn connect_admin(url: &str) -> Client {
 }
 
 pub async fn flush_queue(admin: &Client, queue: &str) {
-    for suffix in ["stream", "dlq"] {
-        let key = format!("chasqui:{queue}:{suffix}");
+    for suffix in ["stream", "dlq", "delayed", "promoter:lock"] {
+        let key = format!("{{chasqui:{queue}}}:{suffix}");
         let _: Value = admin
             .custom(
                 CustomCommand::new_static("DEL", ClusterHash::FirstKey, false),
@@ -24,17 +24,19 @@ pub async fn flush_queue(admin: &Client, queue: &str) {
     }
 }
 
-pub async fn run_scenario(
-    name: &str,
-    redis_url: &str,
-    queue: &str,
-    scale: u32,
-) -> ScenarioReport {
+pub async fn run_scenario(name: &str, redis_url: &str, queue: &str, scale: u32) -> ScenarioReport {
     match name {
         "queue-add" => scenarios::queue_add::run(redis_url, queue, scale).await,
         "queue-add-bulk" => scenarios::queue_add_bulk::run(redis_url, queue, scale).await,
+        "queue-add-delayed" => scenarios::queue_add_delayed::run(redis_url, queue, scale).await,
         "worker-generic" => scenarios::worker_generic::run(redis_url, queue, scale).await,
         "worker-concurrent" => scenarios::worker_concurrent::run(redis_url, queue, scale).await,
+        "worker-delayed-end-to-end" => {
+            scenarios::worker_delayed_end_to_end::run(redis_url, queue, scale).await
+        }
+        "worker-retry-throughput" => {
+            scenarios::worker_retry_throughput::run(redis_url, queue, scale).await
+        }
         other => panic!("unknown scenario: {other}"),
     }
 }

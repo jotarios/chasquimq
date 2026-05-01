@@ -11,6 +11,7 @@ pub async fn run(redis_url: &str, queue: &str, scale: u32) -> ScenarioReport {
         queue_name: queue.to_string(),
         pool_size: 1,
         max_stream_len: 1_000_000,
+        ..Default::default()
     };
     let producer: Producer<Payload> = Producer::connect(redis_url, cfg)
         .await
@@ -25,5 +26,7 @@ pub async fn run(redis_url: &str, queue: &str, scale: u32) -> ScenarioReport {
             outcome = Some(o);
         }
     }
-    outcome.expect("stopwatch must fire").into_report("queue-add")
+    outcome
+        .expect("stopwatch must fire")
+        .into_report("queue-add")
 }

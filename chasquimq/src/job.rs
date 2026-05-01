@@ -3,11 +3,20 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub type JobId = String;
 
+pub(crate) fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Job<T> {
     pub id: JobId,
     pub payload: T,
     pub created_at_ms: u64,
+    #[serde(default)]
+    pub attempt: u32,
 }
 
 impl<T> Job<T> {
@@ -16,14 +25,11 @@ impl<T> Job<T> {
     }
 
     pub fn with_id(id: JobId, payload: T) -> Self {
-        let created_at_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
         Self {
             id,
             payload,
-            created_at_ms,
+            created_at_ms: now_ms(),
+            attempt: 0,
         }
     }
 }

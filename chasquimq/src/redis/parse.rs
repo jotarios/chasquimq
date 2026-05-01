@@ -83,6 +83,80 @@ fn parse_entry(value: &Value) -> EntryShape {
     })
 }
 
+/// Parses an XRANGE response into a list of (entry_id, fields_map_pairs).
+/// Each entry is `[id, [k, v, k, v, ...]]`. We don't decode field-by-field
+/// here — caller pulls what they need.
+pub(crate) fn parse_xrange_response(value: &Value) -> Vec<XrangeEntry> {
+    let entries = match value {
+        Value::Array(items) => items,
+        _ => return Vec::new(),
+    };
+    entries.iter().filter_map(parse_xrange_entry).collect()
+}
+
+#[derive(Debug)]
+pub(crate) struct XrangeEntry {
+    pub id: String,
+    pub fields: Vec<(String, FieldValue)>,
+}
+
+#[derive(Debug)]
+pub(crate) enum FieldValue {
+    Str(String),
+    Bytes(Bytes),
+}
+
+impl FieldValue {
+    pub fn as_string(&self) -> Option<String> {
+        match self {
+            FieldValue::Str(s) => Some(s.clone()),
+            FieldValue::Bytes(b) => std::str::from_utf8(b).ok().map(|s| s.to_string()),
+        }
+    }
+
+    pub fn as_bytes(&self) -> Bytes {
+        match self {
+            FieldValue::Str(s) => Bytes::from(s.as_bytes().to_vec()),
+            FieldValue::Bytes(b) => b.clone(),
+        }
+    }
+}
+
+fn parse_xrange_entry(value: &Value) -> Option<XrangeEntry> {
+    let items = match value {
+        Value::Array(items) if items.len() >= 2 => items,
+        _ => return None,
+    };
+    let id = match &items[0] {
+        Value::String(s) => s.to_string(),
+        Value::Bytes(b) => std::str::from_utf8(b).ok()?.to_string(),
+        _ => return None,
+    };
+    let raw_fields = match &items[1] {
+        Value::Array(f) => f,
+        _ => return None,
+    };
+    let mut fields: Vec<(String, FieldValue)> = Vec::with_capacity(raw_fields.len() / 2);
+    let mut iter = raw_fields.iter();
+    while let (Some(name), Some(val)) = (iter.next(), iter.next()) {
+        let name_str = match name {
+            Value::String(s) => s.to_string(),
+            Value::Bytes(b) => match std::str::from_utf8(b) {
+                Ok(s) => s.to_string(),
+                Err(_) => continue,
+            },
+            _ => continue,
+        };
+        let field_val = match val {
+            Value::String(s) => FieldValue::Str(s.to_string()),
+            Value::Bytes(b) => FieldValue::Bytes(b.clone()),
+            _ => continue,
+        };
+        fields.push((name_str, field_val));
+    }
+    Some(XrangeEntry { id, fields })
+}
+
 fn extract_payload_field(fields: &[Value]) -> Option<Bytes> {
     let mut iter = fields.iter();
     while let (Some(name), Some(val)) = (iter.next(), iter.next()) {

@@ -2,15 +2,15 @@ use super::{ScenarioReport, Stopwatch, scaled_params};
 use crate::sample::{Payload, generate_sample};
 use chasquimq::Producer;
 use chasquimq::config::ProducerConfig;
+use std::time::Duration;
 
 pub async fn run(redis_url: &str, queue: &str, scale: u32) -> ScenarioReport {
-    let params = scaled_params(1_000, 10_000, scale);
-    let bulk_size: usize = 50;
-    let payload: Payload = generate_sample(1, 1);
+    let params = scaled_params(1_000, 1_000, scale);
+    let payload: Payload = generate_sample(10, 10);
 
     let cfg = ProducerConfig {
         queue_name: queue.to_string(),
-        pool_size: 8,
+        pool_size: 1,
         max_stream_len: 1_000_000,
         ..Default::default()
     };
@@ -20,21 +20,21 @@ pub async fn run(redis_url: &str, queue: &str, scale: u32) -> ScenarioReport {
 
     let mut sw = Stopwatch::new(params.warmup, params.bench);
     let total = params.warmup + params.bench;
-    let mut emitted: u64 = 0;
     let mut outcome = None;
-    while emitted < total && outcome.is_none() {
-        let remaining = (total - emitted) as usize;
-        let n = remaining.min(bulk_size);
-        let payloads: Vec<Payload> = (0..n).map(|_| payload.clone()).collect();
-        producer.add_bulk(payloads).await.expect("add_bulk");
-        for _ in 0..n {
-            if let Some(o) = sw.tick() {
-                outcome = Some(o);
-            }
+    // 1 hour out — far enough that fast-path doesn't fire and the ZADD path
+    // is what we measure. No promoter runs during this scenario, so the ZSET
+    // just grows.
+    let delay = Duration::from_secs(3600);
+    for _ in 0..total {
+        producer
+            .add_in(delay, payload.clone())
+            .await
+            .expect("add_in");
+        if let Some(o) = sw.tick() {
+            outcome = Some(o);
         }
-        emitted += n as u64;
     }
     outcome
         .expect("stopwatch must fire")
-        .into_report("queue-add-bulk")
+        .into_report("queue-add-delayed")
 }
