@@ -18,6 +18,25 @@ impl Default for ProducerConfig {
 }
 
 #[derive(Debug, Clone)]
+pub struct RetryConfig {
+    pub initial_backoff_ms: u64,
+    pub max_backoff_ms: u64,
+    pub multiplier: f64,
+    pub jitter_ms: u64,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            initial_backoff_ms: 100,
+            max_backoff_ms: 30_000,
+            multiplier: 2.0,
+            jitter_ms: 100,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct ConsumerConfig {
     pub queue_name: String,
     pub group: String,
@@ -32,6 +51,8 @@ pub struct ConsumerConfig {
     pub shutdown_deadline_secs: u64,
     pub max_payload_bytes: usize,
     pub dlq_inflight: usize,
+    pub retry: RetryConfig,
+    pub retry_inflight: usize,
     pub delayed_enabled: bool,
     pub delayed_poll_interval_ms: u64,
     pub delayed_promote_batch: usize,
@@ -55,6 +76,8 @@ impl Default for ConsumerConfig {
             shutdown_deadline_secs: 30,
             max_payload_bytes: 1_048_576,
             dlq_inflight: 32,
+            retry: RetryConfig::default(),
+            retry_inflight: 64,
             delayed_enabled: true,
             delayed_poll_interval_ms: 100,
             delayed_promote_batch: 256,

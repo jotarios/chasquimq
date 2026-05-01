@@ -15,6 +15,8 @@ pub struct Job<T> {
     pub id: JobId,
     pub payload: T,
     pub created_at_ms: u64,
+    #[serde(default)]
+    pub attempt: u32,
 }
 
 impl<T> Job<T> {
@@ -27,6 +29,7 @@ impl<T> Job<T> {
             id,
             payload,
             created_at_ms: now_ms(),
+            attempt: 0,
         }
     }
 }

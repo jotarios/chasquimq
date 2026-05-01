@@ -119,32 +119,39 @@ where
         }
     };
 
-    let attempt: u32 = u32::try_from(entry.delivery_count.saturating_add(1)).unwrap_or(u32::MAX);
-    if attempt > cfg.max_attempts {
-        dlq::enqueue(dlq_tx, entry.id, entry.payload, DlqReason::RetriesExhausted).await;
-        return DispatchFlow::Continue;
-    }
-
     if entry.payload.len() > cfg.max_payload_bytes {
         tracing::warn!(entry_id = %entry.id, size = entry.payload.len(), max = cfg.max_payload_bytes, "payload exceeds max_payload_bytes; routing to DLQ");
         dlq::enqueue(dlq_tx, entry.id, entry.payload, DlqReason::OversizePayload).await;
         return DispatchFlow::Continue;
     }
 
-    match rmp_serde::from_slice::<Job<T>>(&entry.payload) {
-        Ok(job) => {
-            let dispatched = DispatchedJob {
-                entry_id: entry.id,
-                job,
-            };
-            if job_tx.send(dispatched).await.is_err() {
-                return DispatchFlow::Break;
-            }
-        }
+    let job: Job<T> = match rmp_serde::from_slice(&entry.payload) {
+        Ok(j) => j,
         Err(decode_err) => {
             tracing::warn!(entry_id = %entry.id, error = %decode_err, "decode failed; routing to DLQ");
             dlq::enqueue(dlq_tx, entry.id, entry.payload, DlqReason::DecodeFailed).await;
+            return DispatchFlow::Continue;
         }
+    };
+
+    // Pick the larger of the in-payload attempt counter and the CLAIM-derived
+    // delivery_count. The retry-relocator path increments job.attempt explicitly;
+    // the CLAIM safety-net path bumps delivery_count when a worker crashes mid-
+    // handler. Either route should trigger DLQ once max_attempts is exhausted.
+    let claim_seen = u32::try_from(entry.delivery_count.saturating_sub(1)).unwrap_or(0);
+    let prior_attempts = job.attempt.max(claim_seen);
+    let next_attempt = prior_attempts.saturating_add(1);
+    if next_attempt > cfg.max_attempts {
+        dlq::enqueue(dlq_tx, entry.id, entry.payload, DlqReason::RetriesExhausted).await;
+        return DispatchFlow::Continue;
+    }
+
+    let dispatched = DispatchedJob {
+        entry_id: entry.id,
+        job,
+    };
+    if job_tx.send(dispatched).await.is_err() {
+        return DispatchFlow::Break;
     }
     DispatchFlow::Continue
 }

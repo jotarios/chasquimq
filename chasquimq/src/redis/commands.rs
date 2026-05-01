@@ -13,6 +13,14 @@ end
 return #due
 "#;
 
+pub(crate) const RETRY_RESCHEDULE_SCRIPT: &str = r#"
+-- KEYS[1] = stream, KEYS[2] = delayed
+-- ARGV[1] = group, ARGV[2] = entry_id, ARGV[3] = run_at_ms, ARGV[4] = encoded_bytes
+redis.call('XACKDEL', KEYS[1], ARGV[1], 'IDS', 1, ARGV[2])
+redis.call('ZADD', KEYS[2], tonumber(ARGV[3]), ARGV[4])
+return 1
+"#;
+
 pub(crate) const ACQUIRE_LOCK_SCRIPT: &str = r#"
 local cur = redis.call('GET', KEYS[1])
 if cur == false then
@@ -156,6 +164,48 @@ pub(crate) fn eval_promote_args(
 
 pub(crate) fn script_load_args(script: &str) -> Vec<Value> {
     vec![Value::from("LOAD"), Value::from(script)]
+}
+
+pub(crate) fn evalsha_retry_args(
+    sha: &str,
+    stream_key: &str,
+    delayed_key: &str,
+    group: &str,
+    entry_id: &str,
+    run_at_ms: i64,
+    bytes: Bytes,
+) -> Vec<Value> {
+    vec![
+        Value::from(sha),
+        Value::from(2_i64),
+        Value::from(stream_key),
+        Value::from(delayed_key),
+        Value::from(group),
+        Value::from(entry_id),
+        Value::from(run_at_ms),
+        Value::Bytes(bytes),
+    ]
+}
+
+pub(crate) fn eval_retry_args(
+    script: &str,
+    stream_key: &str,
+    delayed_key: &str,
+    group: &str,
+    entry_id: &str,
+    run_at_ms: i64,
+    bytes: Bytes,
+) -> Vec<Value> {
+    vec![
+        Value::from(script),
+        Value::from(2_i64),
+        Value::from(stream_key),
+        Value::from(delayed_key),
+        Value::from(group),
+        Value::from(entry_id),
+        Value::from(run_at_ms),
+        Value::Bytes(bytes),
+    ]
 }
 
 pub(crate) fn eval_acquire_lock_args(

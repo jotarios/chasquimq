@@ -97,7 +97,8 @@ fn consumer_cfg(queue: &str, consumer_id: &str, max_attempts: u32) -> ConsumerCo
         shutdown_deadline_secs: 5,
         max_payload_bytes: 1_048_576,
         dlq_inflight: 32,
-        delayed_enabled: false,
+        delayed_enabled: true,
+        delayed_poll_interval_ms: 25,
         ..Default::default()
     }
 }
@@ -212,11 +213,14 @@ async fn err_then_ok_succeeds_normally() {
 
     let main_key = stream_key(queue);
     let dlq = dlq_key(queue);
+    let calls_for_check = calls.clone();
     wait_until(Duration::from_secs(15), || {
         let admin = admin.clone();
         let main_key = main_key.clone();
+        let calls = calls_for_check.clone();
         async move {
-            xlen(&admin, &main_key).await == 0
+            calls.load(Ordering::SeqCst) >= 3
+                && xlen(&admin, &main_key).await == 0
                 && xpending_count(&admin, &main_key, "default").await == 0
         }
     })

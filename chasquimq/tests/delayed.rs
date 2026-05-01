@@ -150,6 +150,7 @@ fn consumer_cfg(queue: &str, consumer_id: &str, delayed_enabled: bool) -> Consum
         delayed_promote_batch: 256,
         delayed_max_stream_len: 100_000,
         delayed_lock_ttl_secs: 5,
+        ..Default::default()
     }
 }
 
