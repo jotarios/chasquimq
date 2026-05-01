@@ -78,6 +78,7 @@ fn producer_cfg(queue: &str) -> ProducerConfig {
         queue_name: queue.to_string(),
         pool_size: 2,
         max_stream_len: 10_000,
+        ..Default::default()
     }
 }
 
@@ -96,6 +97,8 @@ fn consumer_cfg(queue: &str, consumer_id: &str, max_attempts: u32) -> ConsumerCo
         shutdown_deadline_secs: 5,
         max_payload_bytes: 1_048_576,
         dlq_inflight: 32,
+        delayed_enabled: false,
+        ..Default::default()
     }
 }
 

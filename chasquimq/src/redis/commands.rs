@@ -2,6 +2,30 @@ use crate::redis::keys::PAYLOAD_FIELD;
 use bytes::Bytes;
 use fred::types::Value;
 
+pub(crate) const PROMOTE_SCRIPT: &str = r#"
+local time = redis.call('TIME')
+local now_ms = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
+local due = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', now_ms, 'LIMIT', 0, tonumber(ARGV[1]))
+for _, bytes in ipairs(due) do
+  redis.call('XADD', KEYS[2], 'MAXLEN', '~', tonumber(ARGV[2]), '*', 'd', bytes)
+  redis.call('ZREM', KEYS[1], bytes)
+end
+return #due
+"#;
+
+pub(crate) const ACQUIRE_LOCK_SCRIPT: &str = r#"
+local cur = redis.call('GET', KEYS[1])
+if cur == false then
+  redis.call('SET', KEYS[1], ARGV[1], 'EX', tonumber(ARGV[2]))
+  return 1
+end
+if cur == ARGV[1] then
+  redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
+  return 1
+end
+return 0
+"#;
+
 pub(crate) fn xadd_args(
     stream_key: &str,
     producer_id: &str,
@@ -86,4 +110,84 @@ pub(crate) fn xadd_dlq_args(
         args.push(Value::from(d));
     }
     args
+}
+
+pub(crate) fn zadd_delayed_args(delayed_key: &str, run_at_ms: i64, bytes: Bytes) -> Vec<Value> {
+    vec![
+        Value::from(delayed_key),
+        Value::from(run_at_ms),
+        Value::Bytes(bytes),
+    ]
+}
+
+pub(crate) fn evalsha_promote_args(
+    sha: &str,
+    delayed_key: &str,
+    stream_key: &str,
+    limit: usize,
+    max_stream_len: u64,
+) -> Vec<Value> {
+    vec![
+        Value::from(sha),
+        Value::from(2_i64),
+        Value::from(delayed_key),
+        Value::from(stream_key),
+        Value::from(limit as i64),
+        Value::from(max_stream_len as i64),
+    ]
+}
+
+pub(crate) fn eval_promote_args(
+    script: &str,
+    delayed_key: &str,
+    stream_key: &str,
+    limit: usize,
+    max_stream_len: u64,
+) -> Vec<Value> {
+    vec![
+        Value::from(script),
+        Value::from(2_i64),
+        Value::from(delayed_key),
+        Value::from(stream_key),
+        Value::from(limit as i64),
+        Value::from(max_stream_len as i64),
+    ]
+}
+
+pub(crate) fn script_load_args(script: &str) -> Vec<Value> {
+    vec![Value::from("LOAD"), Value::from(script)]
+}
+
+pub(crate) fn eval_acquire_lock_args(
+    script: &str,
+    lock_key: &str,
+    holder_id: &str,
+    ttl_secs: u64,
+) -> Vec<Value> {
+    vec![
+        Value::from(script),
+        Value::from(1_i64),
+        Value::from(lock_key),
+        Value::from(holder_id),
+        Value::from(ttl_secs as i64),
+    ]
+}
+
+pub(crate) fn evalsha_acquire_lock_args(
+    sha: &str,
+    lock_key: &str,
+    holder_id: &str,
+    ttl_secs: u64,
+) -> Vec<Value> {
+    vec![
+        Value::from(sha),
+        Value::from(1_i64),
+        Value::from(lock_key),
+        Value::from(holder_id),
+        Value::from(ttl_secs as i64),
+    ]
+}
+
+pub(crate) fn del_args(key: &str) -> Vec<Value> {
+    vec![Value::from(key)]
 }

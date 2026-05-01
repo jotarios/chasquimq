@@ -52,6 +52,7 @@ fn cfg(queue: &str, max_len: u64) -> ProducerConfig {
         queue_name: queue.to_string(),
         pool_size: 2,
         max_stream_len: max_len,
+        ..Default::default()
     }
 }
 

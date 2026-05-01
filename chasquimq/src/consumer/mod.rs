@@ -3,9 +3,10 @@ mod reader;
 mod worker;
 
 use crate::ack::{AckFlusherConfig, run_ack_flusher};
-use crate::config::ConsumerConfig;
+use crate::config::{ConsumerConfig, PromoterConfig};
 use crate::error::{HandlerError, Result};
 use crate::job::Job;
+use crate::promoter::Promoter;
 use crate::redis::conn::connect;
 use crate::redis::group::ensure_group;
 use crate::redis::keys::{dlq_key, stream_key};
@@ -81,6 +82,8 @@ where
             dlq_rx,
         ));
 
+        let promoter_handle = self.spawn_promoter(shutdown.clone());
+
         let workers = spawn_workers(concurrency, handler, job_rx, ack_tx.clone());
         drop(ack_tx);
 
@@ -93,6 +96,17 @@ where
             shutdown: shutdown.clone(),
         };
         let reader_outcome = reader_loop::<T>(read_state).await;
+
+        let promoter_outcome = match promoter_handle {
+            Some(h) => match h.await {
+                Ok(res) => res,
+                Err(e) => {
+                    tracing::warn!(error = %e, "promoter join error");
+                    Ok(())
+                }
+            },
+            None => Ok(()),
+        };
 
         drain_workers(
             workers,
@@ -107,6 +121,29 @@ where
             tracing::warn!(error = %e, "dlq relocator join error");
         }
 
-        reader_outcome
+        match (reader_outcome, promoter_outcome) {
+            (Err(e), _) => Err(e),
+            (Ok(()), Err(e)) => Err(e),
+            (Ok(()), Ok(())) => Ok(()),
+        }
+    }
+
+    fn spawn_promoter(
+        &self,
+        shutdown: CancellationToken,
+    ) -> Option<tokio::task::JoinHandle<Result<()>>> {
+        if !self.cfg.delayed_enabled {
+            return None;
+        }
+        let promoter_cfg = PromoterConfig {
+            queue_name: self.cfg.queue_name.clone(),
+            poll_interval_ms: self.cfg.delayed_poll_interval_ms,
+            promote_batch: self.cfg.delayed_promote_batch,
+            max_stream_len: self.cfg.delayed_max_stream_len,
+            lock_ttl_secs: self.cfg.delayed_lock_ttl_secs,
+            holder_id: self.cfg.consumer_id.clone(),
+        };
+        let promoter = Promoter::new(self.redis_url.clone(), promoter_cfg);
+        Some(tokio::spawn(promoter.run(shutdown)))
     }
 }

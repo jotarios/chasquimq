@@ -15,6 +15,7 @@ pub(crate) async fn preload_jobs(
             queue_name: queue.to_string(),
             pool_size,
             max_stream_len: 1_000_000,
+            ..Default::default()
         },
     )
     .await
