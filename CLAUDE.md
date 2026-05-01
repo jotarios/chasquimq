@@ -4,15 +4,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository status
 
-No engine code yet. What exists:
+Phase 1 (MVP) is shipped: Cargo workspace with `chasquimq` (engine) and `chasquimq-bench` (harness). API is pre-1.0 — breaking changes allowed but must be flagged in the commit (see [Commit conventions](#commit-conventions) below).
 
-- `prd/prd.md` — product requirements, the source of truth for product intent.
+Key files for context:
+
+- `README.md` — public-facing pitch, headline numbers, quickstart, feature comparison.
+- `CONTRIBUTING.md` — dev setup, PR workflow, commit conventions, in/out of scope.
+- `prd/prd.md` — product requirements, source of truth for product intent.
+- `benchmarks/README.md` — index for all bench reports (numbers, methodology, reproduction).
 - `benchmarks/baseline-bullmq.md` — measured BullMQ baseline on this host. **The numbers ChasquiMQ has to beat live here.** Read it before making any perf-related design choice.
+- `benchmarks/chasquimq-phase1.md` — ChasquiMQ Phase 1 measured results, post-critique iterations, harness improvements.
 - `benchmarks/runs/` (gitignored) — raw logs land here locally; only the summary `.md` files are committed.
 
-The upstream BullMQ benchmark suite is **not vendored** — it's cloned at `~/Projects/experiments/bullmq-bench` (sibling to this repo). Treat it as external; don't edit it.
+When updating user-facing docs, keep all four (`README.md`, `CONTRIBUTING.md`, `benchmarks/README.md`, this file) in sync. Don't duplicate content across them — link instead.
 
-When the user asks you to start implementing the engine, scaffold a Rust project (`cargo init`) at the repo root unless they specify otherwise. There is no existing `Cargo.toml` to extend.
+The upstream BullMQ benchmark suite is **not vendored** — it's cloned at `~/Projects/experiments/bullmq-bench` (sibling to this repo). Treat it as external; don't edit it.
 
 ## Product
 
@@ -50,6 +56,20 @@ Stay inside the current phase unless the user asks to expand. Building Phase 2 f
 - **Phase 2:** Delayed jobs (sorted sets), automatic retries with exponential backoff, dead-letter queue.
 - **Phase 3:** Node.js bindings via NAPI-RS — JS workers process jobs pulled by the Rust engine.
 - **Phase 4:** Python bindings via PyO3, CLI monitoring dashboard.
+
+## Commit conventions
+
+This repo uses **[Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/)**. Full reference and examples in `CONTRIBUTING.md`; the short version for day-to-day work:
+
+```
+<type>(<optional scope>): <subject ≤72 chars, imperative, no trailing period>
+```
+
+Types in use: `feat`, `fix`, `perf`, `refactor`, `bench`, `docs`, `test`, `build`, `chore`. Common scopes: `producer`, `consumer`, `ack`, `dlq`, `redis`, `bench`, `config`.
+
+- **Pick the most specific type.** A bench-harness change is `bench:`, not `chore:`. A throughput improvement is `perf:`, not `refactor:` — and `perf:` commits should include before/after numbers in the body.
+- **Breaking changes:** mark with `!` after the type/scope **and** a `BREAKING CHANGE:` footer. Until 1.0, breakage is allowed without a major bump but must be flagged this way so the changelog catches it.
+- **Don't include `Co-Authored-By: Claude` trailers** (per user preference).
 
 ## Success metrics drive design choices
 
