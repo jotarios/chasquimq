@@ -27,7 +27,8 @@ Measured on Apple M3, Redis 8.6 (Docker, loopback), single host. BullMQ 5.76.4 b
 - [`baseline-bullmq.md`](baseline-bullmq.md) — full BullMQ baseline methodology, raw numbers, lessons from running the suite (notably: `enableAutoPipelining` *hurts* on loopback).
 - [`chasquimq-phase1.md`](chasquimq-phase1.md) — full ChasquiMQ Phase 1 results, post-critique iterations, and harness improvements (distribution stats, `--scale` flag, slowest-discard).
 - [`chasquimq-phase2-slice2.md`](chasquimq-phase2-slice2.md) — Phase 2 slices 1 (delayed jobs) and 2 (retry backoff). No-regression check on Phase 1 hot-path scenarios + three new scenarios for the delayed and retry paths.
-- [`chasquimq-phase2-final.md`](chasquimq-phase2-final.md) — **Final Phase 2 ship-readiness measurement.** All three slices (delayed jobs, retry backoff, DLQ tooling) + the daster-bug review fixes. 5 repeats × scale=5, drop-slowest applied. Both headline gates clear: `queue-add-bulk` 3.18×, `worker-concurrent` 8.71×.
+- [`chasquimq-phase2-final.md`](chasquimq-phase2-final.md) — Final Phase 2 (slices 1–3) ship-readiness measurement. All three slices (delayed jobs, retry backoff, DLQ tooling) + the daster-bug review fixes. 5 repeats × scale=5, drop-slowest applied. Both headline gates clear: `queue-add-bulk` 3.18×, `worker-concurrent` 8.71×.
+- [`observability.md`](observability.md) — **Slice 4 (observability) no-regression check.** `MetricsSink` trait + `dispatch()` panic-safe wrapper + extended PROMOTE_SCRIPT returning `{promoted, depth, oldest_pending_lag_ms}`. Mean of 3 invocations: gates still clear (`queue-add-bulk` 3.15×, `worker-concurrent` 8.74×), no regression on the worker paths that actually exercise the changes.
 
 ## Reproducing
 

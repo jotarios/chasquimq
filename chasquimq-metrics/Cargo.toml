@@ -1,0 +1,25 @@
+[package]
+name = "chasquimq-metrics"
+version = "0.1.0"
+description = "Bridge ChasquiMQ's MetricsSink to the metrics-rs facade."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+chasquimq = { path = "../chasquimq", version = "0.1" }
+metrics = "0.24"
+
+[dev-dependencies]
+metrics-util = "0.20"
+# examples/ only — not part of the adapter's runtime surface.
+# `prometheus` + `tiny_http` back the hand-rolled prometheus_sink example.
+# `metrics-exporter-prometheus` backs the facade_sink example (the canonical
+# path through this crate — install a metrics-rs recorder, plug in
+# MetricsFacadeSink, done).
+prometheus = "0.13"
+tiny_http = "0.12"
+metrics-exporter-prometheus = { version = "0.16", default-features = false, features = ["http-listener"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+tokio-util = { version = "0.7", features = ["rt"] }

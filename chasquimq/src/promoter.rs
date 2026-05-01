@@ -1,5 +1,6 @@
 use crate::config::PromoterConfig;
 use crate::error::{Error, Result};
+use crate::metrics::{LockOutcome, PromoterTick, dispatch};
 use crate::redis::commands::{
     ACQUIRE_LOCK_SCRIPT, PROMOTE_SCRIPT, RELEASE_LOCK_SCRIPT, eval_acquire_lock_args,
     eval_promote_args, eval_release_lock_args, evalsha_acquire_lock_args, evalsha_promote_args,
@@ -57,6 +58,10 @@ impl Promoter {
     ) -> Result<()> {
         let poll = Duration::from_millis(self.cfg.poll_interval_ms);
         let mut backoff_idx: usize = 0;
+        // Track the previous lock outcome so we emit metrics on transitions
+        // only — otherwise a non-leader replica would emit `Held` on every
+        // poll forever, drowning the gauge.
+        let mut last_outcome: Option<LockOutcome> = None;
         loop {
             if shutdown.is_cancelled() {
                 return Ok(());
@@ -78,6 +83,19 @@ impl Promoter {
                 Err(LockError::Permanent(e)) => return Err(Error::Redis(e)),
             };
 
+            let outcome = if acquired {
+                LockOutcome::Acquired
+            } else {
+                LockOutcome::Held
+            };
+            if last_outcome != Some(outcome) {
+                let sink = &*self.cfg.metrics;
+                dispatch("promoter_lock_outcome", || {
+                    sink.promoter_lock_outcome(outcome)
+                });
+                last_outcome = Some(outcome);
+            }
+
             if !acquired {
                 if !sleep_or_shutdown(poll, shutdown).await {
                     return Ok(());
@@ -86,27 +104,21 @@ impl Promoter {
             }
 
             match self.promote_once(client, promote_sha).await {
-                Ok(due_count) => {
-                    backoff_idx = 0;
-                    if due_count >= self.cfg.promote_batch {
-                        continue;
-                    }
-                    if !sleep_or_shutdown(poll, shutdown).await {
-                        return Ok(());
-                    }
-                }
+                Ok(tick) => match self.handle_tick(tick, &mut backoff_idx, poll, shutdown).await {
+                    TickAction::Drain => continue,
+                    TickAction::Shutdown => return Ok(()),
+                    TickAction::Polled => {}
+                },
                 Err(PromoteError::NoScript) => {
                     *promote_sha = load_script(client, PROMOTE_SCRIPT).await?;
-                    let count =
+                    let tick =
                         run_promote_eval(client, &self.delayed_key, &self.stream_key, &self.cfg)
                             .await
                             .map_err(Error::Redis)?;
-                    backoff_idx = 0;
-                    if count >= self.cfg.promote_batch {
-                        continue;
-                    }
-                    if !sleep_or_shutdown(poll, shutdown).await {
-                        return Ok(());
+                    match self.handle_tick(tick, &mut backoff_idx, poll, shutdown).await {
+                        TickAction::Drain => continue,
+                        TickAction::Shutdown => return Ok(()),
+                        TickAction::Polled => {}
                     }
                 }
                 Err(PromoteError::Transient(e)) => {
@@ -118,6 +130,34 @@ impl Promoter {
                 Err(PromoteError::Permanent(e)) => return Err(Error::Redis(e)),
             }
         }
+    }
+
+    /// Emit the tick metric, reset transient-error backoff, and decide what
+    /// the loop should do next:
+    /// - `Drain`: there are still due entries, iterate immediately without sleeping.
+    /// - `Shutdown`: the shutdown token fired during the inter-tick sleep; exit cleanly.
+    /// - `Polled`: a normal poll-interval has elapsed; iterate.
+    ///
+    /// Pulled out of the loop so the Ok and NoScript paths can't drift.
+    async fn handle_tick(
+        &self,
+        tick: PromoterTick,
+        backoff_idx: &mut usize,
+        poll: Duration,
+        shutdown: &CancellationToken,
+    ) -> TickAction {
+        let sink = &*self.cfg.metrics;
+        dispatch("promoter_tick", || sink.promoter_tick(tick));
+        *backoff_idx = 0;
+        // Widen `promote_batch` to u64 instead of narrowing `tick.promoted`
+        // to usize — on 32-bit targets the latter would silently truncate.
+        if tick.promoted >= self.cfg.promote_batch as u64 {
+            return TickAction::Drain;
+        }
+        if !sleep_or_shutdown(poll, shutdown).await {
+            return TickAction::Shutdown;
+        }
+        TickAction::Polled
     }
 
     async fn acquire_lock(
@@ -155,7 +195,7 @@ impl Promoter {
         &self,
         client: &Client,
         sha: &str,
-    ) -> std::result::Result<usize, PromoteError> {
+    ) -> std::result::Result<PromoterTick, PromoteError> {
         let cmd = CustomCommand::new_static("EVALSHA", ClusterHash::FirstKey, false);
         let args = evalsha_promote_args(
             sha,
@@ -166,7 +206,7 @@ impl Promoter {
         );
         let res: std::result::Result<Value, fred::error::Error> = client.custom(cmd, args).await;
         match res {
-            Ok(v) => Ok(value_as_count(&v)),
+            Ok(v) => Ok(value_as_tick(&v)),
             Err(e) => Err(classify_promote_error(e)),
         }
     }
@@ -185,6 +225,18 @@ enum PromoteError {
     NoScript,
     Transient(fred::error::Error),
     Permanent(fred::error::Error),
+}
+
+/// Outcome of one `handle_tick`. The three variants mirror what the loop
+/// must do next; using a named enum (instead of stdlib `ControlFlow` or a
+/// bool) avoids confusion with `std::ops::ControlFlow` semantics.
+enum TickAction {
+    /// Promoted a full batch — likely more entries due. Iterate without sleeping.
+    Drain,
+    /// Shutdown token fired during the inter-tick sleep. Exit the loop cleanly.
+    Shutdown,
+    /// One full poll interval elapsed. Iterate normally.
+    Polled,
 }
 
 enum LockError {
@@ -223,9 +275,33 @@ fn is_transient(err: &fred::error::Error) -> bool {
     )
 }
 
-fn value_as_count(v: &Value) -> usize {
+pub(crate) fn value_as_tick(v: &Value) -> PromoterTick {
+    // PROMOTE_SCRIPT returns `{promoted, depth, oldest_pending_lag_ms}` as a
+    // Lua table, which fred surfaces as `Value::Array`. Older deployments /
+    // a future script regression would return a bare integer for `promoted`
+    // — we accept that shape for forward-compatibility and zero out the rest.
     match v {
-        Value::Integer(n) => (*n).max(0) as usize,
+        Value::Array(items) => PromoterTick {
+            promoted: items.first().map(value_as_u64).unwrap_or(0),
+            depth: items.get(1).map(value_as_u64).unwrap_or(0),
+            oldest_pending_lag_ms: items.get(2).map(value_as_u64).unwrap_or(0),
+        },
+        Value::Integer(n) => PromoterTick {
+            promoted: (*n).max(0) as u64,
+            depth: 0,
+            oldest_pending_lag_ms: 0,
+        },
+        _ => PromoterTick {
+            promoted: 0,
+            depth: 0,
+            oldest_pending_lag_ms: 0,
+        },
+    }
+}
+
+fn value_as_u64(v: &Value) -> u64 {
+    match v {
+        Value::Integer(n) => (*n).max(0) as u64,
         _ => 0,
     }
 }
@@ -259,7 +335,7 @@ async fn run_promote_eval(
     delayed_key: &str,
     stream_key: &str,
     cfg: &PromoterConfig,
-) -> std::result::Result<usize, fred::error::Error> {
+) -> std::result::Result<PromoterTick, fred::error::Error> {
     let cmd = CustomCommand::new_static("EVAL", ClusterHash::FirstKey, false);
     let args = eval_promote_args(
         PROMOTE_SCRIPT,
@@ -269,7 +345,7 @@ async fn run_promote_eval(
         cfg.max_stream_len,
     );
     let res: Value = client.custom(cmd, args).await?;
-    Ok(value_as_count(&res))
+    Ok(value_as_tick(&res))
 }
 
 async fn sleep_or_shutdown(d: Duration, shutdown: &CancellationToken) -> bool {
@@ -291,4 +367,76 @@ async fn backoff_after(
         return None;
     }
     Some(idx.saturating_add(1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn value_as_tick_parses_three_element_array() {
+        let v = Value::Array(vec![
+            Value::Integer(7),
+            Value::Integer(42),
+            Value::Integer(1500),
+        ]);
+        let t = value_as_tick(&v);
+        assert_eq!(t.promoted, 7);
+        assert_eq!(t.depth, 42);
+        assert_eq!(t.oldest_pending_lag_ms, 1500);
+    }
+
+    #[test]
+    fn value_as_tick_short_array_zeros_missing_fields() {
+        // Forward-compat: a future script returning fewer fields should not panic;
+        // missing trailing fields default to 0.
+        let v = Value::Array(vec![Value::Integer(3)]);
+        let t = value_as_tick(&v);
+        assert_eq!(t.promoted, 3);
+        assert_eq!(t.depth, 0);
+        assert_eq!(t.oldest_pending_lag_ms, 0);
+    }
+
+    #[test]
+    fn value_as_tick_legacy_integer_treated_as_promoted_count() {
+        // An older script that returned a bare integer for `promoted` is
+        // still parseable; depth and lag default to 0.
+        let v = Value::Integer(11);
+        let t = value_as_tick(&v);
+        assert_eq!(t.promoted, 11);
+        assert_eq!(t.depth, 0);
+        assert_eq!(t.oldest_pending_lag_ms, 0);
+    }
+
+    #[test]
+    fn value_as_tick_negative_integer_clamps_to_zero() {
+        // Lua should never return negative counts, but be defensive.
+        let v = Value::Integer(-5);
+        let t = value_as_tick(&v);
+        assert_eq!(t.promoted, 0);
+    }
+
+    #[test]
+    fn value_as_tick_unexpected_shape_returns_zero_tick() {
+        let v = Value::Null;
+        let t = value_as_tick(&v);
+        assert_eq!(t.promoted, 0);
+        assert_eq!(t.depth, 0);
+        assert_eq!(t.oldest_pending_lag_ms, 0);
+    }
+
+    #[test]
+    fn value_as_tick_array_with_non_integer_items_zeros_those_fields() {
+        // If the script ever returns a string where we expected an integer,
+        // that field should be 0, not panic.
+        let v = Value::Array(vec![
+            Value::Integer(5),
+            Value::String("oops".into()),
+            Value::Integer(99),
+        ]);
+        let t = value_as_tick(&v);
+        assert_eq!(t.promoted, 5);
+        assert_eq!(t.depth, 0);
+        assert_eq!(t.oldest_pending_lag_ms, 99);
+    }
 }

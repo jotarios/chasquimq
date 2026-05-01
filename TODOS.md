@@ -59,18 +59,6 @@ Deferred work tracked outside of phase plans. Each entry: what, why, pros, cons,
 - **Context:** Outside-voice review flagged this as a likely follow-up.
 - **Depends on / blocked by:** ZSET memory encoding bench. Phase 3 work.
 
-### Promoter observability surface
-
-- **What:** Counters and gauges so operators can answer "is the promoter healthy?":
-  - `chasquimq_promoter_promoted_total` — counter of jobs promoted per tick.
-  - `chasquimq_delayed_zset_depth` — gauge from `ZCARD <delayed-key>`.
-  - `chasquimq_promoter_lag_ms` — `now - min_score_in_zset`; tells you how late you are.
-- **Why:** Today the only signal is "is the lock held? and is ZCARD trending down?" via `redis-cli`. Production deployments need machine-readable metrics.
-- **Pros:** One-shot Prometheus integration, ~80 LOC.
-- **Cons:** Adds a `metrics` crate dependency or a metrics-trait abstraction; bikeshed risk.
-- **Context:** Outside-voice review surfaced this. Phase 2.5 work — after retry-with-backoff lands.
-- **Depends on / blocked by:** None.
-
 ### Strict-MAXLEN policy for queues that can't tolerate eviction
 
 - **What:** A `ConsumerConfig` / `ProducerConfig` knob that switches stream `XADD` from `MAXLEN ~ N` (approximate) to `MAXLEN = N` (strict), guaranteeing entries aren't evicted before consumers read them.
@@ -95,3 +83,12 @@ Deferred work tracked outside of phase plans. Each entry: what, why, pros, cons,
 - **Cons:** Two harnesses to maintain. Numbers won't be directly comparable to BullMQ's published numbers. More setup complexity (two processes, IPC for signaling, watching Redis-side state).
 - **Context:** Outside-voice review proposed this as a methodological correction. Phase 1 deliberately said no because it would break the bullmq-bench comparison the project exists to make.
 - **Depends on / blocked by:** Phase 1 must complete first and produce a defensible apples-to-apples comparison. Then this becomes a Phase 2+ "fairness layer" addition.
+
+### Consumer- and retry-side observability hooks
+
+- **What:** Extend `MetricsSink` with consumer-loop hooks: `jobs_claimed_total`, `jobs_acked_total`, `jobs_dlqd_total`, `retry_rescheduled_total`, and tick-style events for ack-flusher latency / batch sizes.
+- **Why:** The Phase 2 slice 4 observability surface only covers the promoter. Operators care more about end-to-end job throughput than scheduling lag — currently they have to derive it from `XLEN` polls.
+- **Pros:** Closes the rest of the observability lake. Users get a single trait that covers every load-bearing engine subsystem. ~120 LOC of trait additions + threading + tests.
+- **Cons:** Each new event added to the trait is technically a breaking change for users who implemented `MetricsSink` themselves (default-method bodies cushion this, but the trait surface grows). Need to decide whether each event family lives under a separate trait or stays on `MetricsSink`.
+- **Context:** Surfaced in the `feat/observability` plan-eng-review on 2026-05-01. Promoter hooks shipped; consumer/retry/DLQ hooks deferred.
+- **Depends on / blocked by:** None.
