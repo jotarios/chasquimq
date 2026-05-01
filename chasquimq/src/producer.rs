@@ -5,7 +5,7 @@ use bytes::Bytes;
 use fred::clients::Pool;
 use fred::interfaces::ClientLike;
 use fred::prelude::Config;
-use fred::types::{ClusterHash, ConnectHandle, CustomCommand, Value};
+use fred::types::{ClusterHash, CustomCommand, Value};
 use serde::Serialize;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -25,7 +25,6 @@ pub struct Producer<T> {
     producer_id: Arc<str>,
     stream_key: Arc<str>,
     max_stream_len: u64,
-    _connect_handle: Arc<ConnectHandle>,
     _marker: PhantomData<fn(T)>,
 }
 
@@ -36,23 +35,19 @@ impl<T> Clone for Producer<T> {
             producer_id: self.producer_id.clone(),
             stream_key: self.stream_key.clone(),
             max_stream_len: self.max_stream_len,
-            _connect_handle: self._connect_handle.clone(),
             _marker: PhantomData,
         }
     }
 }
 
-impl<T> Producer<T>
-where
-    T: Serialize + Send + Sync + 'static,
-{
+impl<T: Serialize> Producer<T> {
     pub async fn connect(redis_url: &str, config: ProducerConfig) -> Result<Self> {
         if config.pool_size == 0 {
             return Err(Error::Config("pool_size must be > 0".into()));
         }
         let cfg = Config::from_url(redis_url).map_err(Error::Redis)?;
         let pool = Pool::new(cfg, None, None, None, config.pool_size).map_err(Error::Redis)?;
-        let handle = pool.init().await.map_err(Error::Redis)?;
+        std::mem::drop(pool.init().await.map_err(Error::Redis)?);
         let producer_id: Arc<str> = Arc::from(uuid::Uuid::new_v4().to_string());
         let stream_key: Arc<str> = Arc::from(stream_key(&config.queue_name));
         Ok(Self {
@@ -60,7 +55,6 @@ where
             producer_id,
             stream_key,
             max_stream_len: config.max_stream_len,
-            _connect_handle: Arc::new(handle),
             _marker: PhantomData,
         })
     }
@@ -111,7 +105,10 @@ where
                 self.max_stream_len,
                 bytes.clone(),
             );
-            let _: () = pipeline.custom(cmd.clone(), args).await.map_err(Error::Redis)?;
+            let _: () = pipeline
+                .custom(cmd.clone(), args)
+                .await
+                .map_err(Error::Redis)?;
         }
         let _: Vec<Value> = pipeline.all().await.map_err(Error::Redis)?;
         Ok(encoded.into_iter().map(|(id, _)| id).collect())

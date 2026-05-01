@@ -18,6 +18,8 @@ uuid = { version = "1", features = ["v4"] }
 bytes = "1"
 thiserror = "1"
 tracing = "0.1"
+async-channel = "2"
+futures-util = "0.3"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

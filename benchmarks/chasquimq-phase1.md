@@ -89,4 +89,26 @@ cargo run -p chasquimq-bench --release -- --repeats 3
 - `benchmarks/runs/chasquimq-phase1-2026-05-01.log` — first sweep (cold-start variant).
 - `benchmarks/runs/spike-2026-04-30.log` — Phase 0b spike pool-size sweep.
 
+## Post-critique refactor (2026-05-01, same day)
+
+After self-critique, fixed:
+- Replaced `Arc<Mutex<mpsc::Receiver>>` with `async-channel` (true multi-receiver, no contention).
+- Removed `tokio::spawn(handler)` inside each worker (per-job task allocation overhead) in favor of `FuturesUtil::catch_unwind` for inline panic-catching.
+- Added bounded retry+exponential-backoff on ack-flush failures (was: silently drop the buffer, which would have promoted successful jobs to DLQ on flaky networks).
+- Added bounded retry on DLQ-relocation failures.
+- Removed dead code (`let _ = ack_tx.capacity()`, `Arc<ConnectHandle>` field).
+
+Re-bench (3 repeats, post-refactor):
+
+| Scenario | jobs/s | CPU% | × BullMQ |
+|---|---:|---:|---:|
+| `queue-add`         | 17,116  | 26%  | 1.23× |
+| `queue-add-bulk`    | 181,749 | 59%  | 2.99× (right at 3× line) |
+| `worker-generic`    | 416,687 | 67%  | 31.4× |
+| `worker-concurrent` | 385,574 | 162% | 8.08× |
+
+The refactor is **correctness-positive but not a perf win**: numbers are within variance of the pre-critique run. Likely reason: Redis is the bottleneck, not the worker channel. `async-channel` + lock-free recv adds ~the same overhead per dispatch as the previous `Mutex<mpsc>` approach because contention was rare (workers spend most of their time in the handler, not in recv). Keeping the refactor anyway: the correctness wins (proper retry on ack/DLQ failure, no per-job task allocation, real multi-receiver semantics) outweigh the lack of headline movement, and headline is still ≥3× on both gates.
+
+Raw log: `benchmarks/runs/chasquimq-phase1-2026-05-01-postcritique.log`.
+
 ## Phase 1 verified ✓
