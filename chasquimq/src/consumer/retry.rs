@@ -1,5 +1,6 @@
 use crate::config::RetryConfig;
 use crate::error::{Error, Result};
+use crate::metrics::{self, MetricsSink, RetryScheduled};
 use crate::redis::commands::{
     RETRY_RESCHEDULE_SCRIPT, eval_retry_args, evalsha_retry_args, script_load_args,
 };
@@ -8,6 +9,7 @@ use bytes::Bytes;
 use fred::clients::Client;
 use fred::interfaces::ClientLike;
 use fred::types::{ClusterHash, CustomCommand, Value};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -19,12 +21,20 @@ pub(crate) struct RetryRelocate {
     pub entry_id: StreamEntryId,
     pub job_bytes: Bytes,
     pub run_at_ms: i64,
+    /// Attempt number the rescheduled job will run as
+    /// (i.e. `previous_attempt + 1`). Carried so the metric event records
+    /// "the retry that's about to happen" without having to decode the
+    /// payload on the relocator hot path.
+    pub attempt: u32,
+    /// Backoff that was applied at enqueue time. Carried for the metric.
+    pub backoff_ms: u64,
 }
 
 pub(crate) struct RetryRelocatorConfig {
     pub stream_key: String,
     pub delayed_key: String,
     pub group: String,
+    pub metrics: Arc<dyn MetricsSink>,
 }
 
 pub(crate) async fn enqueue(
@@ -32,12 +42,16 @@ pub(crate) async fn enqueue(
     entry_id: StreamEntryId,
     job_bytes: Bytes,
     run_at_ms: i64,
+    attempt: u32,
+    backoff_ms: u64,
 ) {
     if tx
         .send(RetryRelocate {
             entry_id,
             job_bytes,
             run_at_ms,
+            attempt,
+            backoff_ms,
         })
         .await
         .is_err()
@@ -59,8 +73,24 @@ pub(crate) async fn run_retry_relocator(
         }
     };
     while let Some(relocate) = rx.recv().await {
-        if let Err(e) = reschedule_with_retry(&client, &cfg, &relocate, &mut sha).await {
-            tracing::error!(entry_id = %relocate.entry_id, error = %e, "retry reschedule failed permanently; entry remains pending and will be retried on next CLAIM tick");
+        match reschedule_with_retry(&client, &cfg, &relocate, &mut sha).await {
+            Ok(true) => {
+                let event = RetryScheduled {
+                    attempt: relocate.attempt,
+                    backoff_ms: relocate.backoff_ms,
+                };
+                let sink = &*cfg.metrics;
+                metrics::dispatch("retry_scheduled", || sink.retry_scheduled(event));
+            }
+            Ok(false) => {
+                // Script returned 0: XACKDEL race lost — the entry was
+                // already removed by a concurrent path (CLAIM, manual
+                // ack, etc.). The gate did its job; no double-schedule.
+                tracing::trace!(entry_id = %relocate.entry_id, "retry reschedule gated: entry already removed");
+            }
+            Err(e) => {
+                tracing::error!(entry_id = %relocate.entry_id, error = %e, "retry reschedule failed permanently; entry remains pending and will be retried on next CLAIM tick");
+            }
         }
     }
 }
@@ -70,11 +100,11 @@ async fn reschedule_with_retry(
     cfg: &RetryRelocatorConfig,
     relocate: &RetryRelocate,
     sha: &mut String,
-) -> Result<()> {
+) -> Result<bool> {
     let mut last_err: Option<Error> = None;
     for attempt in 0..RETRY_REDIS_ATTEMPTS {
         match reschedule_once(client, cfg, relocate, sha).await {
-            Ok(()) => return Ok(()),
+            Ok(rescheduled) => return Ok(rescheduled),
             Err(e) => {
                 let backoff = RETRY_REDIS_BASE_MS << attempt;
                 tracing::warn!(entry_id = %relocate.entry_id, attempt = attempt + 1, error = %e, backoff_ms = backoff, "retry reschedule failed; retrying");
@@ -91,7 +121,7 @@ async fn reschedule_once(
     cfg: &RetryRelocatorConfig,
     relocate: &RetryRelocate,
     sha: &mut String,
-) -> Result<()> {
+) -> Result<bool> {
     let cmd = CustomCommand::new_static("EVALSHA", ClusterHash::FirstKey, false);
     let args = evalsha_retry_args(
         sha,
@@ -104,7 +134,7 @@ async fn reschedule_once(
     );
     let res: std::result::Result<Value, fred::error::Error> = client.custom(cmd, args).await;
     match res {
-        Ok(_) => Ok(()),
+        Ok(v) => Ok(script_returned_one(&v)),
         Err(e) if format!("{e}").contains("NOSCRIPT") => {
             *sha = load_script(client).await?;
             let cmd = CustomCommand::new_static("EVAL", ClusterHash::FirstKey, false);
@@ -117,10 +147,25 @@ async fn reschedule_once(
                 relocate.run_at_ms,
                 relocate.job_bytes.clone(),
             );
-            let _: Value = client.custom(cmd, args).await.map_err(Error::Redis)?;
-            Ok(())
+            let v: Value = client.custom(cmd, args).await.map_err(Error::Redis)?;
+            Ok(script_returned_one(&v))
         }
         Err(e) => Err(Error::Redis(e)),
+    }
+}
+
+/// `RETRY_RESCHEDULE_SCRIPT` returns Lua `1` (rescheduled) or `0` (gate fired
+/// — XACKDEL found nothing to ack). Be defensive about how `fred` shapes the
+/// `Value`: integers can come back as `Integer` or as a stringified payload
+/// depending on protocol version. Anything not matching `1` is treated as
+/// "did not reschedule" (the safe default — we'd rather miss the metric than
+/// over-count it).
+fn script_returned_one(v: &Value) -> bool {
+    match v {
+        Value::Integer(n) => *n == 1,
+        Value::String(s) => s.as_bytes() == b"1",
+        Value::Bytes(b) => b.as_ref() == b"1",
+        _ => false,
     }
 }
 
@@ -226,5 +271,18 @@ mod tests {
             jitter_ms: 0,
         };
         assert_eq!(backoff_ms(0, &cfg), 100);
+    }
+
+    #[test]
+    fn script_returned_one_handles_value_shapes() {
+        assert!(script_returned_one(&Value::Integer(1)));
+        assert!(!script_returned_one(&Value::Integer(0)));
+        assert!(!script_returned_one(&Value::Integer(2)));
+        assert!(script_returned_one(&Value::String("1".into())));
+        assert!(!script_returned_one(&Value::String("0".into())));
+        assert!(script_returned_one(&Value::Bytes(bytes::Bytes::from_static(
+            b"1"
+        ))));
+        assert!(!script_returned_one(&Value::Null));
     }
 }

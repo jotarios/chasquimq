@@ -3,6 +3,7 @@ use crate::consumer::dlq::{self, DlqReason, DlqRelocate};
 use crate::consumer::worker::DispatchedJob;
 use crate::error::Result;
 use crate::job::Job;
+use crate::metrics::{self, MetricsSink, ReaderBatch};
 use crate::redis::commands::xreadgroup_args;
 use crate::redis::parse::{EntryShape, parse_xreadgroup_response};
 use bytes::Bytes;
@@ -21,6 +22,7 @@ pub(crate) struct ReadState<T> {
     pub job_tx: async_channel::Sender<DispatchedJob<T>>,
     pub dlq_tx: mpsc::Sender<DlqRelocate>,
     pub shutdown: CancellationToken,
+    pub metrics: Arc<dyn MetricsSink>,
 }
 
 pub(crate) async fn reader_loop<T>(state: ReadState<T>) -> Result<()>
@@ -34,6 +36,7 @@ where
         job_tx,
         dlq_tx,
         shutdown,
+        metrics: metrics_sink,
     } = state;
 
     let cmd = CustomCommand::new_static("XREADGROUP", ClusterHash::FirstKey, false);
@@ -70,6 +73,26 @@ where
         if entries.is_empty() {
             continue;
         }
+
+        // Emit ReaderBatch on every non-empty response. `size` is the raw
+        // count from Redis (including entries that are about to be DLQ-routed
+        // for being malformed / oversize / undecodable). `reclaimed` counts
+        // entries with delivery_count > 1, which is the CLAIM-recovery
+        // signal — only `EntryShape::Ok` carries a parsed delivery_count;
+        // malformed/unrecoverable variants don't, and aren't included in
+        // the reclaimed count even if Redis bumped their delivery counter
+        // (their cardinality is dominated by the malformed signal anyway).
+        let size = entries.len() as u64;
+        let reclaimed = entries
+            .iter()
+            .filter(|e| match e {
+                EntryShape::Ok(p) => p.delivery_count > 1,
+                _ => false,
+            })
+            .count() as u64;
+        let batch = ReaderBatch { size, reclaimed };
+        let sink = &*metrics_sink;
+        metrics::dispatch("reader_batch", || sink.reader_batch(batch));
 
         for shape in entries {
             if dispatch_one::<T>(shape, &cfg, &job_tx, &dlq_tx)
@@ -108,7 +131,15 @@ where
         EntryShape::Ok(e) => e,
         EntryShape::MalformedWithId { id, reason } => {
             tracing::warn!(entry_id = %id, reason, "malformed stream entry; routing to DLQ");
-            dlq::enqueue(dlq_tx, id, Bytes::new(), DlqReason::Malformed { reason }).await;
+            // Reader-side DLQ: handler never ran, so attempt is 0.
+            dlq::enqueue(
+                dlq_tx,
+                id,
+                Bytes::new(),
+                DlqReason::Malformed { reason },
+                0,
+            )
+            .await;
             return DispatchFlow::Continue;
         }
         EntryShape::Unrecoverable => {
@@ -121,7 +152,14 @@ where
 
     if entry.payload.len() > cfg.max_payload_bytes {
         tracing::warn!(entry_id = %entry.id, size = entry.payload.len(), max = cfg.max_payload_bytes, "payload exceeds max_payload_bytes; routing to DLQ");
-        dlq::enqueue(dlq_tx, entry.id, entry.payload, DlqReason::OversizePayload).await;
+        dlq::enqueue(
+            dlq_tx,
+            entry.id,
+            entry.payload,
+            DlqReason::OversizePayload,
+            0,
+        )
+        .await;
         return DispatchFlow::Continue;
     }
 
@@ -129,7 +167,7 @@ where
         Ok(j) => j,
         Err(decode_err) => {
             tracing::warn!(entry_id = %entry.id, error = %decode_err, "decode failed; routing to DLQ");
-            dlq::enqueue(dlq_tx, entry.id, entry.payload, DlqReason::DecodeFailed).await;
+            dlq::enqueue(dlq_tx, entry.id, entry.payload, DlqReason::DecodeFailed, 0).await;
             return DispatchFlow::Continue;
         }
     };
@@ -142,7 +180,16 @@ where
     let prior_attempts = job.attempt.max(claim_seen);
     let next_attempt = prior_attempts.saturating_add(1);
     if next_attempt > cfg.max_attempts {
-        dlq::enqueue(dlq_tx, entry.id, entry.payload, DlqReason::RetriesExhausted).await;
+        // Retries-exhausted-on-arrival: carry the prior attempt count so
+        // operators can see how many tries the job got before being shed.
+        dlq::enqueue(
+            dlq_tx,
+            entry.id,
+            entry.payload,
+            DlqReason::RetriesExhausted,
+            prior_attempts,
+        )
+        .await;
         return DispatchFlow::Continue;
     }
 

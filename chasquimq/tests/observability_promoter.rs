@@ -1,101 +1,23 @@
-use chasquimq::config::{ProducerConfig, PromoterConfig};
+//! Promoter event emission tests: `PromoterTick` and `LockOutcome`,
+//! plus the boundary check that the consumer's embedded promoter forwards
+//! `ConsumerConfig::metrics` correctly.
+//!
+//! Lifecycle / reader-DLQ tests live in sibling test binaries.
+
+mod common;
+
+use chasquimq::config::PromoterConfig;
 use chasquimq::metrics::{MetricsSink, testing::InMemorySink};
 use chasquimq::producer::{Producer, delayed_key};
-use chasquimq::Promoter;
-use fred::clients::Client;
+use chasquimq::{ConsumerConfig, Consumer, Promoter};
 use fred::interfaces::ClientLike;
-use fred::prelude::Config;
-use fred::types::{ClusterHash, CustomCommand, Value};
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-fn redis_url() -> String {
-    std::env::var("REDIS_URL").expect("REDIS_URL must be set to run integration tests")
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-struct Sample {
-    n: u32,
-}
-
-async fn admin() -> Client {
-    let cfg = Config::from_url(&redis_url()).expect("REDIS_URL");
-    let client = Client::new(cfg, None, None, None);
-    client.init().await.expect("connect admin");
-    client
-}
-
-async fn flush_all(admin: &Client, queue: &str) {
-    for suffix in ["stream", "dlq", "delayed", "promoter:lock"] {
-        let key = format!("{{chasqui:{queue}}}:{suffix}");
-        let _: Value = admin
-            .custom(
-                CustomCommand::new_static("DEL", ClusterHash::FirstKey, false),
-                vec![Value::from(key)],
-            )
-            .await
-            .expect("DEL");
-    }
-}
-
-async fn wait_until<F, Fut>(timeout: Duration, mut check: F)
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = bool>,
-{
-    let start = Instant::now();
-    loop {
-        if check().await {
-            return;
-        }
-        if start.elapsed() > timeout {
-            panic!("wait_until timed out after {:?}", timeout);
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-}
-
-fn producer_cfg(queue: &str) -> ProducerConfig {
-    ProducerConfig {
-        queue_name: queue.to_string(),
-        pool_size: 2,
-        max_stream_len: 100_000,
-        ..Default::default()
-    }
-}
-
-fn promoter_cfg_with_sink(
-    queue: &str,
-    holder_id: &str,
-    sink: Arc<dyn MetricsSink>,
-) -> PromoterConfig {
-    PromoterConfig {
-        queue_name: queue.to_string(),
-        poll_interval_ms: 50,
-        promote_batch: 256,
-        max_stream_len: 100_000,
-        lock_ttl_secs: 5,
-        holder_id: holder_id.to_string(),
-        metrics: sink,
-    }
-}
-
-async fn zcard(admin: &Client, key: &str) -> i64 {
-    match admin
-        .custom::<Value, Value>(
-            CustomCommand::new_static("ZCARD", ClusterHash::FirstKey, false),
-            vec![Value::from(key)],
-        )
-        .await
-        .expect("ZCARD")
-    {
-        Value::Integer(n) => n,
-        Value::Null => 0,
-        other => panic!("ZCARD unexpected: {other:?}"),
-    }
-}
+use common::{
+    Sample, admin, flush_all, producer_cfg, promoter_cfg_with_sink, redis_url, wait_until, zcard,
+};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires REDIS_URL"]
@@ -356,8 +278,6 @@ async fn lock_outcome_emits_only_on_transition() {
 async fn consumer_embedded_promoter_forwards_metrics() {
     // The consumer's internal spawn_promoter must forward `cfg.metrics` so
     // users who never construct a standalone Promoter still get observability.
-    use chasquimq::config::ConsumerConfig;
-    use chasquimq::consumer::Consumer;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     let admin = admin().await;

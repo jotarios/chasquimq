@@ -1,6 +1,6 @@
 # Contributing to ChasquiMQ
 
-Thanks for the interest. ChasquiMQ is in **Phase 1 (MVP)** — the API surface is small and intentionally pre-1.0. Expect breaking changes as Phase 2 (delayed jobs, retries, richer DLQ tooling) lands.
+Thanks for the interest. ChasquiMQ is in **Phase 2 (nearly complete)** — the API surface is small and intentionally pre-1.0. Phase 1 (producer, consumer pool, batched acks, DLQ, graceful shutdown) shipped, and Phase 2 has landed delayed jobs, exponential retry backoff, DLQ inspect/replay tooling, and full observability covering both the promoter and the consumer hot path. Expect breaking changes through 1.0; flag them with `!` + a `BREAKING CHANGE:` footer.
 
 ## Before you start
 
@@ -103,19 +103,21 @@ chore: gitignore benchmarks/runs/
 
 ## What we'd love help with
 
-Phase 2 work (open scope):
+Phase 2 wrap-up + Phase 3 lead-in (open scope):
 
-- Delayed jobs via sorted sets (`ZADD` with run-at timestamp, promoter task moving due jobs into the stream).
-- Automatic retries with configurable exponential backoff.
-- DLQ inspection / requeue helpers.
-- Latency instrumentation in the bench harness (currently only throughput is measured).
+- Latency instrumentation in the bench harness (currently only throughput is measured; per-job dispatch-to-ack p99 is the biggest gap).
 - Worker CPU measurement *for BullMQ* in our harness, so the "≥50% less CPU" claim becomes defensible.
+- A reclaimed-from-CLAIM integration test (slice 5 added the `ReaderBatch.reclaimed` signal but the path lacks a test — see `TODOS.md`).
+- DLQ relocator double-write under retry — a pre-existing latent bug surfaced by slice 5; fixable with Redis 8.6 `XADD ... IDMP` (see `TODOS.md`).
+- Idempotent delayed enqueue (`add_in_with_id` / `add_at_with_id`) — see `TODOS.md`.
+- Phase 3 prep: NAPI-RS bindings exploration (Node.js handlers driven by the Rust engine).
 
 Smaller wins:
 
 - Sharper error messages (the `Error` enum is utilitarian — variants could carry more context).
 - Doc examples for less obvious config knobs (`claim_min_idle_ms`, `dlq_inflight`, `max_payload_bytes`).
 - Cleaner test fixtures around Redis connection setup.
+- A `chasquimq-metrics` example that wires `QueueLabeled` into a multi-queue process so multi-tenant Prometheus scrapes are demonstrated end-to-end.
 
 ## What's out of scope (for now)
 

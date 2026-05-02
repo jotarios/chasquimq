@@ -1,4 +1,5 @@
 use crate::error::{Error, Result};
+use crate::metrics::{self, DlqRouted, MetricsSink};
 use crate::redis::commands::{xackdel_args, xadd_dlq_args};
 use crate::redis::parse::StreamEntryId;
 use bytes::Bytes;
@@ -11,38 +12,19 @@ use tokio::sync::mpsc;
 const DLQ_RETRY_ATTEMPTS: usize = 3;
 const DLQ_RETRY_BASE_MS: u64 = 50;
 
-#[derive(Debug)]
-pub(crate) enum DlqReason {
-    RetriesExhausted,
-    DecodeFailed,
-    Malformed { reason: &'static str },
-    OversizePayload,
-}
-
-impl DlqReason {
-    fn as_str(&self) -> &'static str {
-        match self {
-            DlqReason::RetriesExhausted => "retries_exhausted",
-            DlqReason::DecodeFailed => "decode_failed",
-            DlqReason::Malformed { .. } => "malformed",
-            DlqReason::OversizePayload => "oversize_payload",
-        }
-    }
-
-    fn detail(&self) -> Option<&'static str> {
-        if let DlqReason::Malformed { reason } = self {
-            Some(reason)
-        } else {
-            None
-        }
-    }
-}
+// Re-export the public observability type for the consumer module's internal
+// use, so call sites can keep saying `dlq::DlqReason` without reaching into
+// `crate::metrics`.
+pub(crate) use crate::metrics::DlqReason;
 
 #[derive(Debug)]
 pub(crate) struct DlqRelocate {
     pub entry_id: StreamEntryId,
     pub payload: Bytes,
     pub reason: DlqReason,
+    /// Attempt count that just gave up. `0` for arrival-side DLQ paths
+    /// (malformed / oversize / decode-fail) where the handler never ran.
+    pub attempt: u32,
 }
 
 pub(crate) struct DlqRelocatorConfig {
@@ -51,6 +33,7 @@ pub(crate) struct DlqRelocatorConfig {
     pub group: String,
     pub producer_id: Arc<str>,
     pub max_stream_len: u64,
+    pub metrics: Arc<dyn MetricsSink>,
 }
 
 pub(crate) async fn enqueue(
@@ -58,12 +41,14 @@ pub(crate) async fn enqueue(
     entry_id: StreamEntryId,
     payload: Bytes,
     reason: DlqReason,
+    attempt: u32,
 ) {
     if dlq_tx
         .send(DlqRelocate {
             entry_id,
             payload,
             reason,
+            attempt,
         })
         .await
         .is_err()
@@ -78,8 +63,18 @@ pub(crate) async fn run_relocator(
     mut rx: mpsc::Receiver<DlqRelocate>,
 ) {
     while let Some(relocate) = rx.recv().await {
-        if let Err(e) = relocate_with_retry(&client, &cfg, &relocate).await {
-            tracing::error!(entry_id = %relocate.entry_id, reason = %relocate.reason.as_str(), error = %e, "DLQ relocation failed permanently; entry remains pending and will be retried on next CLAIM tick");
+        match relocate_with_retry(&client, &cfg, &relocate).await {
+            Ok(()) => {
+                let event = DlqRouted {
+                    reason: relocate.reason,
+                    attempt: relocate.attempt,
+                };
+                let sink = &*cfg.metrics;
+                metrics::dispatch("dlq_routed", || sink.dlq_routed(event));
+            }
+            Err(e) => {
+                tracing::error!(entry_id = %relocate.entry_id, reason = %relocate.reason.as_str(), error = %e, "DLQ relocation failed permanently; entry remains pending and will be retried on next CLAIM tick");
+            }
         }
     }
 }

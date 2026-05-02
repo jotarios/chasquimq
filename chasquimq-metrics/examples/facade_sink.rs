@@ -24,7 +24,7 @@
 //! in the same process — that's the value of going through the facade.
 
 use chasquimq::{Promoter, PromoterConfig};
-use chasquimq_metrics::MetricsFacadeSink;
+use chasquimq_metrics::{MetricsFacadeSink, QueueLabeled};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -50,9 +50,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("metrics endpoint: http://{metrics_addr}/metrics");
 
+    // Wrap the base sink in `QueueLabeled` so every emitted metric carries a
+    // `queue=<name>` label. Cheap, composable, and the canonical pattern for
+    // multi-queue processes — stack additional wrappers (tenant, region) the
+    // same way.
     let cfg = PromoterConfig {
-        queue_name,
-        metrics: Arc::new(MetricsFacadeSink::new()),
+        queue_name: queue_name.clone(),
+        metrics: Arc::new(QueueLabeled::new(MetricsFacadeSink::new(), queue_name)),
         ..Default::default()
     };
 
