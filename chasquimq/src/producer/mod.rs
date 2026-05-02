@@ -4,7 +4,8 @@ use crate::config::ProducerConfig;
 use crate::error::{Error, Result};
 use crate::job::{Job, JobId, now_ms};
 use crate::redis::commands::{
-    SCHEDULE_DELAYED_IDEMPOTENT_SCRIPT, eval_schedule_delayed_idempotent_args,
+    CANCEL_DELAYED_SCRIPT, SCHEDULE_DELAYED_IDEMPOTENT_SCRIPT, eval_cancel_delayed_args,
+    eval_schedule_delayed_idempotent_args, evalsha_cancel_delayed_args,
     evalsha_schedule_delayed_idempotent_args, script_load_args, xadd_args, zadd_delayed_args,
 };
 use crate::redis::conn::connect_pool;
@@ -19,7 +20,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub use crate::redis::keys::{
-    dedup_marker_key, delayed_key, dlq_key, promoter_lock_key, stream_key,
+    dedup_marker_key, delayed_index_key, delayed_key, dlq_key, promoter_lock_key, stream_key,
 };
 
 #[derive(Debug, Clone)]
@@ -102,6 +103,84 @@ impl<T: Serialize> Producer<T> {
     pub async fn peek_dlq(&self, limit: usize) -> Result<Vec<DlqEntry>> {
         let entries = dlq::xrange_dlq(&self.pool, self.dlq_key.as_ref(), limit).await?;
         Ok(entries.into_iter().map(dlq::parse_dlq_entry).collect())
+    }
+
+    /// Cancel a previously-scheduled delayed job by its [`JobId`].
+    ///
+    /// Returns `true` if the entry was atomically removed from the delayed
+    /// ZSET, `false` if there was nothing to cancel — either the id was never
+    /// scheduled, the side-index already expired, or the promoter has already
+    /// moved the entry into the main stream (cancel-vs-promote race lost).
+    /// In all three "false" cases the only safe assumption is "the job may
+    /// already be running or already ran".
+    ///
+    /// Cancel is itself a single Lua round trip: `GET` the side-index for the
+    /// exact ZSET member, `ZREM` it, then `DEL` both the side-index and the
+    /// dedup marker so the same id can be rescheduled. Both schedule and
+    /// promote paths are also Lua under the same `{chasqui:<queue>}` hash
+    /// tag, so the three operations serialize at Redis — the
+    /// (delivered, cancel=true) outcome is impossible.
+    pub async fn cancel_delayed(&self, id: &JobId) -> Result<bool> {
+        let index_key = delayed_index_key(self.queue_name.as_ref(), id);
+        let marker_key = dedup_marker_key(self.queue_name.as_ref(), id);
+        let client = self.pool.next_connected();
+        let removed =
+            run_cancel_delayed(client, self.delayed_key.as_ref(), &index_key, &marker_key).await?;
+        Ok(removed == 1)
+    }
+
+    /// Pipelined bulk variant of [`Producer::cancel_delayed`]. Issues one
+    /// `EVALSHA` per id on a single connection. The returned `Vec<bool>` is
+    /// in the same order as `ids`. An empty input returns an empty vec
+    /// without touching Redis.
+    pub async fn cancel_delayed_bulk(&self, ids: &[JobId]) -> Result<Vec<bool>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let client = self.pool.next_connected();
+        let sha = load_cancel_script(client).await?;
+        let pipeline = client.pipeline();
+        let evalsha_cmd = CustomCommand::new_static("EVALSHA", ClusterHash::FirstKey, false);
+        for id in ids {
+            let index_key = delayed_index_key(self.queue_name.as_ref(), id);
+            let marker_key = dedup_marker_key(self.queue_name.as_ref(), id);
+            let args = evalsha_cancel_delayed_args(
+                &sha,
+                self.delayed_key.as_ref(),
+                &index_key,
+                &marker_key,
+            );
+            let _: () = pipeline
+                .custom(evalsha_cmd.clone(), args)
+                .await
+                .map_err(Error::Redis)?;
+        }
+        let results: std::result::Result<Vec<Value>, _> = pipeline.all().await;
+        let values = match results {
+            Ok(v) => v,
+            Err(e) if format!("{e}").contains("NOSCRIPT") => {
+                // Script flushed mid-pipeline; replay each call as EVAL.
+                let pipeline = client.pipeline();
+                let eval_cmd = CustomCommand::new_static("EVAL", ClusterHash::FirstKey, false);
+                for id in ids {
+                    let index_key = delayed_index_key(self.queue_name.as_ref(), id);
+                    let marker_key = dedup_marker_key(self.queue_name.as_ref(), id);
+                    let args = eval_cancel_delayed_args(
+                        CANCEL_DELAYED_SCRIPT,
+                        self.delayed_key.as_ref(),
+                        &index_key,
+                        &marker_key,
+                    );
+                    let _: () = pipeline
+                        .custom(eval_cmd.clone(), args)
+                        .await
+                        .map_err(Error::Redis)?;
+                }
+                pipeline.all().await.map_err(Error::Redis)?
+            }
+            Err(e) => return Err(Error::Redis(e)),
+        };
+        Ok(values.iter().map(|v| parse_lua_int(v) == 1).collect())
     }
 }
 
@@ -386,6 +465,7 @@ impl<T: Serialize> Producer<T> {
         let job = Job::with_id(id.clone(), payload);
         let bytes = Bytes::from(rmp_serde::to_vec(&job)?);
         let marker_key = dedup_marker_key(self.queue_name.as_ref(), &id);
+        let index_key = delayed_index_key(self.queue_name.as_ref(), &id);
         let marker_ttl = delay_secs.saturating_add(DEDUP_MARKER_GRACE_SECS);
         let score = run_at_ms_as_i64(run_at_ms)?;
         let client = self.pool.next_connected();
@@ -393,6 +473,7 @@ impl<T: Serialize> Producer<T> {
             client,
             &marker_key,
             self.delayed_key.as_ref(),
+            &index_key,
             marker_ttl,
             score,
             bytes,
@@ -429,10 +510,12 @@ impl<T: Serialize> Producer<T> {
         let evalsha_cmd = CustomCommand::new_static("EVALSHA", ClusterHash::FirstKey, false);
         for (id, bytes) in &encoded {
             let marker_key = dedup_marker_key(self.queue_name.as_ref(), id);
+            let index_key = delayed_index_key(self.queue_name.as_ref(), id);
             let args = evalsha_schedule_delayed_idempotent_args(
                 &sha,
                 &marker_key,
                 self.delayed_key.as_ref(),
+                &index_key,
                 marker_ttl,
                 score,
                 bytes.clone(),
@@ -452,10 +535,12 @@ impl<T: Serialize> Producer<T> {
                 let eval_cmd = CustomCommand::new_static("EVAL", ClusterHash::FirstKey, false);
                 for (id, bytes) in &encoded {
                     let marker_key = dedup_marker_key(self.queue_name.as_ref(), id);
+                    let index_key = delayed_index_key(self.queue_name.as_ref(), id);
                     let args = eval_schedule_delayed_idempotent_args(
                         SCHEDULE_DELAYED_IDEMPOTENT_SCRIPT,
                         &marker_key,
                         self.delayed_key.as_ref(),
+                        &index_key,
                         marker_ttl,
                         score,
                         bytes.clone(),
@@ -504,9 +589,17 @@ fn u128_to_u64_or_err(ms: u128) -> Result<u64> {
 pub(crate) const DEDUP_MARKER_GRACE_SECS: u64 = 3600;
 
 async fn load_idempotent_script(client: &Client) -> Result<String> {
+    load_script_sha(client, SCHEDULE_DELAYED_IDEMPOTENT_SCRIPT).await
+}
+
+async fn load_cancel_script(client: &Client) -> Result<String> {
+    load_script_sha(client, CANCEL_DELAYED_SCRIPT).await
+}
+
+async fn load_script_sha(client: &Client, body: &str) -> Result<String> {
     let cmd = CustomCommand::new_static("SCRIPT", ClusterHash::FirstKey, false);
     let res: Value = client
-        .custom(cmd, script_load_args(SCHEDULE_DELAYED_IDEMPOTENT_SCRIPT))
+        .custom(cmd, script_load_args(body))
         .await
         .map_err(Error::Redis)?;
     match res {
@@ -520,10 +613,34 @@ async fn load_idempotent_script(client: &Client) -> Result<String> {
     }
 }
 
+async fn run_cancel_delayed(
+    client: &Client,
+    delayed_key: &str,
+    index_key: &str,
+    marker_key: &str,
+) -> Result<i64> {
+    let sha = load_cancel_script(client).await?;
+    let evalsha_cmd = CustomCommand::new_static("EVALSHA", ClusterHash::FirstKey, false);
+    let args = evalsha_cancel_delayed_args(&sha, delayed_key, index_key, marker_key);
+    let res: std::result::Result<Value, _> = client.custom(evalsha_cmd, args).await;
+    let v = match res {
+        Ok(v) => v,
+        Err(e) if format!("{e}").contains("NOSCRIPT") => {
+            let cmd = CustomCommand::new_static("EVAL", ClusterHash::FirstKey, false);
+            let args =
+                eval_cancel_delayed_args(CANCEL_DELAYED_SCRIPT, delayed_key, index_key, marker_key);
+            client.custom(cmd, args).await.map_err(Error::Redis)?
+        }
+        Err(e) => return Err(Error::Redis(e)),
+    };
+    Ok(parse_lua_int(&v))
+}
+
 async fn run_schedule_delayed_idempotent(
     client: &Client,
     marker_key: &str,
     delayed_key: &str,
+    index_key: &str,
     marker_ttl_secs: u64,
     run_at_ms: i64,
     bytes: Bytes,
@@ -534,6 +651,7 @@ async fn run_schedule_delayed_idempotent(
         &sha,
         marker_key,
         delayed_key,
+        index_key,
         marker_ttl_secs,
         run_at_ms,
         bytes.clone(),
@@ -547,6 +665,7 @@ async fn run_schedule_delayed_idempotent(
                 SCHEDULE_DELAYED_IDEMPOTENT_SCRIPT,
                 marker_key,
                 delayed_key,
+                index_key,
                 marker_ttl_secs,
                 run_at_ms,
                 bytes,
@@ -558,10 +677,14 @@ async fn run_schedule_delayed_idempotent(
     // Defensive across `Value::Integer` / `Value::String` / `Value::Bytes`,
     // matching how `RETRY_RESCHEDULE_SCRIPT`'s return value is parsed elsewhere
     // in the engine.
-    Ok(match v {
-        Value::Integer(n) => n,
+    Ok(parse_lua_int(&v))
+}
+
+fn parse_lua_int(v: &Value) -> i64 {
+    match v {
+        Value::Integer(n) => *n,
         Value::String(s) => s.as_bytes().first().copied().map(i64::from).unwrap_or(0),
         Value::Bytes(b) => b.first().copied().map(i64::from).unwrap_or(0),
         _ => 0,
-    })
+    }
 }
