@@ -1,0 +1,16 @@
+{
+  "name": "chasquimq-linux-x64-gnu",
+  "version": "0.1.0",
+  "os": ["linux"],
+  "cpu": ["x64"],
+  "main": "chasquimq.linux-x64-gnu.node",
+  "files": ["chasquimq.linux-x64-gnu.node"],
+  "license": "MIT",
+  "engines": {
+    "node": ">= 18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jotarios/chasquimq.git"
+  }
+}
