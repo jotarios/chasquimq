@@ -6,7 +6,7 @@ ChasquiMQ is a Rust-native job queue / message broker built on **Redis**, Messag
 
 Named after the *chasquis* — the relay runners of the Inca road system who carried messages across the Andes.
 
-> **Status:** Phase 2 nearly complete. Phase 1 (MVP) shipped: producer, consumer pool, batched acks, DLQ, graceful shutdown. Phase 2 has landed delayed jobs (`add_in` / `add_at` / `add_in_bulk` backed by Redis Sorted Sets + a leader-elected promoter), exponential-backoff retries via delayed-ZSET re-scheduling, DLQ inspect/replay tooling, and full observability covering both the promoter and the consumer hot path (`MetricsSink` trait with `ReaderBatch` / `JobOutcome` / `RetryScheduled` / `DlqRouted` events; per-handler latency in microseconds; `chasquimq-metrics` adapter for Prometheus/OTel/StatsD with a `QueueLabeled<S>` wrapper for per-queue labels). Public API is still pre-1.0 and will change.
+> **Status:** Phase 2 complete. Phase 1 (MVP) shipped: producer, consumer pool, batched acks, DLQ, graceful shutdown. Phase 2 has landed delayed jobs (`add_in` / `add_at` / `add_in_bulk` backed by Redis Sorted Sets + a leader-elected promoter), exponential-backoff retries via delayed-ZSET re-scheduling, DLQ inspect/replay tooling, full observability covering both the promoter and the consumer hot path (`MetricsSink` trait with `ReaderBatch` / `JobOutcome` / `RetryScheduled` / `DlqRouted` events; per-handler latency in microseconds; `chasquimq-metrics` adapter for Prometheus/OTel/StatsD with a `QueueLabeled<S>` wrapper for per-queue labels), idempotent delayed scheduling (`add_in_with_id` / `add_at_with_id` / `add_in_bulk_with_ids`), and `cancel_delayed` / `cancel_delayed_bulk`. CI runs rustfmt + clippy `-D warnings` + the full test suite against a `redis:8.6.2` service container on every PR. Public API is still pre-1.0 and will change.
 
 ## Headline numbers
 
@@ -115,7 +115,9 @@ By default any `Consumer` with `delayed_enabled = true` (the default) runs an em
 
 `max_delay_secs` on `ProducerConfig` (default 30 days) caps how far in the future jobs can be scheduled. Set to `0` to disable the cap.
 
-**At-least-once under caller retry.** `add_in` / `add_at` / `add_in_bulk` are not idempotent across caller-driven retries: each call generates a fresh job id, and a retry after a network failure can land a duplicate scheduled job. (Compare with `Producer::add`, which uses Redis 8.6 `IDMP` for at-most-once delivery.) An explicit `add_in_with_id` is on the roadmap; until then, callers needing exactly-once delayed scheduling should retry only after confirming the previous call did not reach Redis (e.g., via `ZSCORE` on the delayed key).
+**Idempotent variants.** `add_in_with_id(id, delay, payload)` / `add_at_with_id(id, when, payload)` / `add_in_bulk_with_ids(delay, items)` accept a stable caller-supplied `JobId` and are safe under producer-driven retries. A single Lua script atomically `SET NX EX`s a dedup marker (`{chasqui:<queue>}:dlid:<job_id>`, TTL = `delay + 1h grace`) and only then `ZADD`s the encoded job — a retry after a network failure that already reached Redis is a no-op returning the same id. The marker grace covers the post-promote window so a delayed retry can't race a successful promotion. The plain `add_in` / `add_at` / `add_in_bulk` calls remain available and use a fresh ULID per call (at-least-once under caller retry, like the original Phase 2 slice 1 surface).
+
+**Cancellation.** `Producer::cancel_delayed(&id) -> bool` removes a previously scheduled delayed job. Returns `true` only when the entry was atomically `ZREM`'d from the delayed ZSET; `false` covers "never scheduled", "side-index expired", and "promoter already moved it to the stream" (the cancel-vs-promote race lost). `cancel_delayed_bulk(&[id])` pipelines many. Both schedule and cancel paths execute as Lua under the queue's `{chasqui:<queue>}` hash tag, so they serialize at Redis — `(cancel returned true, job still delivered)` is impossible.
 
 ### DLQ tooling
 
@@ -152,58 +154,64 @@ Adapter metric names follow Prometheus base-unit convention: durations are expos
 ### Operational notes
 
 - **Stream MAXLEN trim is approximate.** Both Phase 1 and the delayed-job promoter use `XADD MAXLEN ~ N`. If consumers fall sustainedly behind producers, entries near the cap can be trimmed before they are read. Monitor `XLEN` against your consume rate; the silent failure mode is "job vanished."
-- **No `cancel_delayed` in v1.** Once `add_in`/`add_at` returns, there is no API to undo the schedule. Tracked for Phase 3.
+- **`cancel_delayed` only works for jobs scheduled via the `_with_id` API surface.** Cancel looks up the exact ZSET member through a side-index (`{chasqui:<queue>}:didx:<job_id>`) that is written only by `SCHEDULE_DELAYED_IDEMPOTENT_SCRIPT` — i.e. by `add_in_with_id` / `add_at_with_id` / `add_in_bulk_with_ids`. Jobs scheduled via the plain `add_in` / `add_at` / `add_in_bulk` go through a direct `ZADD` that doesn't populate the index, so cancel by id is a no-op (returns `false`) for those. Use the `_with_id` variants when cancellation is in scope.
 - **Key format uses Redis Cluster hash tags** — every chasqui key looks like `{chasqui:<queue>}:<suffix>`. This is a pre-1.0 breaking change from earlier preview builds; redeploying against a Redis instance that holds old-format keys requires draining or manually renaming. New deployments are unaffected.
 
 ## Feature comparison
 
-ChasquiMQ is perf-first and Phase 1; the table is honest about what isn't there yet. See the [Roadmap](#roadmap) for what's coming.
+ChasquiMQ is perf-first and Phase 2 complete; the table is honest about what isn't there yet. See the [Roadmap](#roadmap) for what's coming.
 
-| Feature                       | ChasquiMQ        | BullMQ | Bull   | Bee     |
-| :---------------------------- | :--------------: | :----: | :----: | :-----: |
-| Backend                       | Redis            | Redis  | Redis  | Redis   |
-| Language                      | Rust             | Node   | Node   | Node    |
-| Wire format                   | MessagePack      | JSON   | JSON   | JSON    |
-| Concurrency                   | ✓                | ✓      | ✓      | ✓       |
-| Atomic ops (`XACKDEL`)        | ✓                | ✓      | ✓      | ✓       |
-| Persistence                   | ✓                | ✓      | ✓      | ✓       |
-| Pipelined / batched acks      | ✓ (default)      | opt-in | —      | —       |
-| Idempotent produce (`IDMP`)   | ✓                | —      | —      | —       |
-| Dead-letter queue             | ✓                | ✓      | ✓      | —       |
-| Graceful shutdown             | ✓                | ✓      | ✓      | ✓       |
-| Delayed jobs                  | ✓                | ✓      | ✓      | —       |
-| Retries (exponential backoff) | ✓                | ✓      | ✓      | ✓       |
-| Priorities                    | Phase 2+         | ✓      | ✓      | —       |
-| Rate limiter                  | Phase 2+         | ✓      | ✓      | —       |
-| Pause/Resume                  | Phase 2+         | ✓      | ✓      | —       |
-| Repeatable / cron jobs        | Phase 2+         | ✓      | ✓      | —       |
-| Parent/child dependencies     | Phase 2+         | ✓      | —      | —       |
-| Sandboxed worker              | n/a (Rust)       | ✓      | ✓      | —       |
-| UI                            | Phase 4          | ✓      | ✓      | —       |
-| Node SDK                      | Phase 3          | ✓      | ✓      | ✓       |
-| Python SDK                    | Phase 4          | ✓      | —      | —       |
-| Optimized for                 | Throughput       | Jobs   | Jobs   | Messages |
+| Feature                                | ChasquiMQ        | BullMQ | Bull   | Bee     |
+| :------------------------------------- | :--------------: | :----: | :----: | :-----: |
+| Backend                                | Redis            | Redis  | Redis  | Redis   |
+| Language                               | Rust             | Node   | Node   | Node    |
+| Wire format                            | MessagePack      | JSON   | JSON   | JSON    |
+| Concurrency                            | ✓                | ✓      | ✓      | ✓       |
+| Atomic ops (`XACKDEL`)                 | ✓                | ✓      | ✓      | ✓       |
+| Persistence                            | ✓                | ✓      | ✓      | ✓       |
+| Pipelined / batched acks               | ✓ (default)      | opt-in | —      | —       |
+| Idempotent produce (`IDMP`)            | ✓                | —      | —      | —       |
+| Dead-letter queue                      | ✓                | ✓      | ✓      | —       |
+| Graceful shutdown                      | ✓                | ✓      | ✓      | ✓       |
+| Delayed jobs                           | ✓                | ✓      | ✓      | —       |
+| Idempotent delayed scheduling          | ✓                | —      | —      | —       |
+| Cancel scheduled job                   | ✓                | ✓      | ✓      | —       |
+| Retries (exponential backoff)          | ✓                | ✓      | ✓      | ✓       |
+| First-class observability hooks        | ✓ (`MetricsSink`)| 3rd-party | 3rd-party | — |
+| Priorities                             | Phase 3+         | ✓      | ✓      | —       |
+| Rate limiter                           | Phase 3+         | ✓      | ✓      | —       |
+| Pause/Resume                           | Phase 3+         | ✓      | ✓      | —       |
+| Repeatable / cron jobs                 | Phase 3+         | ✓      | ✓      | —       |
+| Parent/child dependencies              | Phase 3+         | ✓      | —      | —       |
+| Sandboxed worker                       | n/a (Rust)       | ✓      | ✓      | —       |
+| UI                                     | Phase 4          | ✓      | ✓      | —       |
+| Node SDK                               | Phase 3          | ✓      | ✓      | ✓       |
+| Python SDK                             | Phase 4          | ✓      | —      | —       |
+| Optimized for                          | Throughput       | Jobs   | Jobs   | Messages |
 
 If a row marked Phase 2/3/4 is blocking for you, please [open an issue](https://github.com/jotarios/chasquimq/issues) — it helps prioritize.
 
 ## Repo layout
 
 ```
-chasquimq/         engine crate (producer, consumer, ack flusher, DLQ relocator)
-chasquimq-bench/   benchmark harness — same scenarios as bullmq-bench
-benchmarks/        results, methodology, reproduction (see benchmarks/README.md)
-prd/               product requirements & design intent
-spike/             exploratory throwaway code (not part of the engine)
+chasquimq/                  engine crate (producer, consumer, promoter, ack flusher, DLQ relocator)
+chasquimq-bench/            benchmark harness — same scenarios as bullmq-bench
+chasquimq-metrics/          opt-in adapter: MetricsSink → metrics-rs facade + Prometheus example
+benchmarks/                 results, methodology, reproduction (see benchmarks/README.md)
+docs/                       design docs (e.g. Phase 3 NAPI-RS bindings)
+prd/                        product requirements & design intent
+spike/                      exploratory throwaway code (not part of the engine)
+.github/workflows/ci.yml    CI: rustfmt, clippy -D warnings, full test suite vs redis:8.6.2
 ```
 
 ## Roadmap
 
 - **Phase 1:** Producer, consumer pool, batched pipelined acks, DLQ, graceful shutdown. ✅
-- **Phase 2 (nearly complete):** Delayed jobs via sorted sets + Lua promoter ✅. Exponential retry backoff via delayed-ZSET re-scheduling ✅. DLQ replay + bounded growth ✅. Promoter observability hooks (`MetricsSink` trait + `chasquimq-metrics` adapter + Prometheus example) ✅. Consumer / retry / DLQ observability hooks (`ReaderBatch`, `JobOutcome`, `RetryScheduled`, `DlqRouted` events; per-handler microsecond latency; `QueueLabeled<S>` adapter wrapper for per-queue labels) ✅.
-- **Phase 3:** Node.js bindings via NAPI-RS — JS handlers driven by the Rust engine.
+- **Phase 2:** ✅ Delayed jobs via sorted sets + Lua promoter; exponential retry backoff via delayed-ZSET re-scheduling; DLQ inspect/replay tooling + bounded growth; promoter observability hooks (`MetricsSink` trait + `chasquimq-metrics` adapter + Prometheus/OTel/StatsD examples); consumer / retry / DLQ observability hooks (`ReaderBatch`, `JobOutcome`, `RetryScheduled`, `DlqRouted` events; per-handler microsecond latency; `QueueLabeled<S>` adapter wrapper for per-queue labels); idempotent delayed scheduling (`add_in_with_id` / `add_at_with_id` / `add_in_bulk_with_ids` with Lua-gated dedup marker); cancellation (`cancel_delayed` / `cancel_delayed_bulk`); GitHub Actions CI.
+- **Phase 3:** Node.js bindings via NAPI-RS — JS handlers driven by the Rust engine. [Design doc.](docs/phase3-napi-design.md)
 - **Phase 4:** Python bindings via PyO3, CLI monitoring dashboard.
 
-Phase 1's API surface is intentionally small; expect breaking changes as Phase 2 lands.
+API is still pre-1.0; breaking changes are flagged with `!` in the commit and a `BREAKING CHANGE:` footer.
 
 ## Contributing
 
