@@ -102,6 +102,32 @@ end
 return 0
 "#;
 
+/// Idempotent delayed-schedule. Sets a per-job-id dedup marker with `SET NX EX`
+/// and only `ZADD`s the encoded payload onto the delayed ZSET on a fresh
+/// reservation. A second invocation with the same `JobId` (e.g. from a
+/// network-driven caller retry) returns 0 and does not duplicate the job.
+///
+/// The marker TTL is `seconds_until_run + grace` so the marker outlives the
+/// scheduled fire time long enough that a delayed retry of the producer call
+/// cannot race a successful promotion. The grace constant is owned by the
+/// caller (see `Producer::DEDUP_MARKER_GRACE_SECS`).
+///
+/// KEYS[1] = dedup marker key (`{chasqui:<queue>}:dlid:<job_id>`)
+/// KEYS[2] = delayed ZSET key (`{chasqui:<queue>}:delayed`)
+/// ARGV[1] = marker TTL in seconds
+/// ARGV[2] = run_at_ms (ZADD score)
+/// ARGV[3] = encoded payload bytes
+///
+/// Returns 1 if newly scheduled, 0 if a duplicate was suppressed.
+pub(crate) const SCHEDULE_DELAYED_IDEMPOTENT_SCRIPT: &str = r#"
+local set_res = redis.call('SET', KEYS[1], '1', 'NX', 'EX', tonumber(ARGV[1]))
+if set_res == false then
+  return 0
+end
+redis.call('ZADD', KEYS[2], tonumber(ARGV[2]), ARGV[3])
+return 1
+"#;
+
 pub(crate) const ACQUIRE_LOCK_SCRIPT: &str = r#"
 local cur = redis.call('GET', KEYS[1])
 if cur == false then
@@ -364,6 +390,44 @@ pub(crate) fn eval_release_lock_args(script: &str, lock_key: &str, holder_id: &s
         Value::from(1_i64),
         Value::from(lock_key),
         Value::from(holder_id),
+    ]
+}
+
+pub(crate) fn evalsha_schedule_delayed_idempotent_args(
+    sha: &str,
+    marker_key: &str,
+    delayed_key: &str,
+    marker_ttl_secs: u64,
+    run_at_ms: i64,
+    bytes: Bytes,
+) -> Vec<Value> {
+    vec![
+        Value::from(sha),
+        Value::from(2_i64),
+        Value::from(marker_key),
+        Value::from(delayed_key),
+        Value::from(marker_ttl_secs as i64),
+        Value::from(run_at_ms),
+        Value::Bytes(bytes),
+    ]
+}
+
+pub(crate) fn eval_schedule_delayed_idempotent_args(
+    script: &str,
+    marker_key: &str,
+    delayed_key: &str,
+    marker_ttl_secs: u64,
+    run_at_ms: i64,
+    bytes: Bytes,
+) -> Vec<Value> {
+    vec![
+        Value::from(script),
+        Value::from(2_i64),
+        Value::from(marker_key),
+        Value::from(delayed_key),
+        Value::from(marker_ttl_secs as i64),
+        Value::from(run_at_ms),
+        Value::Bytes(bytes),
     ]
 }
 
