@@ -63,14 +63,14 @@ d('NativeProducer + NativeConsumer round-trip', () => {
     // Engine `Job.attempt` is 0-indexed: first run = 0, subsequent
     // retries 1, 2, … This is the raw struct field. Metric events
     // separately surface a 1-indexed run count — see `JobOutcome` in
-    // the engine. The BullMQ-compat layer above will adapt as needed.
+    // the engine. The high-level shim above will adapt as needed.
     expect(seen[0].attempt).toBe(0)
     expect(typeof seen[0].createdAtMs).toBe('number')
     expect(seen[0].createdAtMs).toBeGreaterThan(Date.now() - 60_000)
     expect(seen[0].createdAtMs).toBeLessThan(Date.now() + 60_000)
 
     // The wire-format invariant: the buffer the consumer sees decodes to
-    // exactly the object the producer encoded. This is what the BullMQ
+    // exactly the object the producer encoded. This is what the high-level
     // shim above will rely on.
     const decoded = decode(seen[0].payload)
     expect(decoded).toEqual(data)
