@@ -79,12 +79,18 @@ impl PrometheusSink {
         .expect("counter");
 
         registry.register(Box::new(promoted_total.clone())).unwrap();
-        registry.register(Box::new(delayed_zset_depth.clone())).unwrap();
+        registry
+            .register(Box::new(delayed_zset_depth.clone()))
+            .unwrap();
         registry
             .register(Box::new(oldest_pending_lag_ms.clone()))
             .unwrap();
-        registry.register(Box::new(lock_acquired_total.clone())).unwrap();
-        registry.register(Box::new(lock_lost_total.clone())).unwrap();
+        registry
+            .register(Box::new(lock_acquired_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(lock_lost_total.clone()))
+            .unwrap();
 
         Self {
             promoted_total,
@@ -130,8 +136,11 @@ fn serve_metrics(registry: Arc<Registry>, addr: &str, shutdown: CancellationToke
             let _ = req.respond(tiny_http::Response::empty(500));
             continue;
         }
-        let response = tiny_http::Response::from_data(buf)
-            .with_header("Content-Type: text/plain; version=0.0.4".parse::<tiny_http::Header>().unwrap());
+        let response = tiny_http::Response::from_data(buf).with_header(
+            "Content-Type: text/plain; version=0.0.4"
+                .parse::<tiny_http::Header>()
+                .unwrap(),
+        );
         let _ = req.respond(response);
     }
 }
@@ -140,8 +149,7 @@ fn serve_metrics(registry: Arc<Registry>, addr: &str, shutdown: CancellationToke
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
     let queue_name = std::env::var("QUEUE_NAME").unwrap_or_else(|_| "default".into());
-    let metrics_addr =
-        std::env::var("METRICS_ADDR").unwrap_or_else(|_| "127.0.0.1:9898".into());
+    let metrics_addr = std::env::var("METRICS_ADDR").unwrap_or_else(|_| "127.0.0.1:9898".into());
 
     let registry = Arc::new(Registry::new());
     let sink: Arc<dyn MetricsSink> = Arc::new(PrometheusSink::new(&registry));

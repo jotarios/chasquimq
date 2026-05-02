@@ -7,7 +7,7 @@ mod common;
 
 use chasquimq::metrics::{MetricsSink, testing::InMemorySink};
 use chasquimq::producer::Producer;
-use chasquimq::{ConsumerConfig, Consumer, Job};
+use chasquimq::{Consumer, ConsumerConfig, Job};
 use fred::interfaces::ClientLike;
 use std::sync::Arc;
 use std::time::Duration;
@@ -38,10 +38,7 @@ async fn reader_dlq_malformed() {
     let shutdown_h = shutdown.clone();
     let handle = tokio::spawn(async move {
         consumer
-            .run(
-                move |_job: Job<Sample>| async move { Ok(()) },
-                shutdown_h,
-            )
+            .run(move |_job: Job<Sample>| async move { Ok(()) }, shutdown_h)
             .await
     });
 
@@ -80,8 +77,9 @@ async fn reader_dlq_oversize_payload() {
 
     // Build a payload that's well-formed msgpack but exceeds the (lowered)
     // max_payload_bytes the consumer is configured with.
-    let producer: Producer<Sample> =
-        Producer::connect(&redis_url(), producer_cfg(queue)).await.unwrap();
+    let producer: Producer<Sample> = Producer::connect(&redis_url(), producer_cfg(queue))
+        .await
+        .unwrap();
     producer.add(Sample { n: 1 }).await.expect("add");
 
     let sink = Arc::new(InMemorySink::new());
@@ -96,10 +94,7 @@ async fn reader_dlq_oversize_payload() {
     let shutdown_h = shutdown.clone();
     let handle = tokio::spawn(async move {
         consumer
-            .run(
-                move |_job: Job<Sample>| async move { Ok(()) },
-                shutdown_h,
-            )
+            .run(move |_job: Job<Sample>| async move { Ok(()) }, shutdown_h)
             .await
     });
 
@@ -145,10 +140,7 @@ async fn reader_dlq_decode_failed() {
     let shutdown_h = shutdown.clone();
     let handle = tokio::spawn(async move {
         consumer
-            .run(
-                move |_job: Job<Sample>| async move { Ok(()) },
-                shutdown_h,
-            )
+            .run(move |_job: Job<Sample>| async move { Ok(()) }, shutdown_h)
             .await
     });
 
@@ -198,10 +190,7 @@ async fn reader_dlq_retries_exhausted_on_arrival() {
     let shutdown_h = shutdown.clone();
     let handle = tokio::spawn(async move {
         consumer
-            .run(
-                move |_job: Job<Sample>| async move { Ok(()) },
-                shutdown_h,
-            )
+            .run(move |_job: Job<Sample>| async move { Ok(()) }, shutdown_h)
             .await
     });
 
@@ -217,10 +206,7 @@ async fn reader_dlq_retries_exhausted_on_arrival() {
     let dlq = sink.dlq_events();
     assert_eq!(dlq.len(), 1);
     assert_eq!(dlq[0].reason.as_str(), "retries_exhausted");
-    assert_eq!(
-        dlq[0].attempt, 5,
-        "carries the prior attempt count, not 0"
-    );
+    assert_eq!(dlq[0].attempt, 5, "carries the prior attempt count, not 0");
     assert_eq!(sink.jobs_completed(), 0, "handler never ran");
     assert!(
         sink.reader_batches().iter().any(|b| b.size >= 1),

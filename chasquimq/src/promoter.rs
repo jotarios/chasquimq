@@ -104,7 +104,10 @@ impl Promoter {
             }
 
             match self.promote_once(client, promote_sha).await {
-                Ok(tick) => match self.handle_tick(tick, &mut backoff_idx, poll, shutdown).await {
+                Ok(tick) => match self
+                    .handle_tick(tick, &mut backoff_idx, poll, shutdown)
+                    .await
+                {
                     TickAction::Drain => continue,
                     TickAction::Shutdown => return Ok(()),
                     TickAction::Polled => {}
@@ -115,7 +118,10 @@ impl Promoter {
                         run_promote_eval(client, &self.delayed_key, &self.stream_key, &self.cfg)
                             .await
                             .map_err(Error::Redis)?;
-                    match self.handle_tick(tick, &mut backoff_idx, poll, shutdown).await {
+                    match self
+                        .handle_tick(tick, &mut backoff_idx, poll, shutdown)
+                        .await
+                    {
                         TickAction::Drain => continue,
                         TickAction::Shutdown => return Ok(()),
                         TickAction::Polled => {}

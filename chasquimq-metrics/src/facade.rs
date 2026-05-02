@@ -53,8 +53,7 @@ impl MetricsSink for MetricsFacadeSink {
     fn promoter_tick(&self, tick: PromoterTick) {
         counter!("chasquimq_promoter_promoted_total").increment(tick.promoted);
         gauge!("chasquimq_delayed_zset_depth").set(tick.depth as f64);
-        gauge!("chasquimq_promoter_oldest_pending_lag_ms")
-            .set(tick.oldest_pending_lag_ms as f64);
+        gauge!("chasquimq_promoter_oldest_pending_lag_ms").set(tick.oldest_pending_lag_ms as f64);
     }
 
     fn promoter_lock_outcome(&self, outcome: LockOutcome) {
@@ -100,4 +99,3 @@ impl MetricsSink for MetricsFacadeSink {
         counter!("chasquimq_dlq_routed_total", "reason" => dlq.reason.as_str()).increment(1);
     }
 }
-
