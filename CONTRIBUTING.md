@@ -1,6 +1,6 @@
 # Contributing to ChasquiMQ
 
-Thanks for the interest. ChasquiMQ is in **Phase 2 (nearly complete)** — the API surface is small and intentionally pre-1.0. Phase 1 (producer, consumer pool, batched acks, DLQ, graceful shutdown) shipped, and Phase 2 has landed delayed jobs, exponential retry backoff, DLQ inspect/replay tooling, and full observability covering both the promoter and the consumer hot path. Expect breaking changes through 1.0; flag them with `!` + a `BREAKING CHANGE:` footer.
+Thanks for the interest. ChasquiMQ is **Phase 2 complete** — the API surface is small and intentionally pre-1.0. Phase 1 (producer, consumer pool, batched acks, DLQ, graceful shutdown) shipped, and Phase 2 has landed delayed jobs, exponential retry backoff, DLQ inspect/replay tooling, full observability across the promoter and the consumer hot path, idempotent delayed scheduling (`add_in_with_id` / `add_at_with_id` / `add_in_bulk_with_ids`), and cancellation (`cancel_delayed` / `cancel_delayed_bulk`). Phase 3 (Node.js bindings via NAPI-RS) is next; the design doc lives at [`docs/phase3-napi-design.md`](docs/phase3-napi-design.md). Expect breaking changes through 1.0; flag them with `!` + a `BREAKING CHANGE:` footer.
 
 ## Before you start
 
@@ -20,10 +20,12 @@ cd chasquimq
 # Redis
 docker run -d --name chasquimq-redis -p 6379:6379 redis:8.6
 
-# build + test
+# build + test (full suite, matches CI)
 cargo build
-cargo test
+cargo test --workspace -- --include-ignored
 ```
+
+> **Why `--include-ignored`?** The integration tests are gated with `#[ignore = "requires REDIS_URL"]` so a contributor running plain `cargo test` without Redis up doesn't see spurious connection failures. The annotation is a compile-time skip, not a runtime check — setting `REDIS_URL` alone won't un-ignore them. CI runs the full suite via `--include-ignored` against a `redis:8.6.2` service container; you should too. Plain `cargo test` runs the ~24 unit tests only.
 
 The bench harness is a separate crate:
 
@@ -35,11 +37,11 @@ cargo run -p chasquimq-bench --release -- --help
 
 1. **Fork**, then branch off `main`.
 2. **Keep PRs focused.** One concern per PR. A bug fix + a refactor + a doc tweak is three PRs.
-3. **Run the basics before pushing:**
+3. **Run the basics before pushing** (these match the CI gates in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) — push will fail PR review otherwise):
    ```bash
-   cargo fmt
-   cargo clippy --all-targets -- -D warnings
-   cargo test
+   cargo fmt --all
+   cargo clippy --all-targets --workspace -- -D warnings
+   cargo test --workspace -- --include-ignored
    ```
 4. **Performance-sensitive changes:** run the bench harness *before* and *after* and include the numbers in the PR description. Reference scenarios in [`benchmarks/`](benchmarks/). A change that regresses `queue-add-bulk` or `worker-concurrent` needs an explicit justification (correctness wins are valid; "cleaner code" usually isn't).
 5. **Commit messages:** follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/) (see below).
@@ -103,14 +105,15 @@ chore: gitignore benchmarks/runs/
 
 ## What we'd love help with
 
-Phase 2 wrap-up + Phase 3 lead-in (open scope):
+Phase 3 lead-in + Phase 2 polish (open scope):
 
-- Latency instrumentation in the bench harness (currently only throughput is measured; per-job dispatch-to-ack p99 is the biggest gap).
-- Worker CPU measurement *for BullMQ* in our harness, so the "≥50% less CPU" claim becomes defensible.
-- A reclaimed-from-CLAIM integration test (slice 5 added the `ReaderBatch.reclaimed` signal but the path lacks a test — see `TODOS.md`).
-- DLQ relocator double-write under retry — a pre-existing latent bug surfaced by slice 5; fixable with Redis 8.6 `XADD ... IDMP` (see `TODOS.md`).
-- Idempotent delayed enqueue (`add_in_with_id` / `add_at_with_id`) — see `TODOS.md`.
-- Phase 3 prep: NAPI-RS bindings exploration (Node.js handlers driven by the Rust engine).
+- **Phase 3: Node.js bindings via NAPI-RS.** Slice (a) of the design doc — crate scaffold + `Producer.add` + smoke test + the TSFN call-overhead microbench that gates the API surface — is the natural starting point. See [`docs/phase3-napi-design.md`](docs/phase3-napi-design.md).
+- **Latency instrumentation in the bench harness.** Throughput-only today; per-job dispatch-to-ack p50/p95/p99 is the biggest gap in the perf claims. See `TODOS.md` → "Latency histogram for `worker-concurrent`".
+- **Worker CPU measurement *for BullMQ*.** ChasquiMQ's CPU is instrumented; BullMQ's isn't. The PRD's "≥50% less worker CPU" target needs a parallel measurement before we can claim it.
+- **Reclaimed-from-CLAIM integration test.** Slice 5 added the `ReaderBatch.reclaimed` signal; the existing tests cover only `reclaimed == 0`. See `TODOS.md`.
+- **DLQ relocator double-write under retry.** Latent correctness gap fixable with Redis 8.6 `XADD ... IDMP` (the equivalent of what `RETRY_RESCHEDULE_SCRIPT` does for the retry path). See `TODOS.md`.
+- **Cancel API design follow-up.** Cancel currently deletes the dedup marker on success, which partially undoes slice 6's at-least-once guarantee for a delayed-then-cancelled-then-retried producer call. Two clean resolutions on the table — see the comment thread on [PR #8](https://github.com/jotarios/chasquimq/pull/8) for the trade-off and pick one.
+- **`reschedule_delayed`.** Counterpart to `cancel_delayed`. Real apps need "support is intervening, fire it now" / "user changed their mind, push it out a day". See `TODOS.md` → "Cancel / reschedule a delayed job".
 
 Smaller wins:
 

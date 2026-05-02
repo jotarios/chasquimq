@@ -4,7 +4,7 @@ ChasquiMQ's headline claim is **"the fastest open-source message broker for Redi
 
 ## Headline numbers
 
-Measured on Apple M3, Redis 8.6 (Docker, loopback), single host. BullMQ 5.76.4 baseline run on the same machine. Latest Phase 2 run, slice 5 (5 repeats × scale=5, drop-slowest, mean of 2 invocations):
+Measured on Apple M3, Redis 8.6 (Docker, loopback), single host. BullMQ 5.76.4 baseline run on the same machine. Latest committed run is slice 5 (5 repeats × scale=5, drop-slowest, mean of 2 invocations) — slices 6 (idempotent delayed scheduling) and 7 (`cancel_delayed` + promoter side-index cleanup) are not on the throughput hot path the bench measures, so the slice 5 numbers are still the canonical snapshot. A re-bench after each future hot-path change is the convention.
 
 | Scenario                    | BullMQ 5.76.4 | ChasquiMQ        | Ratio       |
 |-----------------------------|--------------:|-----------------:|------------:|
