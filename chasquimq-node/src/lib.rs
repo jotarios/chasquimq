@@ -1,7 +1,7 @@
 #![deny(clippy::all)]
 //! N-API bindings for ChasquiMQ. Exposes `NativeProducer`, `NativeConsumer`,
 //! and `NativePromoter` to JS as the lower-level engine API. The
-//! BullMQ-compat shim (Queue / Worker / Job) sits *on top* of these classes
+//! high-level `Queue` / `Worker` / `Job` shim sits *on top* of these classes
 //! and lives in TypeScript — it is **not** part of this crate.
 //!
 //! See `docs/phase3-napi-design.md` for the load-bearing decisions:
@@ -32,7 +32,7 @@ pub fn engine_version() -> String {
 mod tests {
     //! Wire-format invariant tests.
     //!
-    //! These are the load-bearing tests for the BullMQ-compat layer that
+    //! These are the load-bearing tests for the high-level shim that
     //! will sit on top of this binding. If any of these fail, **do not**
     //! ship — the upper layer's msgpack-on-JS-side encoding will not
     //! survive the round trip.
@@ -50,7 +50,7 @@ mod tests {
 
     /// **The wire-format invariant.**
     ///
-    /// The JS BullMQ-compat layer will:
+    /// The JS high-level shim will:
     /// 1. msgpack-encode `UserData` to a `Buffer` via `@msgpack/msgpack`
     /// 2. hand the `Buffer` to `NativeProducer.add(buf)`
     /// 3. the binding wraps it as `Job<RawBytes(buf)>` and msgpack-encodes
@@ -98,7 +98,7 @@ mod tests {
     }
 
     /// A `RawBytes(empty_buf)` must survive the round trip too — the
-    /// BullMQ-compat layer may send empty payloads (jobs with no data).
+    /// high-level shim may send empty payloads (jobs with no data).
     #[test]
     fn raw_bytes_round_trip_empty_buffer() {
         let job = Job::new(RawBytes(Bytes::new()));

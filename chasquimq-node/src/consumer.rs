@@ -85,7 +85,7 @@ impl NativeConsumer {
     /// promise → `XACK`. A rejected promise → `HandlerError` (engine
     /// retries with backoff up to `maxAttempts`, then DLQ).
     ///
-    /// FUTURE (BullMQ-compat layer / engine slice 8): when the JS
+    /// FUTURE (high-level shim / engine slice 8): when the JS
     /// rejection's `error.name === 'FailedJob'`, we should map it to a
     /// terminal-fail variant of `HandlerError` so the engine routes
     /// straight to DLQ. The engine doesn't expose that variant today —
