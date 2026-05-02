@@ -3,12 +3,14 @@ use crate::consumer::dlq::{self, DlqReason, DlqRelocate};
 use crate::consumer::retry::{self, RetryRelocate};
 use crate::error::HandlerError;
 use crate::job::{Job, now_ms};
+use crate::metrics::{self, JobOutcome, JobOutcomeKind, MetricsSink};
 use crate::redis::parse::StreamEntryId;
 use bytes::Bytes;
 use futures_util::FutureExt;
 use serde::Serialize;
 use std::future::Future;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
@@ -27,6 +29,7 @@ pub(crate) struct WorkerWiring {
     pub dlq_tx: mpsc::Sender<DlqRelocate>,
     pub max_attempts: u32,
     pub retry_cfg: RetryConfig,
+    pub metrics: Arc<dyn MetricsSink>,
 }
 
 pub(crate) fn spawn_workers<T, H, Fut>(
@@ -51,11 +54,37 @@ where
             while let Ok(dispatched) = rx.recv().await {
                 let entry_id = dispatched.entry_id.clone();
                 let job_id = dispatched.job.id.clone();
-                let attempt_so_far = dispatched.job.attempt;
+                // 1-indexed attempt number that's *about* to run. `Job::attempt`
+                // is 0-indexed ("0 runs have happened yet"), so the run we're
+                // about to execute is number `Job::attempt + 1`. Used in both
+                // the JobOutcome event (where it's "the run that just executed"
+                // by the time the event fires) and human-readable log lines.
+                let attempt_index = dispatched.job.attempt.saturating_add(1);
                 let job_for_retry = dispatched.job.clone();
+
+                let started = Instant::now();
                 let outcome = std::panic::AssertUnwindSafe(handler(dispatched.job))
                     .catch_unwind()
                     .await;
+                // Microseconds, not millis: most handlers complete well under
+                // 1ms — recording in ms makes every fast handler look like 0
+                // and the histogram is useless. u128 → u64 saturates at ~584
+                // millennia, well past any sane handler duration.
+                let duration_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+
+                let kind = match &outcome {
+                    Ok(Ok(())) => JobOutcomeKind::Ok,
+                    Ok(Err(_)) => JobOutcomeKind::Err,
+                    Err(_) => JobOutcomeKind::Panic,
+                };
+                let event = JobOutcome {
+                    kind,
+                    attempt: attempt_index,
+                    handler_duration_us: duration_us,
+                };
+                let sink = &*wiring.metrics;
+                metrics::dispatch("job_outcome", || sink.job_outcome(event));
+
                 match outcome {
                     Ok(Ok(())) => {
                         if wiring.ack_tx.send(entry_id).await.is_err() {
@@ -63,11 +92,11 @@ where
                         }
                     }
                     Ok(Err(e)) => {
-                        tracing::warn!(job_id = %job_id, error = %e, attempt = attempt_so_far + 1, "handler returned Err");
+                        tracing::warn!(job_id = %job_id, error = %e, attempt = attempt_index, "handler returned Err");
                         on_handler_failure(&wiring, entry_id, job_for_retry).await;
                     }
                     Err(_panic) => {
-                        tracing::warn!(job_id = %job_id, attempt = attempt_so_far + 1, "handler panicked");
+                        tracing::warn!(job_id = %job_id, attempt = attempt_index, "handler panicked");
                         on_handler_failure(&wiring, entry_id, job_for_retry).await;
                     }
                 }
@@ -91,12 +120,22 @@ async fn on_handler_failure<T: Serialize + Send + 'static>(
         }
     };
 
+    // 1-indexed run count for metric events. `Job::attempt` is 0-indexed
+    // ("0 runs have happened yet"), so the run that just executed is
+    // `job.attempt + 1`, and the next run will be `job.attempt + 2`.
+    // `next_attempt` above happens to equal "current 1-indexed run count"
+    // numerically, but that's a coincidence — derive metric values from
+    // run-counts explicitly so the meaning is unambiguous at the call site.
+    let just_ran = job.attempt.saturating_add(1);
+    let will_run_next = just_ran.saturating_add(1);
+
     if next_attempt >= wiring.max_attempts {
         dlq::enqueue(
             &wiring.dlq_tx,
             entry_id,
             encoded,
             DlqReason::RetriesExhausted,
+            just_ran,
         )
         .await;
         return;
@@ -113,7 +152,15 @@ async fn on_handler_failure<T: Serialize + Send + 'static>(
     let backoff = retry::backoff_ms(next_attempt, &wiring.retry_cfg);
     let run_at = now_ms().saturating_add(backoff);
     let run_at_i64 = i64::try_from(run_at).unwrap_or(i64::MAX);
-    retry::enqueue(&wiring.retry_tx, entry_id, encoded_with_bumped, run_at_i64).await;
+    retry::enqueue(
+        &wiring.retry_tx,
+        entry_id,
+        encoded_with_bumped,
+        run_at_i64,
+        will_run_next,
+        backoff,
+    )
+    .await;
 }
 
 pub(crate) async fn drain_workers(mut pool: WorkerPool, deadline: std::time::Duration) {

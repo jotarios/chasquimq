@@ -86,6 +86,7 @@ where
                 group: self.cfg.group.clone(),
                 producer_id: dlq_producer_id,
                 max_stream_len: self.cfg.dlq_max_stream_len,
+                metrics: self.cfg.metrics.clone(),
             },
             dlq_rx,
         ));
@@ -96,6 +97,7 @@ where
                 stream_key: self.stream_key.clone(),
                 delayed_key: self.delayed_key.clone(),
                 group: self.cfg.group.clone(),
+                metrics: self.cfg.metrics.clone(),
             },
             retry_rx,
         ));
@@ -108,6 +110,7 @@ where
             dlq_tx: dlq_tx.clone(),
             max_attempts: self.cfg.max_attempts,
             retry_cfg: self.cfg.retry.clone(),
+            metrics: self.cfg.metrics.clone(),
         };
         let workers = spawn_workers(concurrency, handler, job_rx, wiring);
         drop(ack_tx);
@@ -120,6 +123,7 @@ where
             job_tx,
             dlq_tx,
             shutdown: shutdown.clone(),
+            metrics: self.cfg.metrics.clone(),
         };
         let reader_outcome = reader_loop::<T>(read_state).await;
 
