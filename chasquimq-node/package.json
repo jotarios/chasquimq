@@ -75,6 +75,7 @@
     "vitest": "^2"
   },
   "dependencies": {
-    "@msgpack/msgpack": "^3"
+    "@msgpack/msgpack": "^3",
+    "ioredis": "^5"
   }
 }
