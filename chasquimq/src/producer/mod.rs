@@ -4,11 +4,15 @@ use crate::config::ProducerConfig;
 use crate::error::{Error, Result};
 use crate::job::{Job, JobId, JobRetryOverride, now_ms};
 use crate::redis::commands::{
-    CANCEL_DELAYED_SCRIPT, SCHEDULE_DELAYED_IDEMPOTENT_SCRIPT, eval_cancel_delayed_args,
-    eval_schedule_delayed_idempotent_args, evalsha_cancel_delayed_args,
-    evalsha_schedule_delayed_idempotent_args, script_load_args, xadd_args, zadd_delayed_args,
+    CANCEL_DELAYED_SCRIPT, REMOVE_REPEATABLE_SCRIPT, SCHEDULE_DELAYED_IDEMPOTENT_SCRIPT,
+    UPSERT_REPEATABLE_SCRIPT, eval_cancel_delayed_args, eval_remove_repeatable_args,
+    eval_schedule_delayed_idempotent_args, eval_upsert_repeatable_args,
+    evalsha_cancel_delayed_args, evalsha_remove_repeatable_args,
+    evalsha_schedule_delayed_idempotent_args, evalsha_upsert_repeatable_args, script_load_args,
+    xadd_args, zadd_delayed_args,
 };
 use crate::redis::conn::connect_pool;
+use crate::repeat::{RepeatableMeta, RepeatableSpec, StoredSpec, next_fire_after};
 use bytes::Bytes;
 use fred::clients::{Client, Pool};
 use fred::interfaces::ClientLike;
@@ -21,7 +25,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub use crate::redis::keys::{
     dedup_marker_key, delayed_index_key, delayed_key, dlq_key, events_key, promoter_lock_key,
-    stream_key,
+    repeat_key, repeat_spec_key, scheduler_lock_key, stream_key,
 };
 
 #[derive(Debug, Clone)]
@@ -76,6 +80,7 @@ pub struct Producer<T> {
     stream_key: Arc<str>,
     delayed_key: Arc<str>,
     dlq_key: Arc<str>,
+    repeat_key: Arc<str>,
     max_stream_len: u64,
     max_delay_secs: u64,
     _marker: PhantomData<fn(T)>,
@@ -90,6 +95,7 @@ impl<T> Clone for Producer<T> {
             stream_key: self.stream_key.clone(),
             delayed_key: self.delayed_key.clone(),
             dlq_key: self.dlq_key.clone(),
+            repeat_key: self.repeat_key.clone(),
             max_stream_len: self.max_stream_len,
             max_delay_secs: self.max_delay_secs,
             _marker: PhantomData,
@@ -105,6 +111,7 @@ impl<T: Serialize> Producer<T> {
         let stream_key: Arc<str> = Arc::from(stream_key(&config.queue_name));
         let delayed_key: Arc<str> = Arc::from(delayed_key(&config.queue_name));
         let dlq_key: Arc<str> = Arc::from(dlq_key(&config.queue_name));
+        let repeat_key: Arc<str> = Arc::from(repeat_key(&config.queue_name));
         Ok(Self {
             pool,
             producer_id,
@@ -112,6 +119,7 @@ impl<T: Serialize> Producer<T> {
             stream_key,
             delayed_key,
             dlq_key,
+            repeat_key,
             max_stream_len: config.max_stream_len,
             max_delay_secs: config.max_delay_secs,
             _marker: PhantomData,
@@ -218,6 +226,187 @@ impl<T: Serialize> Producer<T> {
             Err(e) => return Err(Error::Redis(e)),
         };
         Ok(values.iter().map(|v| parse_lua_int(v) == 1).collect())
+    }
+}
+
+impl<T> Producer<T> {
+    /// Remove a repeatable spec by key. Returns `true` if a spec was
+    /// removed, `false` if no spec with that key existed.
+    ///
+    /// Atomically `ZREM`s from the repeat ZSET and `DEL`s the spec hash in
+    /// a single Lua round trip — no half-removed state visible to a
+    /// concurrent scheduler tick.
+    pub async fn remove_repeatable(&self, spec_key: &str) -> Result<bool> {
+        let spec_hash_key = repeat_spec_key(self.queue_name.as_ref(), spec_key);
+        let client = self.pool.next_connected();
+        let sha = load_remove_repeatable_script(client).await?;
+        let evalsha_cmd = CustomCommand::new_static("EVALSHA", ClusterHash::FirstKey, false);
+        let args = evalsha_remove_repeatable_args(
+            &sha,
+            self.repeat_key.as_ref(),
+            &spec_hash_key,
+            spec_key,
+        );
+        let res: std::result::Result<Value, _> = client.custom(evalsha_cmd, args).await;
+        let v = match res {
+            Ok(v) => v,
+            Err(e) if format!("{e}").contains("NOSCRIPT") => {
+                let cmd = CustomCommand::new_static("EVAL", ClusterHash::FirstKey, false);
+                let args = eval_remove_repeatable_args(
+                    REMOVE_REPEATABLE_SCRIPT,
+                    self.repeat_key.as_ref(),
+                    &spec_hash_key,
+                    spec_key,
+                );
+                client.custom(cmd, args).await.map_err(Error::Redis)?
+            }
+            Err(e) => return Err(Error::Redis(e)),
+        };
+        Ok(parse_lua_int(&v) >= 1)
+    }
+
+    /// List repeatable specs ordered by next fire time, ascending. Returns
+    /// up to `limit` entries; pass a generous limit for full inventory
+    /// (the wire size is small — payloads are not included).
+    ///
+    /// Two round trips: one `ZRANGE WITHSCORES` and one pipelined batch of
+    /// `HGET` per spec. The payload bytes are intentionally **not** sent
+    /// back from the spec hash — see [`RepeatableMeta`] for the projection.
+    pub async fn list_repeatable(&self, limit: usize) -> Result<Vec<RepeatableMeta>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let client = self.pool.next_connected();
+        let zrange_cmd = CustomCommand::new_static("ZRANGE", ClusterHash::FirstKey, false);
+        let zrange_args: Vec<Value> = vec![
+            Value::from(self.repeat_key.as_ref()),
+            Value::from(0_i64),
+            Value::from((limit as i64).saturating_sub(1)),
+            Value::from("WITHSCORES"),
+        ];
+        let zrange_res: Value = client
+            .custom(zrange_cmd, zrange_args)
+            .await
+            .map_err(Error::Redis)?;
+        let pairs = parse_zrange_with_scores(&zrange_res);
+        if pairs.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Pipeline one HGET per spec on a single connection.
+        let pipeline = client.pipeline();
+        let hget_cmd = CustomCommand::new_static("HGET", ClusterHash::FirstKey, false);
+        for (spec_key, _) in &pairs {
+            let spec_hash_key = repeat_spec_key(self.queue_name.as_ref(), spec_key);
+            let args: Vec<Value> = vec![Value::from(spec_hash_key), Value::from("spec")];
+            let _: () = pipeline
+                .custom(hget_cmd.clone(), args)
+                .await
+                .map_err(Error::Redis)?;
+        }
+        let results: Vec<Value> = pipeline.all().await.map_err(Error::Redis)?;
+
+        let mut out: Vec<RepeatableMeta> = Vec::with_capacity(pairs.len());
+        for ((spec_key, next_fire_ms), spec_value) in pairs.into_iter().zip(results) {
+            let bytes = match value_as_bytes(&spec_value) {
+                Some(b) => b,
+                None => continue, // dangling ZSET entry, skip
+            };
+            let stored: StoredSpec = match rmp_serde::from_slice(&bytes) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(error = %e, spec_key = %spec_key, "list_repeatable: spec decode failed; skipping");
+                    continue;
+                }
+            };
+            out.push(RepeatableMeta {
+                key: spec_key,
+                job_name: stored.job_name,
+                pattern: stored.pattern,
+                next_fire_ms,
+                limit: stored.limit,
+                start_after_ms: stored.start_after_ms,
+                end_before_ms: stored.end_before_ms,
+            });
+        }
+        Ok(out)
+    }
+}
+
+impl<T: Serialize> Producer<T> {
+    /// Upsert a repeatable spec. Returns the resolved spec key (auto-derived
+    /// from `<job_name>::<pattern_signature>` when the caller leaves
+    /// `spec.key` empty — see [`crate::repeat`] for the format).
+    ///
+    /// Re-upserting with the same key overwrites the spec and re-anchors
+    /// the next fire time at "now + interval" (for `every`) or the next
+    /// matching cron tick. Idempotent under caller retry: the same spec
+    /// upserted twice in a row leaves Redis in the same state as one call.
+    pub async fn upsert_repeatable(&self, spec: RepeatableSpec<T>) -> Result<String> {
+        let resolved_key = spec.resolved_key();
+        let spec_hash_key = repeat_spec_key(self.queue_name.as_ref(), &resolved_key);
+        let now = now_ms();
+        let next_fire =
+            next_fire_after(&spec.pattern, now, spec.start_after_ms)?.ok_or_else(|| {
+                Error::Config(format!(
+                    "repeat pattern has no future fires: {:?}",
+                    spec.pattern
+                ))
+            })?;
+        // Reject patterns whose first fire would already be past the
+        // configured end-bound — that would land in Redis only to be
+        // immediately reaped on the first scheduler tick.
+        if let Some(end) = spec.end_before_ms {
+            if next_fire > end {
+                return Err(Error::Config(
+                    "repeat spec end_before_ms is before the first fire".into(),
+                ));
+            }
+        }
+
+        let payload_bytes = rmp_serde::to_vec(&spec.payload)?;
+        let stored = StoredSpec {
+            key: resolved_key.clone(),
+            job_name: spec.job_name.clone(),
+            pattern: spec.pattern.clone(),
+            payload: payload_bytes,
+            limit: spec.limit,
+            start_after_ms: spec.start_after_ms,
+            end_before_ms: spec.end_before_ms,
+            fired: 0,
+        };
+        let stored_bytes = Bytes::from(rmp_serde::to_vec(&stored)?);
+        let next_fire_i64 = run_at_ms_as_i64(next_fire)?;
+
+        let client = self.pool.next_connected();
+        let sha = load_upsert_repeatable_script(client).await?;
+        let evalsha_cmd = CustomCommand::new_static("EVALSHA", ClusterHash::FirstKey, false);
+        let args = evalsha_upsert_repeatable_args(
+            &sha,
+            self.repeat_key.as_ref(),
+            &spec_hash_key,
+            next_fire_i64,
+            &resolved_key,
+            stored_bytes.clone(),
+        );
+        let res: std::result::Result<Value, _> = client.custom(evalsha_cmd, args).await;
+        match res {
+            Ok(_) => {}
+            Err(e) if format!("{e}").contains("NOSCRIPT") => {
+                let cmd = CustomCommand::new_static("EVAL", ClusterHash::FirstKey, false);
+                let args = eval_upsert_repeatable_args(
+                    UPSERT_REPEATABLE_SCRIPT,
+                    self.repeat_key.as_ref(),
+                    &spec_hash_key,
+                    next_fire_i64,
+                    &resolved_key,
+                    stored_bytes,
+                );
+                let _: Value = client.custom(cmd, args).await.map_err(Error::Redis)?;
+            }
+            Err(e) => return Err(Error::Redis(e)),
+        }
+        Ok(resolved_key)
     }
 }
 
@@ -795,6 +984,61 @@ async fn load_idempotent_script(client: &Client) -> Result<String> {
 
 async fn load_cancel_script(client: &Client) -> Result<String> {
     load_script_sha(client, CANCEL_DELAYED_SCRIPT).await
+}
+
+async fn load_upsert_repeatable_script(client: &Client) -> Result<String> {
+    load_script_sha(client, UPSERT_REPEATABLE_SCRIPT).await
+}
+
+async fn load_remove_repeatable_script(client: &Client) -> Result<String> {
+    load_script_sha(client, REMOVE_REPEATABLE_SCRIPT).await
+}
+
+fn value_as_bytes(v: &Value) -> Option<Bytes> {
+    match v {
+        Value::Bytes(b) => Some(b.clone()),
+        Value::String(s) => Some(Bytes::copy_from_slice(s.as_bytes())),
+        _ => None,
+    }
+}
+
+/// Parse `ZRANGE ... WITHSCORES` reply into `(member, score)` pairs. The
+/// reply is a flat array `[m1, s1, m2, s2, ...]` where members are bulk
+/// strings and scores are doubles serialized as bulk strings.
+fn parse_zrange_with_scores(v: &Value) -> Vec<(String, u64)> {
+    let items = match v {
+        Value::Array(items) => items,
+        _ => return Vec::new(),
+    };
+    let mut out: Vec<(String, u64)> = Vec::with_capacity(items.len() / 2);
+    let mut iter = items.iter();
+    while let (Some(m), Some(s)) = (iter.next(), iter.next()) {
+        let member = match m {
+            Value::String(s) => s.to_string(),
+            Value::Bytes(b) => match std::str::from_utf8(b) {
+                Ok(s) => s.to_string(),
+                Err(_) => continue,
+            },
+            _ => continue,
+        };
+        let score: u64 = match s {
+            Value::Double(d) => (*d).max(0.0) as u64,
+            Value::Integer(n) => (*n).max(0) as u64,
+            Value::String(s) => s
+                .parse::<f64>()
+                .ok()
+                .map(|f| f.max(0.0) as u64)
+                .unwrap_or(0),
+            Value::Bytes(b) => std::str::from_utf8(b)
+                .ok()
+                .and_then(|s| s.parse::<f64>().ok())
+                .map(|f| f.max(0.0) as u64)
+                .unwrap_or(0),
+            _ => 0,
+        };
+        out.push((member, score));
+    }
+    out
 }
 
 async fn load_script_sha(client: &Client, body: &str) -> Result<String> {

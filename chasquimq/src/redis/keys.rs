@@ -38,6 +38,29 @@ pub fn events_key(queue_name: &str) -> String {
     format!("{{chasqui:{queue_name}}}:events")
 }
 
+/// Per-queue ZSET tracking repeatable specs by next fire time. Score =
+/// `next_fire_ms`, member = `RepeatableSpec::resolved_key()`. The
+/// `Scheduler` (slice 10) tails this with `ZRANGEBYSCORE -inf <now>` to
+/// find specs whose next fire time has elapsed.
+pub fn repeat_key(queue_name: &str) -> String {
+    format!("{{chasqui:{queue_name}}}:repeat")
+}
+
+/// Per-queue, per-spec-key hash storing the full repeatable spec
+/// (`pattern`, `payload`, `limit`, etc.) under field `spec` as
+/// msgpack-encoded [`crate::repeat::StoredSpec`]. Separate from the ZSET so
+/// the scheduler tick only hydrates due specs, not the entire catalog.
+pub fn repeat_spec_key(queue_name: &str, spec_key: &str) -> String {
+    format!("{{chasqui:{queue_name}}}:repeat:spec:{spec_key}")
+}
+
+/// Per-queue scheduler leader-election lock key. Independent from the
+/// `promoter:lock` so a deployment can run scheduler and promoter on
+/// disjoint replicas if it chooses.
+pub fn scheduler_lock_key(queue_name: &str) -> String {
+    format!("{{chasqui:{queue_name}}}:scheduler:lock")
+}
+
 /// Per-queue, per-job-id side-index key used by `Producer::cancel_delayed`.
 /// Stores the exact encoded ZSET member so cancel can `ZREM` precisely
 /// without a slow `ZRANGE` scan. Written by the idempotent schedule path
