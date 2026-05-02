@@ -46,7 +46,10 @@ fn collect(snapshotter: &Snapshotter) -> Snapshot {
                 counters.entry(name).or_default().push((labels, n));
             }
             DebugValue::Gauge(n) => {
-                gauges.entry(name).or_default().push((labels, n.into_inner()));
+                gauges
+                    .entry(name)
+                    .or_default()
+                    .push((labels, n.into_inner()));
             }
             _ => {}
         }

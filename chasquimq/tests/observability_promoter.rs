@@ -9,7 +9,7 @@ mod common;
 use chasquimq::config::PromoterConfig;
 use chasquimq::metrics::{MetricsSink, testing::InMemorySink};
 use chasquimq::producer::{Producer, delayed_key};
-use chasquimq::{ConsumerConfig, Consumer, Promoter};
+use chasquimq::{Consumer, ConsumerConfig, Promoter};
 use fred::interfaces::ClientLike;
 use std::sync::Arc;
 use std::time::Duration;

@@ -13,7 +13,11 @@ use serde::de::DeserializeOwned;
 
 use super::DlqEntry;
 
-pub(super) async fn xrange_dlq(pool: &Pool, dlq_key: &str, limit: usize) -> Result<Vec<XrangeEntry>> {
+pub(super) async fn xrange_dlq(
+    pool: &Pool,
+    dlq_key: &str,
+    limit: usize,
+) -> Result<Vec<XrangeEntry>> {
     let client = pool.next_connected();
     let cmd = CustomCommand::new_static("XRANGE", ClusterHash::FirstKey, false);
     let res: Value = client
@@ -106,8 +110,13 @@ where
         Ok(v) => v,
         Err(e) if format!("{e}").contains("NOSCRIPT") => {
             let cmd = CustomCommand::new_static("EVAL", ClusterHash::FirstKey, false);
-            let args =
-                eval_replay_args(REPLAY_DLQ_SCRIPT, dlq_key, stream_key, max_stream_len, &pairs);
+            let args = eval_replay_args(
+                REPLAY_DLQ_SCRIPT,
+                dlq_key,
+                stream_key,
+                max_stream_len,
+                &pairs,
+            );
             client.custom(cmd, args).await.map_err(Error::Redis)?
         }
         Err(e) => return Err(Error::Redis(e)),

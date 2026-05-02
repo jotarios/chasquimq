@@ -132,14 +132,7 @@ where
         EntryShape::MalformedWithId { id, reason } => {
             tracing::warn!(entry_id = %id, reason, "malformed stream entry; routing to DLQ");
             // Reader-side DLQ: handler never ran, so attempt is 0.
-            dlq::enqueue(
-                dlq_tx,
-                id,
-                Bytes::new(),
-                DlqReason::Malformed { reason },
-                0,
-            )
-            .await;
+            dlq::enqueue(dlq_tx, id, Bytes::new(), DlqReason::Malformed { reason }, 0).await;
             return DispatchFlow::Continue;
         }
         EntryShape::Unrecoverable => {

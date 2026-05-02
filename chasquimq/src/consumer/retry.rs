@@ -280,9 +280,9 @@ mod tests {
         assert!(!script_returned_one(&Value::Integer(2)));
         assert!(script_returned_one(&Value::String("1".into())));
         assert!(!script_returned_one(&Value::String("0".into())));
-        assert!(script_returned_one(&Value::Bytes(bytes::Bytes::from_static(
-            b"1"
-        ))));
+        assert!(script_returned_one(&Value::Bytes(
+            bytes::Bytes::from_static(b"1")
+        )));
         assert!(!script_returned_one(&Value::Null));
     }
 }

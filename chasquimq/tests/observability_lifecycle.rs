@@ -6,7 +6,7 @@ mod common;
 
 use chasquimq::metrics::{DlqReason, JobOutcomeKind, MetricsSink, testing::InMemorySink};
 use chasquimq::producer::Producer;
-use chasquimq::{ConsumerConfig, Consumer, HandlerError, Job};
+use chasquimq::{Consumer, ConsumerConfig, HandlerError, Job};
 use fred::interfaces::ClientLike;
 use std::sync::Arc;
 use std::time::Duration;
@@ -279,7 +279,11 @@ async fn handler_panic_emits_panic_outcome() {
     shutdown.cancel();
     let _ = tokio::time::timeout(Duration::from_secs(10), handle).await;
 
-    assert_eq!(sink.panics(), 1, "handler panic surfaced as JobOutcome::Panic");
+    assert_eq!(
+        sink.panics(),
+        1,
+        "handler panic surfaced as JobOutcome::Panic"
+    );
     assert_eq!(sink.jobs_completed(), 0);
     let outcomes = sink.job_outcomes();
     assert!(outcomes.iter().any(|o| o.kind == JobOutcomeKind::Panic));
