@@ -172,7 +172,15 @@ where
     let claim_seen = u32::try_from(entry.delivery_count.saturating_sub(1)).unwrap_or(0);
     let prior_attempts = job.attempt.max(claim_seen);
     let next_attempt = prior_attempts.saturating_add(1);
-    if next_attempt > cfg.max_attempts {
+    // Per-job override: `Job::retry.max_attempts` wins over the queue-wide
+    // `cfg.max_attempts` when set. Mirrors the logic in `worker::on_handler_failure`
+    // so the arrival-time DLQ gate and the post-handler DLQ gate use the same budget.
+    let max_attempts = job
+        .retry
+        .as_ref()
+        .and_then(|r| r.max_attempts)
+        .unwrap_or(cfg.max_attempts);
+    if next_attempt > max_attempts {
         // Retries-exhausted-on-arrival: carry the prior attempt count so
         // operators can see how many tries the job got before being shed.
         dlq::enqueue(

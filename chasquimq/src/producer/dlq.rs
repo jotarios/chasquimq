@@ -147,6 +147,10 @@ where
                 continue;
             }
         };
+        // Reset only the attempt counter so the replay gets a fresh retry
+        // budget. Per-job `retry` overrides are preserved verbatim — a
+        // replayed job should still respect whatever `JobRetryOverride`
+        // the producer attached, not silently revert to queue-wide config.
         job.attempt = 0;
         let bytes = Bytes::from(rmp_serde::to_vec(&job)?);
         pairs.push((dlq_id, bytes));

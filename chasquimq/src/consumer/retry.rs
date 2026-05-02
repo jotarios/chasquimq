@@ -1,5 +1,6 @@
 use crate::config::RetryConfig;
 use crate::error::{Error, Result};
+use crate::job::BackoffSpec;
 use crate::metrics::{self, MetricsSink, RetryScheduled};
 use crate::redis::commands::{
     RETRY_RESCHEDULE_SCRIPT, eval_retry_args, evalsha_retry_args, script_load_args,
@@ -200,6 +201,44 @@ pub(crate) fn backoff_ms(attempt: u32, cfg: &RetryConfig) -> u64 {
     capped.saturating_add(jitter)
 }
 
+/// Compute backoff using a per-job [`BackoffSpec`], falling back to fields
+/// of the queue-wide [`RetryConfig`] when the spec leaves them `None`.
+///
+/// `attempt` is 1-indexed exactly like [`backoff_ms`].
+///
+/// `kind` semantics:
+///  - `"fixed"` returns `delay_ms` plus jitter, capped at `max_delay_ms`.
+///    No multiplier is applied.
+///  - `"exponential"` returns `delay_ms * multiplier^(attempt-1)` plus
+///    jitter, capped at `max_delay_ms`.
+///  - Anything else degrades to `"exponential"` so an unknown future
+///    `kind` doesn't hard-fail the consumer.
+pub(crate) fn backoff_ms_from_spec(
+    attempt: u32,
+    spec: &BackoffSpec,
+    fallback: &RetryConfig,
+) -> u64 {
+    let max_delay_ms = spec.max_delay_ms.unwrap_or(fallback.max_backoff_ms);
+    let jitter_ms = spec.jitter_ms.unwrap_or(fallback.jitter_ms);
+
+    let base = match spec.kind.as_str() {
+        "fixed" => spec.delay_ms as f64,
+        // "exponential" or unknown → exponential semantics
+        _ => {
+            let multiplier = spec.multiplier.unwrap_or(fallback.multiplier);
+            let exp = attempt.saturating_sub(1) as i32;
+            (spec.delay_ms as f64) * multiplier.powi(exp)
+        }
+    };
+    let capped = base.min(max_delay_ms as f64).max(0.0) as u64;
+    let jitter = if jitter_ms == 0 {
+        0
+    } else {
+        fastrand_jitter(jitter_ms)
+    };
+    capped.saturating_add(jitter)
+}
+
 fn fastrand_jitter(max: u64) -> u64 {
     use std::cell::Cell;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -271,6 +310,113 @@ mod tests {
             jitter_ms: 0,
         };
         assert_eq!(backoff_ms(0, &cfg), 100);
+    }
+
+    #[test]
+    fn backoff_from_spec_exponential_uses_spec_fields() {
+        let fallback = RetryConfig {
+            initial_backoff_ms: 999,
+            max_backoff_ms: 100_000,
+            multiplier: 99.0,
+            jitter_ms: 0,
+        };
+        let spec = BackoffSpec {
+            kind: "exponential".into(),
+            delay_ms: 100,
+            max_delay_ms: Some(5_000),
+            multiplier: Some(3.0),
+            jitter_ms: Some(0),
+        };
+        // 100, 300, 900, 2700, capped at 5000.
+        assert_eq!(backoff_ms_from_spec(1, &spec, &fallback), 100);
+        assert_eq!(backoff_ms_from_spec(2, &spec, &fallback), 300);
+        assert_eq!(backoff_ms_from_spec(3, &spec, &fallback), 900);
+        assert_eq!(backoff_ms_from_spec(4, &spec, &fallback), 2_700);
+        assert_eq!(backoff_ms_from_spec(5, &spec, &fallback), 5_000);
+        assert_eq!(backoff_ms_from_spec(10, &spec, &fallback), 5_000);
+    }
+
+    #[test]
+    fn backoff_from_spec_fixed_ignores_multiplier() {
+        let fallback = RetryConfig {
+            initial_backoff_ms: 0,
+            max_backoff_ms: 100_000,
+            multiplier: 99.0,
+            jitter_ms: 0,
+        };
+        let spec = BackoffSpec {
+            kind: "fixed".into(),
+            delay_ms: 50,
+            max_delay_ms: None,
+            multiplier: Some(99.0),
+            jitter_ms: Some(0),
+        };
+        for attempt in 1..=10 {
+            assert_eq!(backoff_ms_from_spec(attempt, &spec, &fallback), 50);
+        }
+    }
+
+    #[test]
+    fn backoff_from_spec_unknown_kind_degrades_to_exponential() {
+        let fallback = RetryConfig {
+            initial_backoff_ms: 999,
+            max_backoff_ms: 100_000,
+            multiplier: 2.0,
+            jitter_ms: 0,
+        };
+        let spec = BackoffSpec {
+            kind: "linear-future-feature".into(),
+            delay_ms: 100,
+            max_delay_ms: None,
+            multiplier: None, // pull from fallback (2.0)
+            jitter_ms: Some(0),
+        };
+        assert_eq!(backoff_ms_from_spec(1, &spec, &fallback), 100);
+        assert_eq!(backoff_ms_from_spec(2, &spec, &fallback), 200);
+        assert_eq!(backoff_ms_from_spec(3, &spec, &fallback), 400);
+    }
+
+    #[test]
+    fn backoff_from_spec_falls_back_to_retry_config_fields() {
+        let fallback = RetryConfig {
+            initial_backoff_ms: 0,
+            max_backoff_ms: 250,
+            multiplier: 2.0,
+            jitter_ms: 0,
+        };
+        let spec = BackoffSpec {
+            kind: "exponential".into(),
+            delay_ms: 100,
+            max_delay_ms: None, // → fallback.max_backoff_ms = 250
+            multiplier: None,   // → fallback.multiplier = 2.0
+            jitter_ms: None,    // → fallback.jitter_ms = 0
+        };
+        // 100, 200, 400(capped to 250), 800(capped to 250)
+        assert_eq!(backoff_ms_from_spec(1, &spec, &fallback), 100);
+        assert_eq!(backoff_ms_from_spec(2, &spec, &fallback), 200);
+        assert_eq!(backoff_ms_from_spec(3, &spec, &fallback), 250);
+        assert_eq!(backoff_ms_from_spec(4, &spec, &fallback), 250);
+    }
+
+    #[test]
+    fn backoff_from_spec_jitter_within_bounds() {
+        let fallback = RetryConfig {
+            initial_backoff_ms: 0,
+            max_backoff_ms: 100_000,
+            multiplier: 2.0,
+            jitter_ms: 0,
+        };
+        let spec = BackoffSpec {
+            kind: "fixed".into(),
+            delay_ms: 100,
+            max_delay_ms: None,
+            multiplier: None,
+            jitter_ms: Some(25),
+        };
+        for _ in 0..200 {
+            let v = backoff_ms_from_spec(1, &spec, &fallback);
+            assert!((100..100 + 25).contains(&v), "out of range: {v}");
+        }
     }
 
     #[test]
