@@ -2,6 +2,7 @@ use crate::config::ConsumerConfig;
 use crate::consumer::dlq::{self, DlqReason, DlqRelocate};
 use crate::consumer::worker::DispatchedJob;
 use crate::error::Result;
+use crate::events::EventsWriter;
 use crate::job::Job;
 use crate::metrics::{self, MetricsSink, ReaderBatch};
 use crate::redis::commands::xreadgroup_args;
@@ -23,6 +24,7 @@ pub(crate) struct ReadState<T> {
     pub dlq_tx: mpsc::Sender<DlqRelocate>,
     pub shutdown: CancellationToken,
     pub metrics: Arc<dyn MetricsSink>,
+    pub events: EventsWriter,
 }
 
 pub(crate) async fn reader_loop<T>(state: ReadState<T>) -> Result<()>
@@ -37,9 +39,15 @@ where
         dlq_tx,
         shutdown,
         metrics: metrics_sink,
+        events,
     } = state;
 
     let cmd = CustomCommand::new_static("XREADGROUP", ClusterHash::FirstKey, false);
+    // `drained` event firing rule: only on the full -> empty transition.
+    // `last_was_non_empty` tracks the previous non-empty batch so we don't
+    // emit `drained` on every blocking-poll timeout (which would be tens
+    // per second with a 50ms `block_ms`).
+    let mut last_was_non_empty = false;
     loop {
         if shutdown.is_cancelled() {
             break;
@@ -71,8 +79,18 @@ where
 
         let entries = parse_xreadgroup_response(&value);
         if entries.is_empty() {
+            // Transition guard: we only emit `drained` when the *previous*
+            // non-empty batch is followed by an empty one. A consumer that
+            // starts up against an empty queue does not emit (initial state
+            // is already drained). Without this guard a `block_ms = 50` /
+            // idle queue would emit ~20 events/s/consumer.
+            if last_was_non_empty && events.is_enabled() {
+                events.emit_drained().await;
+            }
+            last_was_non_empty = false;
             continue;
         }
+        last_was_non_empty = true;
 
         // Emit ReaderBatch on every non-empty response. `size` is the raw
         // count from Redis (including entries that are about to be DLQ-routed

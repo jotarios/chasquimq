@@ -20,7 +20,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub use crate::redis::keys::{
-    dedup_marker_key, delayed_index_key, delayed_key, dlq_key, promoter_lock_key, stream_key,
+    dedup_marker_key, delayed_index_key, delayed_key, dlq_key, events_key, promoter_lock_key,
+    stream_key,
 };
 
 #[derive(Debug, Clone)]

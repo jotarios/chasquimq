@@ -2,6 +2,7 @@ use crate::config::RetryConfig;
 use crate::consumer::dlq::{self, DlqReason, DlqRelocate};
 use crate::consumer::retry::{self, RetryRelocate};
 use crate::error::HandlerError;
+use crate::events::EventsWriter;
 use crate::job::{Job, now_ms};
 use crate::metrics::{self, JobOutcome, JobOutcomeKind, MetricsSink};
 use crate::redis::parse::StreamEntryId;
@@ -30,6 +31,7 @@ pub(crate) struct WorkerWiring {
     pub max_attempts: u32,
     pub retry_cfg: RetryConfig,
     pub metrics: Arc<dyn MetricsSink>,
+    pub events: EventsWriter,
 }
 
 pub(crate) fn spawn_workers<T, H, Fut>(
@@ -62,6 +64,12 @@ where
                 let attempt_index = dispatched.job.attempt.saturating_add(1);
                 let job_for_retry = dispatched.job.clone();
 
+                // Emit `active` *before* the handler runs so subscribers can
+                // build a "currently running" view that's correct even for
+                // handlers that take a long time. Best-effort by design — a
+                // failing XADD must not delay the handler.
+                wiring.events.emit_active(&job_id, attempt_index).await;
+
                 let started = Instant::now();
                 let outcome = std::panic::AssertUnwindSafe(handler(dispatched.job))
                     .catch_unwind()
@@ -87,16 +95,34 @@ where
 
                 match outcome {
                     Ok(Ok(())) => {
+                        wiring
+                            .events
+                            .emit_completed(&job_id, attempt_index, duration_us)
+                            .await;
                         if wiring.ack_tx.send(entry_id).await.is_err() {
                             break;
                         }
                     }
                     Ok(Err(e)) => {
+                        let reason = format!("{e}");
                         tracing::warn!(job_id = %job_id, error = %e, attempt = attempt_index, "handler returned Err");
+                        wiring
+                            .events
+                            .emit_failed(&job_id, attempt_index, &reason, Some(duration_us))
+                            .await;
                         on_handler_failure(&wiring, entry_id, job_for_retry).await;
                     }
                     Err(_panic) => {
                         tracing::warn!(job_id = %job_id, attempt = attempt_index, "handler panicked");
+                        wiring
+                            .events
+                            .emit_failed(
+                                &job_id,
+                                attempt_index,
+                                "handler panicked",
+                                Some(duration_us),
+                            )
+                            .await;
                         on_handler_failure(&wiring, entry_id, job_for_retry).await;
                     }
                 }

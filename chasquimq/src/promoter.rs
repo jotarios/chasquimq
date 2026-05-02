@@ -1,5 +1,6 @@
 use crate::config::PromoterConfig;
 use crate::error::{Error, Result};
+use crate::events::EventsWriter;
 use crate::job::Job;
 use crate::metrics::{LockOutcome, PromoterTick, dispatch};
 use crate::redis::commands::{
@@ -43,10 +44,24 @@ impl Promoter {
 
     pub async fn run(self, shutdown: CancellationToken) -> Result<()> {
         let client = connect(&self.redis_url).await?;
+        // Separate connection for the events writer so a slow XADD on the
+        // events stream cannot serialize with the promote-script EVAL on
+        // the main client. When `events_enabled` is false we skip the
+        // extra connect entirely.
+        let events = if self.cfg.events_enabled {
+            let events_client = connect(&self.redis_url).await?;
+            EventsWriter::new(
+                events_client,
+                &self.cfg.queue_name,
+                self.cfg.events_max_stream_len,
+            )
+        } else {
+            EventsWriter::disabled()
+        };
         let mut promote_sha = load_script(&client, PROMOTE_SCRIPT).await?;
         let mut lock_sha = load_script(&client, ACQUIRE_LOCK_SCRIPT).await?;
         let outcome = self
-            .loop_until_shutdown(&client, &mut promote_sha, &mut lock_sha, &shutdown)
+            .loop_until_shutdown(&client, &events, &mut promote_sha, &mut lock_sha, &shutdown)
             .await;
         self.release_lock_best_effort(&client).await;
         outcome
@@ -55,6 +70,7 @@ impl Promoter {
     async fn loop_until_shutdown(
         &self,
         client: &Client,
+        events: &EventsWriter,
         promote_sha: &mut String,
         lock_sha: &mut String,
         shutdown: &CancellationToken,
@@ -109,6 +125,7 @@ impl Promoter {
             match self.promote_once(client, promote_sha).await {
                 Ok((tick, members)) => {
                     cleanup_promoted_indices(client, &self.cfg.queue_name, &members).await;
+                    emit_waiting_for_promoted(events, &members).await;
                     match self
                         .handle_tick(tick, &mut backoff_idx, poll, shutdown)
                         .await
@@ -125,6 +142,7 @@ impl Promoter {
                             .await
                             .map_err(Error::Redis)?;
                     cleanup_promoted_indices(client, &self.cfg.queue_name, &members).await;
+                    emit_waiting_for_promoted(events, &members).await;
                     match self
                         .handle_tick(tick, &mut backoff_idx, poll, shutdown)
                         .await
@@ -357,6 +375,28 @@ fn extract_job_id(bytes: &[u8]) -> Option<String> {
 /// promotion must hit the marker and become a no-op rather than schedule
 /// a second copy). The side-index, by contrast, is only useful to a future
 /// `cancel_delayed` and is dead weight after promotion.
+/// Emit one `waiting` event per promoted member to the per-queue events
+/// stream. Best-effort: each XADD is awaited sequentially (the writer
+/// shares a single connection — pipelining would buy us little here since
+/// the promoter's hot path is already cap-bounded by `promote_batch`,
+/// which defaults to 256). For batches large enough to make sequential
+/// XADDs visible, an operator should raise `events_max_stream_len` and
+/// drop the events sink, not pipeline.
+///
+/// A member whose payload bytes don't decode to a `Job<IgnoredAny>` is
+/// silently skipped (matches the side-index cleanup posture: a stale or
+/// malformed entry shouldn't take the promoter down).
+async fn emit_waiting_for_promoted(events: &EventsWriter, members: &[Bytes]) {
+    if !events.is_enabled() || members.is_empty() {
+        return;
+    }
+    for m in members {
+        if let Some(id) = extract_job_id(m) {
+            events.emit_waiting(&id).await;
+        }
+    }
+}
+
 async fn cleanup_promoted_indices(client: &Client, queue_name: &str, members: &[Bytes]) {
     if members.is_empty() {
         return;

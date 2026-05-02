@@ -1,6 +1,7 @@
 use crate::config::RetryConfig;
 use crate::error::{Error, Result};
-use crate::job::BackoffSpec;
+use crate::events::EventsWriter;
+use crate::job::{BackoffSpec, Job};
 use crate::metrics::{self, MetricsSink, RetryScheduled};
 use crate::redis::commands::{
     RETRY_RESCHEDULE_SCRIPT, eval_retry_args, evalsha_retry_args, script_load_args,
@@ -10,6 +11,7 @@ use bytes::Bytes;
 use fred::clients::Client;
 use fred::interfaces::ClientLike;
 use fred::types::{ClusterHash, CustomCommand, Value};
+use serde::de::IgnoredAny;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -36,6 +38,7 @@ pub(crate) struct RetryRelocatorConfig {
     pub delayed_key: String,
     pub group: String,
     pub metrics: Arc<dyn MetricsSink>,
+    pub events: EventsWriter,
 }
 
 pub(crate) async fn enqueue(
@@ -82,6 +85,20 @@ pub(crate) async fn run_retry_relocator(
                 };
                 let sink = &*cfg.metrics;
                 metrics::dispatch("retry_scheduled", || sink.retry_scheduled(event));
+                // Mirror the MetricsSink gating: only emit on the actual
+                // reschedule, never on a lost XACKDEL race. We need the
+                // job id, which the relocator doesn't carry — decode it
+                // from the encoded payload bytes. Cost: one rmp_serde
+                // decode of just the `id` field via `IgnoredAny`. If the
+                // bytes don't decode (corrupt payload), skip the event;
+                // the metric still fires.
+                if cfg.events.is_enabled() {
+                    if let Some(job_id) = extract_job_id(&relocate.job_bytes) {
+                        cfg.events
+                            .emit_retry_scheduled(&job_id, relocate.attempt, relocate.backoff_ms)
+                            .await;
+                    }
+                }
             }
             Ok(false) => {
                 // Script returned 0: XACKDEL race lost — the entry was
@@ -168,6 +185,16 @@ fn script_returned_one(v: &Value) -> bool {
         Value::Bytes(b) => b.as_ref() == b"1",
         _ => false,
     }
+}
+
+/// Decode a `JobId` from a msgpack-encoded `Job<T>` payload without
+/// allocating for the (ignored) `payload` field. Returns `None` for malformed
+/// bytes — used by the events emit on the retry-scheduled path so the
+/// MetricsSink event still fires even if the events-stream emit can't.
+/// Mirrors the helper of the same name in `promoter.rs`.
+fn extract_job_id(bytes: &[u8]) -> Option<String> {
+    let job: Job<IgnoredAny> = rmp_serde::from_slice(bytes).ok()?;
+    Some(job.id)
 }
 
 async fn load_script(client: &Client) -> Result<String> {
