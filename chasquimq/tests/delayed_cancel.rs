@@ -555,7 +555,9 @@ async fn cancel_vs_promote_race_is_exclusive() {
 #[ignore = "requires REDIS_URL"]
 async fn promoter_cleans_up_side_index_after_promotion() {
     let admin = admin().await;
-    let queue = "delayed_cancel_e6";
+    // Distinct from `delayed_cancel_e6` (used by the empty-input test) so
+    // parallel `cargo test` runs can't cross-contaminate keyspaces.
+    let queue = "delayed_cancel_e8";
     flush_all(&admin, queue).await;
 
     let producer: Producer<Sample> = Producer::connect(&redis_url(), producer_cfg(queue))

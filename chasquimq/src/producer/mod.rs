@@ -680,11 +680,69 @@ async fn run_schedule_delayed_idempotent(
     Ok(parse_lua_int(&v))
 }
 
+/// Parse a Lua script's integer reply across the three `fred::types::Value`
+/// shapes Redis can hand back depending on transport (RESP2 vs RESP3) and
+/// fred decode path. The previous version of this function read only the
+/// **first byte** of the bulk-string variants — for `b"1"` it returned
+/// `49` (ASCII code), not `1`, silently turning every cancel-success
+/// reply into "false" on transports that surface integers as bulk
+/// strings. Defensive parse via `str::parse::<i64>` matches the pattern
+/// already established in `consumer/retry.rs::script_returned_one`.
 fn parse_lua_int(v: &Value) -> i64 {
     match v {
         Value::Integer(n) => *n,
-        Value::String(s) => s.as_bytes().first().copied().map(i64::from).unwrap_or(0),
-        Value::Bytes(b) => b.first().copied().map(i64::from).unwrap_or(0),
+        Value::String(s) => s.parse::<i64>().unwrap_or(0),
+        Value::Bytes(b) => std::str::from_utf8(b)
+            .ok()
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0),
         _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod parse_lua_int_tests {
+    use super::parse_lua_int;
+    use fred::types::Value;
+
+    #[test]
+    fn integer_passthrough() {
+        assert_eq!(parse_lua_int(&Value::Integer(0)), 0);
+        assert_eq!(parse_lua_int(&Value::Integer(1)), 1);
+        assert_eq!(parse_lua_int(&Value::Integer(42)), 42);
+    }
+
+    #[test]
+    fn string_is_parsed_as_decimal_not_first_byte() {
+        // Regression: prior impl returned ASCII code 49 for "1".
+        assert_eq!(parse_lua_int(&Value::String("0".into())), 0);
+        assert_eq!(parse_lua_int(&Value::String("1".into())), 1);
+        assert_eq!(parse_lua_int(&Value::String("10".into())), 10);
+    }
+
+    #[test]
+    fn bytes_is_parsed_as_decimal_not_first_byte() {
+        assert_eq!(
+            parse_lua_int(&Value::Bytes(bytes::Bytes::from_static(b"0"))),
+            0
+        );
+        assert_eq!(
+            parse_lua_int(&Value::Bytes(bytes::Bytes::from_static(b"1"))),
+            1
+        );
+        assert_eq!(
+            parse_lua_int(&Value::Bytes(bytes::Bytes::from_static(b"10"))),
+            10
+        );
+    }
+
+    #[test]
+    fn non_numeric_returns_zero() {
+        assert_eq!(parse_lua_int(&Value::String("oops".into())), 0);
+        assert_eq!(
+            parse_lua_int(&Value::Bytes(bytes::Bytes::from_static(b"oops"))),
+            0
+        );
+        assert_eq!(parse_lua_int(&Value::Null), 0);
     }
 }
