@@ -1,5 +1,6 @@
 use crate::config::PromoterConfig;
 use crate::error::{Error, Result};
+use crate::job::Job;
 use crate::metrics::{LockOutcome, PromoterTick, dispatch};
 use crate::redis::commands::{
     ACQUIRE_LOCK_SCRIPT, PROMOTE_SCRIPT, RELEASE_LOCK_SCRIPT, eval_acquire_lock_args,
@@ -7,10 +8,12 @@ use crate::redis::commands::{
     script_load_args,
 };
 use crate::redis::conn::connect;
-use crate::redis::keys::{delayed_key, promoter_lock_key, stream_key};
+use crate::redis::keys::{delayed_index_key, delayed_key, promoter_lock_key, stream_key};
+use bytes::Bytes;
 use fred::clients::Client;
 use fred::interfaces::ClientLike;
 use fred::types::{ClusterHash, CustomCommand, Value};
+use serde::de::IgnoredAny;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
@@ -104,20 +107,24 @@ impl Promoter {
             }
 
             match self.promote_once(client, promote_sha).await {
-                Ok(tick) => match self
-                    .handle_tick(tick, &mut backoff_idx, poll, shutdown)
-                    .await
-                {
-                    TickAction::Drain => continue,
-                    TickAction::Shutdown => return Ok(()),
-                    TickAction::Polled => {}
-                },
+                Ok((tick, members)) => {
+                    cleanup_promoted_indices(client, &self.cfg.queue_name, &members).await;
+                    match self
+                        .handle_tick(tick, &mut backoff_idx, poll, shutdown)
+                        .await
+                    {
+                        TickAction::Drain => continue,
+                        TickAction::Shutdown => return Ok(()),
+                        TickAction::Polled => {}
+                    }
+                }
                 Err(PromoteError::NoScript) => {
                     *promote_sha = load_script(client, PROMOTE_SCRIPT).await?;
-                    let tick =
+                    let (tick, members) =
                         run_promote_eval(client, &self.delayed_key, &self.stream_key, &self.cfg)
                             .await
                             .map_err(Error::Redis)?;
+                    cleanup_promoted_indices(client, &self.cfg.queue_name, &members).await;
                     match self
                         .handle_tick(tick, &mut backoff_idx, poll, shutdown)
                         .await
@@ -201,7 +208,7 @@ impl Promoter {
         &self,
         client: &Client,
         sha: &str,
-    ) -> std::result::Result<PromoterTick, PromoteError> {
+    ) -> std::result::Result<(PromoterTick, Vec<Bytes>), PromoteError> {
         let cmd = CustomCommand::new_static("EVALSHA", ClusterHash::FirstKey, false);
         let args = evalsha_promote_args(
             sha,
@@ -212,7 +219,7 @@ impl Promoter {
         );
         let res: std::result::Result<Value, fred::error::Error> = client.custom(cmd, args).await;
         match res {
-            Ok(v) => Ok(value_as_tick(&v)),
+            Ok(v) => Ok((value_as_tick(&v), value_as_promoted_members(&v))),
             Err(e) => Err(classify_promote_error(e)),
         }
     }
@@ -282,10 +289,13 @@ fn is_transient(err: &fred::error::Error) -> bool {
 }
 
 pub(crate) fn value_as_tick(v: &Value) -> PromoterTick {
-    // PROMOTE_SCRIPT returns `{promoted, depth, oldest_pending_lag_ms}` as a
-    // Lua table, which fred surfaces as `Value::Array`. Older deployments /
-    // a future script regression would return a bare integer for `promoted`
-    // — we accept that shape for forward-compatibility and zero out the rest.
+    // PROMOTE_SCRIPT returns `{promoted, depth, oldest_pending_lag_ms,
+    // promoted_members}` as a Lua table, which fred surfaces as
+    // `Value::Array`. The 4th slot (promoted member bytes) is consumed by
+    // `value_as_promoted_members` and intentionally ignored here so the
+    // public `PromoterTick` stays a small `Copy` struct. Older deployments /
+    // a future script regression returning a bare integer for `promoted` is
+    // still accepted for forward-compatibility, with the rest zeroed.
     match v {
         Value::Array(items) => PromoterTick {
             promoted: items.first().map(value_as_u64).unwrap_or(0),
@@ -303,6 +313,65 @@ pub(crate) fn value_as_tick(v: &Value) -> PromoterTick {
             oldest_pending_lag_ms: 0,
         },
     }
+}
+
+/// Pull the promoted-member byte strings (slot 4 of the script's reply) out
+/// of the EVAL/EVALSHA result, for the side-index cleanup pass. Returns an
+/// empty vec for the legacy bare-integer reply shape, for missing slot 4
+/// (e.g. an older deployment of this script), or for any non-bytes element
+/// — leaking a few `:didx:<id>` keys to TTL is preferable to crashing the
+/// promoter on an unexpected reply shape.
+pub(crate) fn value_as_promoted_members(v: &Value) -> Vec<Bytes> {
+    let items = match v {
+        Value::Array(items) => items,
+        _ => return Vec::new(),
+    };
+    let raw = match items.get(3) {
+        Some(Value::Array(raw)) => raw,
+        _ => return Vec::new(),
+    };
+    let mut out = Vec::with_capacity(raw.len());
+    for item in raw {
+        match item {
+            Value::Bytes(b) => out.push(b.clone()),
+            Value::String(s) => out.push(Bytes::copy_from_slice(s.as_bytes())),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Decode a `JobId` from a msgpack-encoded `Job<T>` payload without
+/// allocating for the (ignored) `payload` field. Returns `None` if the
+/// bytes don't decode — a stale or malformed entry will simply skip the
+/// side-index cleanup and let the key TTL out on its own.
+fn extract_job_id(bytes: &[u8]) -> Option<String> {
+    let job: Job<IgnoredAny> = rmp_serde::from_slice(bytes).ok()?;
+    Some(job.id)
+}
+
+/// Pipeline `DEL :didx:<id>` for each promoted member, batched into one
+/// round trip. The dedup marker `:dlid:<id>` is **deliberately not deleted**
+/// here: its remaining TTL is the post-promote idempotence guard for slice
+/// 6 (a delayed producer-retry of `add_in_with_id` that lands after
+/// promotion must hit the marker and become a no-op rather than schedule
+/// a second copy). The side-index, by contrast, is only useful to a future
+/// `cancel_delayed` and is dead weight after promotion.
+async fn cleanup_promoted_indices(client: &Client, queue_name: &str, members: &[Bytes]) {
+    if members.is_empty() {
+        return;
+    }
+    let mut keys: Vec<Value> = Vec::with_capacity(members.len());
+    for m in members {
+        if let Some(id) = extract_job_id(m) {
+            keys.push(Value::from(delayed_index_key(queue_name, &id)));
+        }
+    }
+    if keys.is_empty() {
+        return;
+    }
+    let cmd = CustomCommand::new_static("DEL", ClusterHash::FirstKey, false);
+    let _: std::result::Result<Value, _> = client.custom(cmd, keys).await;
 }
 
 fn value_as_u64(v: &Value) -> u64 {
@@ -341,7 +410,7 @@ async fn run_promote_eval(
     delayed_key: &str,
     stream_key: &str,
     cfg: &PromoterConfig,
-) -> std::result::Result<PromoterTick, fred::error::Error> {
+) -> std::result::Result<(PromoterTick, Vec<Bytes>), fred::error::Error> {
     let cmd = CustomCommand::new_static("EVAL", ClusterHash::FirstKey, false);
     let args = eval_promote_args(
         PROMOTE_SCRIPT,
@@ -351,7 +420,7 @@ async fn run_promote_eval(
         cfg.max_stream_len,
     );
     let res: Value = client.custom(cmd, args).await?;
-    Ok(value_as_tick(&res))
+    Ok((value_as_tick(&res), value_as_promoted_members(&res)))
 }
 
 async fn sleep_or_shutdown(d: Duration, shutdown: &CancellationToken) -> bool {
@@ -444,5 +513,68 @@ mod tests {
         assert_eq!(t.promoted, 5);
         assert_eq!(t.depth, 0);
         assert_eq!(t.oldest_pending_lag_ms, 99);
+    }
+
+    #[test]
+    fn value_as_promoted_members_extracts_slot_4_bytes() {
+        let v = Value::Array(vec![
+            Value::Integer(2),
+            Value::Integer(0),
+            Value::Integer(0),
+            Value::Array(vec![
+                Value::Bytes(Bytes::from_static(b"member-a")),
+                Value::Bytes(Bytes::from_static(b"member-b")),
+            ]),
+        ]);
+        let m = value_as_promoted_members(&v);
+        assert_eq!(
+            m,
+            vec![
+                Bytes::from_static(b"member-a"),
+                Bytes::from_static(b"member-b")
+            ]
+        );
+    }
+
+    #[test]
+    fn value_as_promoted_members_missing_slot_returns_empty() {
+        // 3-element legacy reply (no slot 4) → empty vec, not a panic.
+        let v = Value::Array(vec![
+            Value::Integer(0),
+            Value::Integer(0),
+            Value::Integer(0),
+        ]);
+        assert!(value_as_promoted_members(&v).is_empty());
+    }
+
+    #[test]
+    fn value_as_promoted_members_legacy_integer_returns_empty() {
+        assert!(value_as_promoted_members(&Value::Integer(5)).is_empty());
+    }
+
+    #[test]
+    fn value_as_promoted_members_accepts_string_items() {
+        // Some Redis client/transport combos surface RESP bulk strings as
+        // `Value::String` rather than `Value::Bytes`. Both must work.
+        let v = Value::Array(vec![
+            Value::Integer(1),
+            Value::Integer(0),
+            Value::Integer(0),
+            Value::Array(vec![Value::String("payload".into())]),
+        ]);
+        let m = value_as_promoted_members(&v);
+        assert_eq!(m, vec![Bytes::from_static(b"payload")]);
+    }
+
+    #[test]
+    fn extract_job_id_round_trips_through_msgpack() {
+        let job = crate::job::Job::with_id("my-id".to_string(), 42_u32);
+        let bytes = rmp_serde::to_vec(&job).expect("encode");
+        assert_eq!(extract_job_id(&bytes).as_deref(), Some("my-id"));
+    }
+
+    #[test]
+    fn extract_job_id_returns_none_for_garbage() {
+        assert!(extract_job_id(b"not msgpack").is_none());
     }
 }

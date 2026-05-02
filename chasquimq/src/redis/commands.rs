@@ -2,9 +2,11 @@ use crate::redis::keys::PAYLOAD_FIELD;
 use bytes::Bytes;
 use fred::types::Value;
 
-/// Returns `{promoted, depth, oldest_pending_lag_ms}` so the caller can emit
-/// observability signals without paying for an extra `ZCARD` / `ZRANGE`
-/// round trip.
+/// Returns `{promoted, depth, oldest_pending_lag_ms, promoted_members}` so
+/// the caller can emit observability signals without paying for an extra
+/// `ZCARD` / `ZRANGE` round trip, and so the caller can clean up per-job
+/// side-index keys (`didx:<job_id>`) for the entries that just moved to
+/// the stream.
 ///
 /// - `promoted` — number of entries moved from the delayed ZSET to the stream.
 /// - `depth` — `ZCARD` after promotion.
@@ -13,6 +15,12 @@ use fred::types::Value;
 ///   ZSET is empty or the oldest remaining entry is still future-dated.
 ///   In a healthy steady state this is `0` most ticks — it becomes positive
 ///   only when a real backlog forms.
+/// - `promoted_members` — array of raw msgpack-encoded `Job<T>` byte strings
+///   that were promoted this tick. The caller decodes the `JobId` from each
+///   and pipelines `DEL didx:<id>` to clean up the side-index written at
+///   schedule time. The dedup marker (`dlid:<id>`) is **deliberately not
+///   touched here** — its remaining TTL covers the post-promote window in
+///   which a delayed producer-retry could otherwise duplicate-schedule.
 pub(crate) const PROMOTE_SCRIPT: &str = r#"
 local time = redis.call('TIME')
 local now_ms = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
@@ -30,7 +38,7 @@ if depth > 0 then
     if diff > 0 then lag_ms = diff end
   end
 end
-return {#due, depth, lag_ms}
+return {#due, depth, lag_ms, due}
 "#;
 
 /// Atomically acknowledge-and-delete a stream entry from the consumer group's

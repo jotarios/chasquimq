@@ -539,3 +539,82 @@ async fn cancel_vs_promote_race_is_exclusive() {
     let _ = tokio::time::timeout(Duration::from_secs(5), h_consumer).await;
     let _: () = admin.quit().await.unwrap();
 }
+
+/// Regression: when slice 7 added the per-job side-index `:didx:<job_id>`
+/// (so `cancel_delayed` can `ZREM` precisely without scanning), it forgot
+/// to teach the promoter to clean those entries up after promoting a job
+/// to the stream. The marker key (`:dlid:<id>`) MUST stay alive on its
+/// remaining TTL — it's the post-promote idempotence guard for slice 6 —
+/// but the side-index is dead weight after promotion and would otherwise
+/// accumulate for `delay_secs + DEDUP_MARKER_GRACE_SECS` before TTL'ing.
+///
+/// This test schedules N short-delay jobs with explicit ids, drains them
+/// through the consumer, then asserts SCAN of `:didx:*` on the slot is
+/// empty while the marker keys are still present.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires REDIS_URL"]
+async fn promoter_cleans_up_side_index_after_promotion() {
+    let admin = admin().await;
+    let queue = "delayed_cancel_e6";
+    flush_all(&admin, queue).await;
+
+    let producer: Producer<Sample> = Producer::connect(&redis_url(), producer_cfg(queue))
+        .await
+        .expect("connect producer");
+
+    // Schedule 5 jobs with explicit ids, all firing in ~150ms.
+    let n_jobs = 5_usize;
+    let items: Vec<(String, Sample)> = (0..n_jobs)
+        .map(|i| (format!("leak-check-{i}"), Sample { n: i as u32 }))
+        .collect();
+    let ids: Vec<String> = items.iter().map(|(id, _)| id.clone()).collect();
+    producer
+        .add_in_bulk_with_ids(Duration::from_millis(150), items)
+        .await
+        .expect("bulk schedule");
+
+    // Side-indices and markers must all be present pre-promote.
+    for id in &ids {
+        assert!(
+            exists(&admin, &delayed_index_key(queue, id)).await,
+            "side-index for {id} should exist before promotion"
+        );
+        assert!(
+            exists(&admin, &dedup_marker_key(queue, id)).await,
+            "marker for {id} should exist before promotion"
+        );
+    }
+
+    // Spin up the consumer (which embeds the promoter) and wait for all
+    // jobs to be processed.
+    let counter = Arc::new(AtomicUsize::new(0));
+    let shutdown = CancellationToken::new();
+    let handle = spawn_consumer(queue, "c1", true, counter.clone(), shutdown.clone());
+    wait_until(Duration::from_secs(5), || {
+        let counter = counter.clone();
+        async move { counter.load(Ordering::SeqCst) == n_jobs }
+    })
+    .await;
+    // Give the promoter one extra tick to run the cleanup pipeline.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // All side-index keys MUST be gone (this is the regression check).
+    for id in &ids {
+        assert!(
+            !exists(&admin, &delayed_index_key(queue, id)).await,
+            "side-index for {id} must be DEL'd by promoter after promotion (regression fix)"
+        );
+    }
+    // Marker keys MUST still be alive — their TTL is the post-promote
+    // idempotence guard for slice 6.
+    for id in &ids {
+        assert!(
+            exists(&admin, &dedup_marker_key(queue, id)).await,
+            "marker for {id} must survive promotion (slice 6 idempotence)"
+        );
+    }
+
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+    let _: () = admin.quit().await.unwrap();
+}
