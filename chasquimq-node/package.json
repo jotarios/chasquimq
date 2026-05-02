@@ -1,0 +1,69 @@
+{
+  "name": "chasquimq",
+  "version": "0.1.0",
+  "description": "The fastest open-source message broker for Redis. Drop-in replacement for BullMQ.",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "browser": "browser.js",
+  "license": "MIT",
+  "author": "Jorge Rios <j29.rios@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jotarios/chasquimq.git",
+    "directory": "chasquimq-node"
+  },
+  "bugs": {
+    "url": "https://github.com/jotarios/chasquimq/issues"
+  },
+  "homepage": "https://github.com/jotarios/chasquimq#readme",
+  "keywords": [
+    "redis",
+    "queue",
+    "job-queue",
+    "bullmq",
+    "messagepack",
+    "napi-rs",
+    "streams"
+  ],
+  "engines": {
+    "node": ">= 18"
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "browser.js",
+    "dist/",
+    "README.md"
+  ],
+  "napi": {
+    "binaryName": "chasquimq",
+    "targets": [
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin",
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-pc-windows-msvc"
+    ]
+  },
+  "scripts": {
+    "artifacts": "napi artifacts",
+    "build": "napi build --platform --release --js index.js --dts index.d.ts",
+    "build:debug": "napi build --platform --js index.js --dts index.d.ts",
+    "prepublishOnly": "napi prepublish -t npm",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "version": "napi version",
+    "format": "prettier --write \"**/*.{ts,tsx,js,json,md}\"",
+    "lint": "prettier --check \"**/*.{ts,tsx,js,json,md}\" && tsc --noEmit"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3",
+    "@types/node": "^20",
+    "prettier": "^3",
+    "typescript": "^5",
+    "vitest": "^2"
+  },
+  "dependencies": {
+    "@msgpack/msgpack": "^3"
+  }
+}

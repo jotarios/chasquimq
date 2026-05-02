@@ -1,0 +1,16 @@
+{
+  "name": "chasquimq-darwin-arm64",
+  "version": "0.1.0",
+  "os": ["darwin"],
+  "cpu": ["arm64"],
+  "main": "chasquimq.darwin-arm64.node",
+  "files": ["chasquimq.darwin-arm64.node"],
+  "license": "MIT",
+  "engines": {
+    "node": ">= 18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jotarios/chasquimq.git"
+  }
+}
