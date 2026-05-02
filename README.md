@@ -6,11 +6,11 @@ ChasquiMQ is a Rust-native job queue / message broker built on **Redis**, Messag
 
 Named after the *chasquis* — the relay runners of the Inca road system who carried messages across the Andes.
 
-> **Status:** Phase 2 in progress. Phase 1 (MVP) shipped: producer, consumer pool, batched acks, DLQ, graceful shutdown. Phase 2 slice 1 lands delayed jobs (`add_in` / `add_at` / `add_in_bulk`) backed by Redis Sorted Sets and a leader-elected promoter. Public API is still pre-1.0 and will change.
+> **Status:** Phase 2 nearly complete. Phase 1 (MVP) shipped: producer, consumer pool, batched acks, DLQ, graceful shutdown. Phase 2 has landed delayed jobs (`add_in` / `add_at` / `add_in_bulk` backed by Redis Sorted Sets + a leader-elected promoter), exponential-backoff retries via delayed-ZSET re-scheduling, DLQ inspect/replay tooling, and full observability covering both the promoter and the consumer hot path (`MetricsSink` trait with `ReaderBatch` / `JobOutcome` / `RetryScheduled` / `DlqRouted` events; per-handler latency in microseconds; `chasquimq-metrics` adapter for Prometheus/OTel/StatsD with a `QueueLabeled<S>` wrapper for per-queue labels). Public API is still pre-1.0 and will change.
 
 ## Headline numbers
 
-On Apple M3, Redis 8.6 (loopback): **3.18× BullMQ** on bulk produce, **8.71× BullMQ** on concurrent consume. Phase 2 also lands delayed jobs at 705k/s end-to-end and an exponential-backoff retry path at 113k/s.
+On Apple M3, Redis 8.6 (loopback): **3.23× BullMQ** on bulk produce, **8.64× BullMQ** on concurrent consume. Phase 2 also lands delayed jobs at ~750k/s end-to-end and an exponential-backoff retry path at ~119k/s.
 
 Full numbers, methodology, caveats, and reproduction commands live in [`benchmarks/README.md`](benchmarks/).
 
@@ -127,12 +127,27 @@ DLQ growth is capped via `ConsumerConfig::dlq_max_stream_len` (default 100,000).
 
 ### Observability
 
-The promoter emits structured events through the `chasquimq::MetricsSink` trait. On every tick it reports `PromoterTick { promoted, depth, oldest_pending_lag_ms }`; on leader-lock transitions it reports `LockOutcome::{Acquired, Held}` (transition-only, not per-poll). Plug your own implementation in via `PromoterConfig::metrics` (or `ConsumerConfig::metrics` for the embedded promoter) — the default is a zero-cost no-op sink, and `chasquimq::metrics::testing::InMemorySink` is provided for tests. Depth and lag are computed inside the same Lua promote script, so observability adds no extra Redis round trips.
+Every load-bearing engine subsystem emits structured events through the single `chasquimq::MetricsSink` trait:
+
+| Event | Source | Carries |
+| :--- | :--- | :--- |
+| `PromoterTick` | promoter (per tick) | `promoted`, `depth`, `oldest_pending_lag_ms` |
+| `LockOutcome` | promoter (transition-only) | `Acquired` / `Held` |
+| `ReaderBatch` | consumer reader (per non-empty `XREADGROUP`) | `size`, `reclaimed` (CLAIM-recovery count) |
+| `JobOutcome` | worker (per handler invocation) | `kind: Ok\|Err\|Panic`, 1-indexed `attempt`, `handler_duration_us` |
+| `RetryScheduled` | retry relocator (only when the script gate fires) | 1-indexed `attempt`, `backoff_ms` |
+| `DlqRouted` | DLQ relocator (after the relocate succeeds) | `reason: DlqReason`, `attempt` |
+
+Operator identity: `chasquimq_jobs_completed_total + chasquimq_jobs_failed_total` = handler invocations. Reader-side DLQ paths (malformed entry / oversize payload / decode failure / retries-exhausted-on-arrival) emit `DlqRouted` only — the handler never ran, so they carry `attempt: 0`. Total inbound jobs = handler invocations + reader-DLQ.
+
+Plug your own sink in via `PromoterConfig::metrics` or `ConsumerConfig::metrics` — the default is a zero-cost no-op sink, and `chasquimq::metrics::testing::InMemorySink` is provided for integration tests with derived rollup accessors (`jobs_completed()`, `dlq_count(reason)`, `total_retries()`, `last_handler_duration_us()`, etc.). Promoter depth and lag are computed inside the same Lua promote script, so the new observability adds no extra Redis round trips. The per-job hot path adds one `Instant::now()` pair plus one virtual call into a no-op via `catch_unwind` when `NoopSink` is wired (no measurable bench regression).
 
 The engine itself has zero observability dependencies — the trait and a no-op default are all `chasquimq` ships. Two opt-in paths, both in the separate [`chasquimq-metrics`](chasquimq-metrics/) workspace crate (so end users only pull `metrics`-related deps if they actually want them):
 
-- **`metrics-rs` facade route (recommended):** `chasquimq_metrics::MetricsFacadeSink` bridges into the [`metrics`](https://docs.rs/metrics) facade. Install your `metrics_exporter_*` recorder of choice and wire `Arc::new(MetricsFacadeSink::new())` into `PromoterConfig::metrics`. One small dep (`metrics`). Working end-to-end example with `metrics-exporter-prometheus`: [`chasquimq-metrics/examples/facade_sink.rs`](chasquimq-metrics/examples/facade_sink.rs) — `cargo run --example facade_sink -p chasquimq-metrics`.
+- **`metrics-rs` facade route (recommended):** `chasquimq_metrics::MetricsFacadeSink` bridges into the [`metrics`](https://docs.rs/metrics) facade. Wrap with `chasquimq_metrics::QueueLabeled::new(MetricsFacadeSink::new(), "<queue-name>")` to add a `queue` label to every emitted metric (composes — stack additional wrappers for `tenant`, `region`, …). Install your `metrics_exporter_*` recorder of choice and wire the result into `PromoterConfig::metrics` / `ConsumerConfig::metrics`. One small dep (`metrics`). Working end-to-end example with `metrics-exporter-prometheus`: [`chasquimq-metrics/examples/facade_sink.rs`](chasquimq-metrics/examples/facade_sink.rs) — `cargo run --example facade_sink -p chasquimq-metrics`.
 - **Direct Prometheus route:** [`chasquimq-metrics/examples/prometheus_sink.rs`](chasquimq-metrics/examples/prometheus_sink.rs) shows a hand-rolled `prometheus`-crate sink + `tiny_http` `/metrics` endpoint, for users who don't want the `metrics-rs` facade in the picture. Run with `cargo run --example prometheus_sink -p chasquimq-metrics`.
+
+Adapter metric names follow Prometheus base-unit convention: durations are exposed as `chasquimq_handler_duration_seconds` and `chasquimq_retry_backoff_seconds` (engine events keep micros/ms internally; the adapter divides at the boundary). Histogram bucket configuration is recorder-side — tune via your Prometheus / OTel exporter, not in the adapter.
 
 ### Operational notes
 
@@ -184,7 +199,7 @@ spike/             exploratory throwaway code (not part of the engine)
 ## Roadmap
 
 - **Phase 1:** Producer, consumer pool, batched pipelined acks, DLQ, graceful shutdown. ✅
-- **Phase 2 (in progress):** Delayed jobs via sorted sets + Lua promoter ✅. Exponential retry backoff via delayed-ZSET re-scheduling ✅. DLQ replay + bounded growth ✅. Promoter observability hooks (`MetricsSink` trait + `chasquimq-metrics` adapter + Prometheus example) ✅.
+- **Phase 2 (nearly complete):** Delayed jobs via sorted sets + Lua promoter ✅. Exponential retry backoff via delayed-ZSET re-scheduling ✅. DLQ replay + bounded growth ✅. Promoter observability hooks (`MetricsSink` trait + `chasquimq-metrics` adapter + Prometheus example) ✅. Consumer / retry / DLQ observability hooks (`ReaderBatch`, `JobOutcome`, `RetryScheduled`, `DlqRouted` events; per-handler microsecond latency; `QueueLabeled<S>` adapter wrapper for per-queue labels) ✅.
 - **Phase 3:** Node.js bindings via NAPI-RS — JS handlers driven by the Rust engine.
 - **Phase 4:** Python bindings via PyO3, CLI monitoring dashboard.
 

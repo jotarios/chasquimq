@@ -84,11 +84,29 @@ Deferred work tracked outside of phase plans. Each entry: what, why, pros, cons,
 - **Context:** Outside-voice review proposed this as a methodological correction. Phase 1 deliberately said no because it would break the bullmq-bench comparison the project exists to make.
 - **Depends on / blocked by:** Phase 1 must complete first and produce a defensible apples-to-apples comparison. Then this becomes a Phase 2+ "fairness layer" addition.
 
-### Consumer- and retry-side observability hooks
+### Reclaimed-from-CLAIM integration test
 
-- **What:** Extend `MetricsSink` with consumer-loop hooks: `jobs_claimed_total`, `jobs_acked_total`, `jobs_dlqd_total`, `retry_rescheduled_total`, and tick-style events for ack-flusher latency / batch sizes.
-- **Why:** The Phase 2 slice 4 observability surface only covers the promoter. Operators care more about end-to-end job throughput than scheduling lag — currently they have to derive it from `XLEN` polls.
-- **Pros:** Closes the rest of the observability lake. Users get a single trait that covers every load-bearing engine subsystem. ~120 LOC of trait additions + threading + tests.
-- **Cons:** Each new event added to the trait is technically a breaking change for users who implemented `MetricsSink` themselves (default-method bodies cushion this, but the trait surface grows). Need to decide whether each event family lives under a separate trait or stays on `MetricsSink`.
-- **Context:** Surfaced in the `feat/observability` plan-eng-review on 2026-05-01. Promoter hooks shipped; consumer/retry/DLQ hooks deferred.
+- **What:** Add an integration test that exercises `ReaderBatch.reclaimed > 0` — i.e., a job whose worker crashed mid-handler is picked up via the `XREADGROUP ... CLAIM <idle>` safety net on a subsequent read.
+- **Why:** Slice 5 added `reclaimed` to `ReaderBatch` and the existing tests cover `reclaimed == 0` cases. The path is exercised at runtime under the existing `claim_min_idle_ms` machinery, but a regression in delivery_count parsing or the `> 1` filter would go unnoticed in CI.
+- **Pros:** Closes a real coverage gap on a code path operators rely on for crash recovery.
+- **Cons:** Test infra is non-trivial — needs either a worker-crash harness (kill a worker mid-handler then restart, with the same consumer_id) or manual `XCLAIM` from an admin client to bump delivery_count out-of-band. Either way ~50 LOC of harness for a single test.
+- **Context:** Deferred from slice 5 (per the original plan); flagged as worth doing once someone hits a CLAIM-path bug.
+- **Depends on / blocked by:** None.
+
+### Race-lost `RetryScheduled` test (script returns 0)
+
+- **What:** Integration test that races two retry relocators (or a retry relocator against a manual XACKDEL) so `RETRY_RESCHEDULE_SCRIPT` returns 0 on one path; assert `RetryScheduled` does NOT fire.
+- **Why:** Slice 5's `script_returned_one()` parser is unit-tested with synthetic `Value` shapes, but the end-to-end gate (script returns 0 → no metric) is reasoned about, not tested at the integration boundary.
+- **Pros:** Locks in the over-counting prevention.
+- **Cons:** Inherently timing-dependent and brittle. Hard to make deterministic without artificial sleeps.
+- **Context:** Deferred from slice 5; defer until we see a real over-count incident.
+- **Depends on / blocked by:** None.
+
+### DLQ relocator double-write under retry
+
+- **What:** Make `consumer/dlq.rs::relocate_with_retry` idempotent under retry by switching the XADD into the DLQ stream to `XADD ... IDMP <producer_id> <entry_id> ...` (Redis 8.6).
+- **Why:** Today, if XADD into the DLQ stream succeeds but the followup XACKDEL fails (network blip), the next iteration re-runs both — landing a second copy of the entry in the DLQ stream. The DLQ counter only fires once, so the duplicate is invisible to operators. The retry relocator is already protected by the `RETRY_RESCHEDULE_SCRIPT` Lua gate; this is the equivalent for the DLQ path.
+- **Pros:** Closes a latent correctness gap without changing the public API.
+- **Cons:** `<producer_id>` for the DLQ-write needs to be stable across retries of the same logical relocate (use the relocator's process-lifetime `producer_id` from `DlqRelocatorConfig` + the source entry_id as the dedup key).
+- **Context:** Surfaced by the slice 5 daster-bug review pass on 2026-05-02. Pre-existing — not introduced by slice 5, but newly visible because the metric makes DLQ pressure observable.
 - **Depends on / blocked by:** None.
