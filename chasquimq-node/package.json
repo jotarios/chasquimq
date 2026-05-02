@@ -1,7 +1,7 @@
 {
   "name": "chasquimq",
   "version": "0.1.0",
-  "description": "The fastest open-source message broker for Redis. Drop-in replacement for BullMQ.",
+  "description": "The fastest open-source message broker for Redis.",
   "main": "index.js",
   "types": "index.d.ts",
   "browser": "browser.js",
@@ -20,7 +20,7 @@
     "redis",
     "queue",
     "job-queue",
-    "bullmq",
+    "message-broker",
     "messagepack",
     "napi-rs",
     "streams"
