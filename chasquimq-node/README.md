@@ -1,8 +1,8 @@
 # chasquimq (Node.js)
 
-Node.js bindings for [ChasquiMQ](https://github.com/jotarios/chasquimq) — the fastest open-source message broker for Redis. The Rust engine pulls jobs; JavaScript handlers process them. Designed as a drop-in replacement for BullMQ, with a faster engine underneath.
+Node.js bindings for [ChasquiMQ](https://github.com/jotarios/chasquimq) — the fastest open-source message broker for Redis. The Rust engine pulls jobs; JavaScript handlers process them.
 
-> **Status:** Phase 3 scaffolding. Native bindings, BullMQ-compat shim, and tests are forthcoming. Today this package builds, exposes `engineVersion()`, and nothing else.
+> **Status:** Phase 3 scaffolding. Native bindings, the high-level shim, and tests are forthcoming. Today this package builds, exposes `engineVersion()`, and nothing else.
 
 ## Install
 
@@ -19,7 +19,7 @@ The install pulls a prebuilt native binary for your platform from the matching `
 ## Two API layers
 
 ```ts
-// High-level BullMQ-compat shim (TypeScript)
+// High-level Queue/Worker shim (TypeScript)
 import { Queue, Worker } from "chasquimq";
 
 // Direct NAPI bindings to the Rust engine
