@@ -14,9 +14,9 @@ To build a high-performance, background job queue utilizing Redis as the underly
 Unlike legacy Redis queues, ChasquiMQ will strictly avoid blocking Lua scripts and human-readable JSON payloads.
 
 * **The Engine:** Rust (using the `tokio` asynchronous runtime).
-* **The Datastore:** Redis 5.0+ (Mandatory, for native Streams support).
-* **The Queue Primitive:** Redis Streams (`XADD`, `XREADGROUP`, `XACK`).
-* **The Delayed Primitive:** Redis Sorted Sets (`ZADD`, `ZRANGEBYSCORE`).
+* **The Datastore:** Redis 8.6+ (mandatory, to use modern Streams features: `IDMP`/`IDMPAUTO` for idempotent `XADD`, `XACKDEL` for atomic ack-and-delete, and `XREADGROUP ... CLAIM` for idle-pending reads in a single round trip). The original draft of this PRD said 5.0+ for "native Streams support"; the engine has since been built on the 8.x feature set and there is no fallback path for older Redis.
+* **The Queue Primitive:** Redis Streams (`XADD`, `XREADGROUP`, `XACKDEL`).
+* **The Delayed Primitive:** Redis Sorted Sets (`ZADD`, `ZRANGEBYSCORE`), promoted by a leader-elected Lua script.
 * **The Serialization:** MessagePack (via `rmp-serde` for zero-overhead parsing).
 * **The Network Strategy:** Aggressive connection multiplexing and pipelined acknowledgments.
 
@@ -24,9 +24,9 @@ Unlike legacy Redis queues, ChasquiMQ will strictly avoid blocking Lua scripts a
 
 | Phase | Focus Area | Key Deliverables | Out of Scope |
 | :--- | :--- | :--- | :--- |
-| **Phase 1 (MVP)** | **The Core Engine** | Pure Rust implementation. Push/Pull/Ack loop. MessagePack serialization. Basic error handling. | Delayed jobs, retries, multi-language SDKs. |
-| **Phase 2** | **Scheduling & State** | Delayed jobs (via Sorted Sets), automatic retries with exponential backoff, dead-letter queue (DLQ). | Multi-language SDKs, complex parent/child job flows. |
-| **Phase 3** | **The Node Killer** | Node.js native bindings via NAPI-RS. Allowing JavaScript workers to process jobs pulled by the Rust engine. | Python/Go bindings. |
+| **Phase 1 (MVP)** ✅ | **The Core Engine** | Pure Rust implementation. Push/Pull/Ack loop. MessagePack serialization. Basic error handling. | Delayed jobs, retries, multi-language SDKs. |
+| **Phase 2** ✅ | **Scheduling & State** | Delayed jobs (via Sorted Sets) + leader-elected Lua promoter. Exponential retry backoff via delayed-ZSET re-scheduling. Dead-letter queue (DLQ) with inspect/replay tooling and bounded growth. First-class observability hooks (`MetricsSink` trait + `chasquimq-metrics` Prometheus/OTel/StatsD adapter). Idempotent delayed scheduling (`add_in_with_id` etc.). Cancellation (`cancel_delayed`). GitHub Actions CI. | Multi-language SDKs, complex parent/child job flows. |
+| **Phase 3** | **The Node Killer** | Node.js native bindings via NAPI-RS. Allowing JavaScript workers to process jobs pulled by the Rust engine. Design doc: [`docs/phase3-napi-design.md`](../docs/phase3-napi-design.md). | Python/Go bindings. |
 | **Phase 4** | **Ecosystem Expansion** | Python bindings via PyO3. CLI dashboard for monitoring queue health. | Complex UI dashboards. |
 
 ## 5. Phase 1 (MVP) Strict Requirements
