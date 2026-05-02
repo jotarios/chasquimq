@@ -24,3 +24,15 @@ pub fn promoter_lock_key(queue_name: &str) -> String {
 pub fn dedup_marker_key(queue_name: &str, job_id: &str) -> String {
     format!("{{chasqui:{queue_name}}}:dlid:{job_id}")
 }
+
+/// Per-queue, per-job-id side-index key used by `Producer::cancel_delayed`.
+/// Stores the exact encoded ZSET member so cancel can `ZREM` precisely
+/// without a slow `ZRANGE` scan. Written by the idempotent schedule path
+/// alongside the dedup marker, with the same TTL — after natural expiration
+/// (or post-cancel `DEL`) the key disappears on its own; the promoter never
+/// has to clean it up because the cancel script is already correct in the
+/// "GET hits, ZREM misses (already promoted)" race. Same `{chasqui:<queue>}`
+/// hash tag so it co-locates on the same Cluster slot as the ZSET.
+pub fn delayed_index_key(queue_name: &str, job_id: &str) -> String {
+    format!("{{chasqui:{queue_name}}}:didx:{job_id}")
+}

@@ -2,9 +2,11 @@ use crate::redis::keys::PAYLOAD_FIELD;
 use bytes::Bytes;
 use fred::types::Value;
 
-/// Returns `{promoted, depth, oldest_pending_lag_ms}` so the caller can emit
-/// observability signals without paying for an extra `ZCARD` / `ZRANGE`
-/// round trip.
+/// Returns `{promoted, depth, oldest_pending_lag_ms, promoted_members}` so
+/// the caller can emit observability signals without paying for an extra
+/// `ZCARD` / `ZRANGE` round trip, and so the caller can clean up per-job
+/// side-index keys (`didx:<job_id>`) for the entries that just moved to
+/// the stream.
 ///
 /// - `promoted` — number of entries moved from the delayed ZSET to the stream.
 /// - `depth` — `ZCARD` after promotion.
@@ -13,6 +15,12 @@ use fred::types::Value;
 ///   ZSET is empty or the oldest remaining entry is still future-dated.
 ///   In a healthy steady state this is `0` most ticks — it becomes positive
 ///   only when a real backlog forms.
+/// - `promoted_members` — array of raw msgpack-encoded `Job<T>` byte strings
+///   that were promoted this tick. The caller decodes the `JobId` from each
+///   and pipelines `DEL didx:<id>` to clean up the side-index written at
+///   schedule time. The dedup marker (`dlid:<id>`) is **deliberately not
+///   touched here** — its remaining TTL covers the post-promote window in
+///   which a delayed producer-retry could otherwise duplicate-schedule.
 pub(crate) const PROMOTE_SCRIPT: &str = r#"
 local time = redis.call('TIME')
 local now_ms = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
@@ -30,7 +38,7 @@ if depth > 0 then
     if diff > 0 then lag_ms = diff end
   end
 end
-return {#due, depth, lag_ms}
+return {#due, depth, lag_ms, due}
 "#;
 
 /// Atomically acknowledge-and-delete a stream entry from the consumer group's
@@ -112,11 +120,20 @@ return 0
 /// cannot race a successful promotion. The grace constant is owned by the
 /// caller (see `Producer::DEDUP_MARKER_GRACE_SECS`).
 ///
+/// On a fresh reservation we also write the side-index key
+/// `{chasqui:<queue>}:didx:<job_id>` whose value is the exact encoded ZSET
+/// member. `Producer::cancel_delayed` uses this to `ZREM` precisely without
+/// scanning. The side-index TTL matches the dedup marker — after a successful
+/// promotion the key just expires naturally; the promoter never touches it
+/// because the cancel script handles the "already promoted" race correctly
+/// (GET hits, ZREM returns 0 → cancel returns 0).
+///
 /// KEYS[1] = dedup marker key (`{chasqui:<queue>}:dlid:<job_id>`)
 /// KEYS[2] = delayed ZSET key (`{chasqui:<queue>}:delayed`)
-/// ARGV[1] = marker TTL in seconds
+/// KEYS[3] = side-index key (`{chasqui:<queue>}:didx:<job_id>`)
+/// ARGV[1] = marker / index TTL in seconds
 /// ARGV[2] = run_at_ms (ZADD score)
-/// ARGV[3] = encoded payload bytes
+/// ARGV[3] = encoded payload bytes (ZSET member + side-index value)
 ///
 /// Returns 1 if newly scheduled, 0 if a duplicate was suppressed.
 pub(crate) const SCHEDULE_DELAYED_IDEMPOTENT_SCRIPT: &str = r#"
@@ -125,6 +142,46 @@ if set_res == false then
   return 0
 end
 redis.call('ZADD', KEYS[2], tonumber(ARGV[2]), ARGV[3])
+redis.call('SET', KEYS[3], ARGV[3], 'EX', tonumber(ARGV[1]))
+return 1
+"#;
+
+/// Cancel a delayed job by `JobId`. Looks up the exact encoded ZSET member
+/// via the side-index, `ZREM`s it from the delayed ZSET, and clears the
+/// dedup marker so the same id can be rescheduled later.
+///
+/// Cancel-vs-promote race: both paths execute as Lua on a single shard
+/// (everything shares the `{chasqui:<queue>}` hash tag), so they serialize
+/// at Redis. The three observable outcomes are:
+/// - cancel runs first → ZREM returns 1 → promoter's later ZRANGEBYSCORE
+///   doesn't see it → job never delivered, cancel returns true.
+/// - promoter runs first → side-index still resolves (TTL outlives promote),
+///   ZREM returns 0 (already gone) → cancel returns false, job delivered.
+/// - side-index already expired or never existed → GET returns nil →
+///   cancel returns false. (Not strictly distinguishable from "promoted long
+///   ago" — the bool return value collapses both into "not cancelled".)
+///
+/// On the ZREM-miss path we deliberately do NOT delete the dedup marker:
+/// leaving it in place preserves the post-promote idempotence guarantee a
+/// late producer retry depends on. The stale side-index will TTL out on its
+/// own.
+///
+/// KEYS[1] = delayed ZSET key (`{chasqui:<queue>}:delayed`)
+/// KEYS[2] = side-index key   (`{chasqui:<queue>}:didx:<job_id>`)
+/// KEYS[3] = dedup marker key (`{chasqui:<queue>}:dlid:<job_id>`)
+///
+/// Returns 1 if the entry was removed from the ZSET, 0 otherwise.
+pub(crate) const CANCEL_DELAYED_SCRIPT: &str = r#"
+local member = redis.call('GET', KEYS[2])
+if not member then
+  return 0
+end
+local removed = redis.call('ZREM', KEYS[1], member)
+if removed == 0 then
+  return 0
+end
+redis.call('DEL', KEYS[2])
+redis.call('DEL', KEYS[3])
 return 1
 "#;
 
@@ -397,15 +454,17 @@ pub(crate) fn evalsha_schedule_delayed_idempotent_args(
     sha: &str,
     marker_key: &str,
     delayed_key: &str,
+    index_key: &str,
     marker_ttl_secs: u64,
     run_at_ms: i64,
     bytes: Bytes,
 ) -> Vec<Value> {
     vec![
         Value::from(sha),
-        Value::from(2_i64),
+        Value::from(3_i64),
         Value::from(marker_key),
         Value::from(delayed_key),
+        Value::from(index_key),
         Value::from(marker_ttl_secs as i64),
         Value::from(run_at_ms),
         Value::Bytes(bytes),
@@ -416,18 +475,50 @@ pub(crate) fn eval_schedule_delayed_idempotent_args(
     script: &str,
     marker_key: &str,
     delayed_key: &str,
+    index_key: &str,
     marker_ttl_secs: u64,
     run_at_ms: i64,
     bytes: Bytes,
 ) -> Vec<Value> {
     vec![
         Value::from(script),
-        Value::from(2_i64),
+        Value::from(3_i64),
         Value::from(marker_key),
         Value::from(delayed_key),
+        Value::from(index_key),
         Value::from(marker_ttl_secs as i64),
         Value::from(run_at_ms),
         Value::Bytes(bytes),
+    ]
+}
+
+pub(crate) fn evalsha_cancel_delayed_args(
+    sha: &str,
+    delayed_key: &str,
+    index_key: &str,
+    marker_key: &str,
+) -> Vec<Value> {
+    vec![
+        Value::from(sha),
+        Value::from(3_i64),
+        Value::from(delayed_key),
+        Value::from(index_key),
+        Value::from(marker_key),
+    ]
+}
+
+pub(crate) fn eval_cancel_delayed_args(
+    script: &str,
+    delayed_key: &str,
+    index_key: &str,
+    marker_key: &str,
+) -> Vec<Value> {
+    vec![
+        Value::from(script),
+        Value::from(3_i64),
+        Value::from(delayed_key),
+        Value::from(index_key),
+        Value::from(marker_key),
     ]
 }
 
