@@ -3,10 +3,13 @@ mod dlq;
 use crate::config::ProducerConfig;
 use crate::error::{Error, Result};
 use crate::job::{Job, JobId, now_ms};
-use crate::redis::commands::{xadd_args, zadd_delayed_args};
+use crate::redis::commands::{
+    SCHEDULE_DELAYED_IDEMPOTENT_SCRIPT, eval_schedule_delayed_idempotent_args,
+    evalsha_schedule_delayed_idempotent_args, script_load_args, xadd_args, zadd_delayed_args,
+};
 use crate::redis::conn::connect_pool;
 use bytes::Bytes;
-use fred::clients::Pool;
+use fred::clients::{Client, Pool};
 use fred::interfaces::ClientLike;
 use fred::types::{ClusterHash, CustomCommand, Value};
 use serde::Serialize;
@@ -15,7 +18,9 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-pub use crate::redis::keys::{delayed_key, dlq_key, promoter_lock_key, stream_key};
+pub use crate::redis::keys::{
+    dedup_marker_key, delayed_key, dlq_key, promoter_lock_key, stream_key,
+};
 
 #[derive(Debug, Clone)]
 pub struct DlqEntry {
@@ -29,6 +34,7 @@ pub struct DlqEntry {
 pub struct Producer<T> {
     pool: Pool,
     producer_id: Arc<str>,
+    queue_name: Arc<str>,
     stream_key: Arc<str>,
     delayed_key: Arc<str>,
     dlq_key: Arc<str>,
@@ -42,6 +48,7 @@ impl<T> Clone for Producer<T> {
         Self {
             pool: self.pool.clone(),
             producer_id: self.producer_id.clone(),
+            queue_name: self.queue_name.clone(),
             stream_key: self.stream_key.clone(),
             delayed_key: self.delayed_key.clone(),
             dlq_key: self.dlq_key.clone(),
@@ -56,12 +63,14 @@ impl<T: Serialize> Producer<T> {
     pub async fn connect(redis_url: &str, config: ProducerConfig) -> Result<Self> {
         let pool = connect_pool(redis_url, config.pool_size).await?;
         let producer_id: Arc<str> = Arc::from(uuid::Uuid::new_v4().to_string());
+        let queue_name: Arc<str> = Arc::from(config.queue_name.as_str());
         let stream_key: Arc<str> = Arc::from(stream_key(&config.queue_name));
         let delayed_key: Arc<str> = Arc::from(delayed_key(&config.queue_name));
         let dlq_key: Arc<str> = Arc::from(dlq_key(&config.queue_name));
         Ok(Self {
             pool,
             producer_id,
+            queue_name,
             stream_key,
             delayed_key,
             dlq_key,
@@ -214,6 +223,110 @@ impl<T: Serialize> Producer<T> {
         self.zadd_delayed_bulk(payloads, run_at_ms).await
     }
 
+    /// Idempotent variant of [`Producer::add_in`]: the caller supplies a stable
+    /// [`JobId`] so a network-driven retry of the same logical schedule does
+    /// **not** end up double-scheduled. Implementation is one Lua round trip
+    /// per job: a `SET NX EX` dedup marker gates the `ZADD`. If the marker
+    /// already exists (a previous call already reached Redis), the second
+    /// call is a no-op and returns the same `JobId` without an error.
+    ///
+    /// The marker TTL is `seconds_until_run + DEDUP_MARKER_GRACE_SECS` so the
+    /// marker outlives the scheduled fire time long enough that a delayed
+    /// retry of the producer cannot race a successful promotion.
+    pub async fn add_in_with_id(&self, id: JobId, delay: Duration, payload: T) -> Result<JobId> {
+        self.check_delay_secs(delay.as_secs())?;
+        if delay.is_zero() {
+            return self.add_with_id(id, payload).await;
+        }
+        let now = now_ms();
+        let run_at_ms = now.saturating_add(delay.as_millis() as u64);
+        if run_at_ms <= now {
+            return self.add_with_id(id, payload).await;
+        }
+        let delay_secs = delay.as_secs().max(1);
+        self.schedule_delayed_idempotent(id, payload, run_at_ms, delay_secs)
+            .await
+    }
+
+    /// Idempotent variant of [`Producer::add_at`]: see [`Producer::add_in_with_id`]
+    /// for the dedup model. If `run_at` has already passed, falls back to the
+    /// IDMP-protected immediate path via [`Producer::add_with_id`].
+    pub async fn add_at_with_id(&self, id: JobId, run_at: SystemTime, payload: T) -> Result<JobId> {
+        let run_at_ms = match run_at.duration_since(UNIX_EPOCH) {
+            Ok(d) => u128_to_u64_or_err(d.as_millis())?,
+            Err(_) => 0,
+        };
+        let now = now_ms();
+        if run_at_ms <= now {
+            return self.add_with_id(id, payload).await;
+        }
+        let delay_ms = run_at_ms - now;
+        let delay_secs = (delay_ms / 1000).max(1);
+        self.check_delay_secs(delay_secs)?;
+        self.schedule_delayed_idempotent(id, payload, run_at_ms, delay_secs)
+            .await
+    }
+
+    /// Idempotent bulk variant: each `(JobId, T)` is scheduled under its own
+    /// dedup marker so a partial network failure followed by a caller retry
+    /// only re-schedules the entries that didn't make it. Pipelines one Lua
+    /// `EVALSHA` per pair on a single connection.
+    ///
+    /// All entries share the same `delay`. Returns the supplied `JobId`s in
+    /// the same order; duplicates suppressed by the marker still appear in
+    /// the returned list (no error, no per-entry delivery report — peek the
+    /// queue if you need that).
+    pub async fn add_in_bulk_with_ids(
+        &self,
+        delay: Duration,
+        items: Vec<(JobId, T)>,
+    ) -> Result<Vec<JobId>> {
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.check_delay_secs(delay.as_secs())?;
+        if delay.is_zero() {
+            return self.add_bulk_with_ids_immediate(items).await;
+        }
+        let now = now_ms();
+        let run_at_ms = now.saturating_add(delay.as_millis() as u64);
+        if run_at_ms <= now {
+            return self.add_bulk_with_ids_immediate(items).await;
+        }
+        let delay_secs = delay.as_secs().max(1);
+        self.schedule_delayed_idempotent_bulk(items, run_at_ms, delay_secs)
+            .await
+    }
+
+    async fn add_bulk_with_ids_immediate(&self, items: Vec<(JobId, T)>) -> Result<Vec<JobId>> {
+        // Encode all jobs first so a mid-batch encode failure leaves Redis
+        // untouched (mirrors `add_bulk`'s atomic-encode posture).
+        let mut encoded: Vec<(JobId, Bytes)> = Vec::with_capacity(items.len());
+        for (id, payload) in items {
+            let job = Job::with_id(id.clone(), payload);
+            let bytes = Bytes::from(rmp_serde::to_vec(&job)?);
+            encoded.push((id, bytes));
+        }
+        let client = self.pool.next_connected();
+        let pipeline = client.pipeline();
+        let cmd = CustomCommand::new_static("XADD", ClusterHash::FirstKey, false);
+        for (iid, bytes) in &encoded {
+            let args = xadd_args(
+                self.stream_key.as_ref(),
+                self.producer_id.as_ref(),
+                iid,
+                self.max_stream_len,
+                bytes.clone(),
+            );
+            let _: () = pipeline
+                .custom(cmd.clone(), args)
+                .await
+                .map_err(Error::Redis)?;
+        }
+        let _: Vec<Value> = pipeline.all().await.map_err(Error::Redis)?;
+        Ok(encoded.into_iter().map(|(id, _)| id).collect())
+    }
+
     fn check_delay_secs(&self, delay_secs: u64) -> Result<()> {
         if self.max_delay_secs > 0 && delay_secs > self.max_delay_secs {
             return Err(Error::Config(format!(
@@ -263,6 +376,102 @@ impl<T: Serialize> Producer<T> {
         Ok(encoded.into_iter().map(|(id, _)| id).collect())
     }
 
+    async fn schedule_delayed_idempotent(
+        &self,
+        id: JobId,
+        payload: T,
+        run_at_ms: u64,
+        delay_secs: u64,
+    ) -> Result<JobId> {
+        let job = Job::with_id(id.clone(), payload);
+        let bytes = Bytes::from(rmp_serde::to_vec(&job)?);
+        let marker_key = dedup_marker_key(self.queue_name.as_ref(), &id);
+        let marker_ttl = delay_secs.saturating_add(DEDUP_MARKER_GRACE_SECS);
+        let score = run_at_ms_as_i64(run_at_ms)?;
+        let client = self.pool.next_connected();
+        run_schedule_delayed_idempotent(
+            client,
+            &marker_key,
+            self.delayed_key.as_ref(),
+            marker_ttl,
+            score,
+            bytes,
+        )
+        .await?;
+        // Whether the script returned 1 (newly scheduled) or 0 (duplicate
+        // suppressed), the caller's logical schedule is now in flight under
+        // the supplied `id`. Returning the same id in both cases is what
+        // makes this a true idempotent operation from the API surface.
+        Ok(id)
+    }
+
+    async fn schedule_delayed_idempotent_bulk(
+        &self,
+        items: Vec<(JobId, T)>,
+        run_at_ms: u64,
+        delay_secs: u64,
+    ) -> Result<Vec<JobId>> {
+        // Encode all jobs first so a mid-batch encode failure leaves Redis
+        // untouched.
+        let mut encoded: Vec<(JobId, Bytes)> = Vec::with_capacity(items.len());
+        for (id, payload) in items {
+            let job = Job::with_id(id.clone(), payload);
+            let bytes = Bytes::from(rmp_serde::to_vec(&job)?);
+            encoded.push((id, bytes));
+        }
+        let marker_ttl = delay_secs.saturating_add(DEDUP_MARKER_GRACE_SECS);
+        let score = run_at_ms_as_i64(run_at_ms)?;
+
+        let client = self.pool.next_connected();
+        let sha = load_idempotent_script(client).await?;
+
+        let pipeline = client.pipeline();
+        let evalsha_cmd = CustomCommand::new_static("EVALSHA", ClusterHash::FirstKey, false);
+        for (id, bytes) in &encoded {
+            let marker_key = dedup_marker_key(self.queue_name.as_ref(), id);
+            let args = evalsha_schedule_delayed_idempotent_args(
+                &sha,
+                &marker_key,
+                self.delayed_key.as_ref(),
+                marker_ttl,
+                score,
+                bytes.clone(),
+            );
+            let _: () = pipeline
+                .custom(evalsha_cmd.clone(), args)
+                .await
+                .map_err(Error::Redis)?;
+        }
+        let results: std::result::Result<Vec<Value>, _> = pipeline.all().await;
+        match results {
+            Ok(_) => {}
+            Err(e) if format!("{e}").contains("NOSCRIPT") => {
+                // Script was flushed mid-pipeline. Replay each call as EVAL
+                // (sends the body, no SHA cache needed). Still pipelined.
+                let pipeline = client.pipeline();
+                let eval_cmd = CustomCommand::new_static("EVAL", ClusterHash::FirstKey, false);
+                for (id, bytes) in &encoded {
+                    let marker_key = dedup_marker_key(self.queue_name.as_ref(), id);
+                    let args = eval_schedule_delayed_idempotent_args(
+                        SCHEDULE_DELAYED_IDEMPOTENT_SCRIPT,
+                        &marker_key,
+                        self.delayed_key.as_ref(),
+                        marker_ttl,
+                        score,
+                        bytes.clone(),
+                    );
+                    let _: () = pipeline
+                        .custom(eval_cmd.clone(), args)
+                        .await
+                        .map_err(Error::Redis)?;
+                }
+                let _: Vec<Value> = pipeline.all().await.map_err(Error::Redis)?;
+            }
+            Err(e) => return Err(Error::Redis(e)),
+        }
+        Ok(encoded.into_iter().map(|(id, _)| id).collect())
+    }
+
     async fn xadd(&self, iid: &str, bytes: Bytes) -> Result<()> {
         let client = self.pool.next_connected();
         let args = xadd_args(
@@ -284,4 +493,75 @@ fn run_at_ms_as_i64(ms: u64) -> Result<i64> {
 
 fn u128_to_u64_or_err(ms: u128) -> Result<u64> {
     u64::try_from(ms).map_err(|_| Error::Config(format!("run_at_ms {ms} overflows u64")))
+}
+
+/// Grace period (in seconds) added to the idempotent-schedule dedup marker's
+/// TTL on top of the time-until-fire. A producer that retries its `add_in_with_id`
+/// call this long after the original call would otherwise race a successful
+/// promotion (marker gone, ZSET entry already promoted to the stream → second
+/// call would re-schedule). One hour is generous: producer-side network retries
+/// almost always finish in seconds, and the marker is just a tiny string key.
+pub(crate) const DEDUP_MARKER_GRACE_SECS: u64 = 3600;
+
+async fn load_idempotent_script(client: &Client) -> Result<String> {
+    let cmd = CustomCommand::new_static("SCRIPT", ClusterHash::FirstKey, false);
+    let res: Value = client
+        .custom(cmd, script_load_args(SCHEDULE_DELAYED_IDEMPOTENT_SCRIPT))
+        .await
+        .map_err(Error::Redis)?;
+    match res {
+        Value::String(s) => Ok(s.to_string()),
+        Value::Bytes(b) => std::str::from_utf8(&b)
+            .map(|s| s.to_string())
+            .map_err(|_| Error::Config("SCRIPT LOAD returned non-utf8 sha".into())),
+        other => Err(Error::Config(format!(
+            "SCRIPT LOAD returned unexpected: {other:?}"
+        ))),
+    }
+}
+
+async fn run_schedule_delayed_idempotent(
+    client: &Client,
+    marker_key: &str,
+    delayed_key: &str,
+    marker_ttl_secs: u64,
+    run_at_ms: i64,
+    bytes: Bytes,
+) -> Result<i64> {
+    let sha = load_idempotent_script(client).await?;
+    let evalsha_cmd = CustomCommand::new_static("EVALSHA", ClusterHash::FirstKey, false);
+    let args = evalsha_schedule_delayed_idempotent_args(
+        &sha,
+        marker_key,
+        delayed_key,
+        marker_ttl_secs,
+        run_at_ms,
+        bytes.clone(),
+    );
+    let res: std::result::Result<Value, _> = client.custom(evalsha_cmd, args).await;
+    let v = match res {
+        Ok(v) => v,
+        Err(e) if format!("{e}").contains("NOSCRIPT") => {
+            let cmd = CustomCommand::new_static("EVAL", ClusterHash::FirstKey, false);
+            let args = eval_schedule_delayed_idempotent_args(
+                SCHEDULE_DELAYED_IDEMPOTENT_SCRIPT,
+                marker_key,
+                delayed_key,
+                marker_ttl_secs,
+                run_at_ms,
+                bytes,
+            );
+            client.custom(cmd, args).await.map_err(Error::Redis)?
+        }
+        Err(e) => return Err(Error::Redis(e)),
+    };
+    // Defensive across `Value::Integer` / `Value::String` / `Value::Bytes`,
+    // matching how `RETRY_RESCHEDULE_SCRIPT`'s return value is parsed elsewhere
+    // in the engine.
+    Ok(match v {
+        Value::Integer(n) => n,
+        Value::String(s) => s.as_bytes().first().copied().map(i64::from).unwrap_or(0),
+        Value::Bytes(b) => b.first().copied().map(i64::from).unwrap_or(0),
+        _ => 0,
+    })
 }
