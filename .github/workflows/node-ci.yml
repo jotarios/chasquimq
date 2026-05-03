@@ -1,0 +1,186 @@
+name: Node CI
+
+env:
+  APP_NAME: chasquimq
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'chasquimq-node/**'
+      - 'chasquimq/**'
+      - '.github/workflows/node-ci.yml'
+  pull_request:
+    paths:
+      - 'chasquimq-node/**'
+      - 'chasquimq/**'
+      - '.github/workflows/node-ci.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  id-token: write   # for npm provenance on release
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - host: macos-latest
+            target: x86_64-apple-darwin
+            build: npm run build -- --target x86_64-apple-darwin
+          - host: macos-latest
+            target: aarch64-apple-darwin
+            build: npm run build -- --target aarch64-apple-darwin
+          - host: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            build: npm run build -- --target x86_64-unknown-linux-gnu
+          - host: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            setup: |
+              sudo apt-get update
+              sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+            build: |
+              export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+              export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
+              export CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++
+              npm run build -- --target aarch64-unknown-linux-gnu
+          - host: windows-latest
+            target: x86_64-pc-windows-msvc
+            build: npm run build -- --target x86_64-pc-windows-msvc
+
+    name: Build ${{ matrix.settings.target }}
+    runs-on: ${{ matrix.settings.host }}
+    defaults:
+      run:
+        working-directory: chasquimq-node
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: chasquimq-node/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.settings.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> target'
+          key: ${{ matrix.settings.target }}
+
+      - name: Platform setup
+        if: ${{ matrix.settings.setup }}
+        run: ${{ matrix.settings.setup }}
+        shell: bash
+
+      - name: Install dependencies
+        run: npm ci
+        shell: bash
+
+      - name: Build
+        run: ${{ matrix.settings.build }}
+        shell: bash
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bindings-${{ matrix.settings.target }}
+          # Upload the .node binary AND the JS/TS bridge that `napi build`
+          # generates alongside it. The bridge is identical across targets
+          # (a runtime loader that picks the right .node), but uploading
+          # once per target is the simplest path — any one artifact is
+          # complete by itself for downstream test/publish jobs.
+          path: |
+            chasquimq-node/${{ env.APP_NAME }}.*.node
+            chasquimq-node/index.js
+            chasquimq-node/index.d.ts
+          if-no-files-found: error
+
+  test:
+    name: Test (linux x64, Node 20)
+    needs: build
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:8.6.2
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    defaults:
+      run:
+        working-directory: chasquimq-node
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: chasquimq-node/package-lock.json
+
+      - name: Download linux-x64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: bindings-x86_64-unknown-linux-gnu
+          path: chasquimq-node
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build TS
+        run: npm run build:ts
+
+      - name: Run tests
+        env:
+          REDIS_URL: redis://127.0.0.1:6379
+        run: npm test
+
+  publish:
+    name: Publish to npm
+    needs: [build, test]
+    if: startsWith(github.event.head_commit.message, 'chore(release):') && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: chasquimq-node
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: 'https://registry.npmjs.org'
+          cache: npm
+          cache-dependency-path: chasquimq-node/package-lock.json
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: chasquimq-node/artifacts
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build TS
+        run: npm run build:ts
+
+      - name: Move artifacts into per-target npm packages
+        run: npx napi artifacts
+
+      - name: Publish (root + platform sub-packages)
+        run: npm run prepublishOnly
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}

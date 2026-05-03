@@ -46,7 +46,18 @@
     "README.md"
   ],
   "napi": {
+    "name": "chasquimq",
     "binaryName": "chasquimq",
+    "triples": {
+      "defaults": false,
+      "additional": [
+        "x86_64-apple-darwin",
+        "aarch64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-pc-windows-msvc"
+      ]
+    },
     "targets": [
       "x86_64-apple-darwin",
       "aarch64-apple-darwin",
@@ -57,9 +68,11 @@
   },
   "scripts": {
     "artifacts": "napi artifacts",
-    "build": "napi build --platform --release --js index.js --dts index.d.ts && tsc",
-    "build:debug": "napi build --platform --js index.js --dts index.d.ts && tsc",
+    "build": "napi build --platform --release --js index.js --dts index.d.ts",
+    "build:debug": "napi build --platform --js index.js --dts index.d.ts",
     "build:ts": "tsc",
+    "build:all": "npm run build && npm run build:ts",
+    "build:all:debug": "npm run build:debug && npm run build:ts",
     "prepublishOnly": "napi prepublish -t npm",
     "test": "vitest run",
     "test:watch": "vitest",
