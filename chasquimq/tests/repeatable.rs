@@ -936,6 +936,76 @@ async fn catchup_respects_spec_limit() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires REDIS_URL"]
+async fn catchup_with_iana_tz_cron_replays_through_scheduler() {
+    // End-to-end IANA+catch-up wiring test through the real scheduler.
+    //
+    // Backdating to the 2026 NYC fall-back boundary while real wall-clock
+    // `now()` is somewhere far away would require a clock-injection seam in
+    // `Scheduler<T>` — we don't have one, and adding one purely for this
+    // test is heavier than the test is worth. Instead, this test proves the
+    // wire path: a `Cron("* * * * *", tz="America/New_York")` spec backdated
+    // 30 seconds, with `MissedFiresPolicy::FireAll`, dispatches at least one
+    // catch-up fire when the scheduler ticks. The precise 25-fire DST count
+    // is pinned in the unit test
+    // `repeat::tests::catchup_replays_all_fires_across_nyc_fall_back_dst`,
+    // which exercises the same `next_fire_after` walk that the scheduler's
+    // FireAll loop drives.
+    let admin = admin().await;
+    let queue = "repeat_catchup_iana";
+    flush_all(&admin, queue).await;
+
+    let producer: Producer<Sample> = Producer::connect(&redis_url(), producer_cfg(queue))
+        .await
+        .expect("connect producer");
+
+    let key = producer
+        .upsert_repeatable(RepeatableSpec {
+            key: "iana-catchup".into(),
+            job_name: "tick".into(),
+            pattern: RepeatPattern::Cron {
+                expression: "* * * * *".into(),
+                tz: Some("America/New_York".into()),
+            },
+            payload: Sample { n: 0 },
+            limit: None,
+            start_after_ms: None,
+            end_before_ms: None,
+            missed_fires: MissedFiresPolicy::FireAll { max_catchup: 5 },
+        })
+        .await
+        .expect("upsert");
+
+    let now = now_ms();
+    // 90s in the past — guarantees at least one missed minute boundary
+    // regardless of which second within the minute we're testing on.
+    let backdated = now.saturating_sub(90_000);
+    backdate_spec_score(&admin, queue, &key, backdated).await;
+
+    let shutdown = CancellationToken::new();
+    let h = spawn_scheduler(queue, "s1", 50, shutdown.clone());
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), h).await;
+
+    let stream = stream_key(queue);
+    let n = xlen(&admin, &stream).await;
+    assert!(
+        n >= 1,
+        "IANA-tz cron with FireAll catch-up must dispatch at least 1 fire; saw {n}"
+    );
+
+    let next_score = zscore(&admin, &repeat_key_fn(queue), &key).await;
+    let next = next_score.expect("spec must still be in repeat ZSET");
+    assert!(
+        next > now,
+        "IANA-tz catch-up must advance next_fire_ms past now; now={now} next={next}"
+    );
+
+    let _: () = admin.quit().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires REDIS_URL"]
 async fn catchup_no_op_when_on_time() {
     // Sanity: when fire_at_ms is within one cadence of now (the normal
     // case, no catch-up), every policy behaves identically — one fire,

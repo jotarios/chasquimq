@@ -156,6 +156,74 @@ fn is_default_missed_fires_policy(p: &MissedFiresPolicy) -> bool {
 }
 
 impl<T> RepeatableSpec<T> {
+    /// Construct a new spec with sensible defaults — the **recommended**
+    /// construction path going forward. Pair with the chainable
+    /// [`with_key`](Self::with_key) /
+    /// [`with_limit`](Self::with_limit) /
+    /// [`with_start_after_ms`](Self::with_start_after_ms) /
+    /// [`with_end_before_ms`](Self::with_end_before_ms) /
+    /// [`with_missed_fires`](Self::with_missed_fires) setters to override
+    /// individual fields.
+    ///
+    /// Defaults:
+    /// - `key`: empty (auto-derived from `job_name::pattern_signature` —
+    ///   see [`resolved_key`](Self::resolved_key)).
+    /// - `limit`: `None` (unlimited fires).
+    /// - `start_after_ms` / `end_before_ms`: `None` (no time window).
+    /// - `missed_fires`: [`MissedFiresPolicy::Skip`] (drop missed windows
+    ///   on scheduler restart — safe default, no thundering herd).
+    ///
+    /// The struct fields remain `pub` for back-compat with callers that
+    /// destructure or use field-by-field literals; the constructor is an
+    /// **additional** path that survives future field additions without
+    /// breaking call sites.
+    pub fn new(job_name: impl Into<String>, pattern: RepeatPattern, payload: T) -> Self {
+        Self {
+            key: String::new(),
+            job_name: job_name.into(),
+            pattern,
+            payload,
+            limit: None,
+            start_after_ms: None,
+            end_before_ms: None,
+            missed_fires: MissedFiresPolicy::default(),
+        }
+    }
+
+    /// Set a stable identifier for this spec. Empty (the default) means
+    /// auto-derive from `job_name::pattern_signature`.
+    pub fn with_key(mut self, key: impl Into<String>) -> Self {
+        self.key = key.into();
+        self
+    }
+
+    /// Cap the total number of fires this spec emits before the scheduler
+    /// removes it.
+    pub fn with_limit(mut self, limit: u64) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
+    /// Earliest fire time in epoch ms; fires before this are skipped.
+    pub fn with_start_after_ms(mut self, ms: u64) -> Self {
+        self.start_after_ms = Some(ms);
+        self
+    }
+
+    /// Latest fire time in epoch ms; once `next_fire_ms > end_before_ms`,
+    /// the scheduler removes the spec.
+    pub fn with_end_before_ms(mut self, ms: u64) -> Self {
+        self.end_before_ms = Some(ms);
+        self
+    }
+
+    /// Override the catch-up policy for missed windows. See
+    /// [`MissedFiresPolicy`].
+    pub fn with_missed_fires(mut self, policy: MissedFiresPolicy) -> Self {
+        self.missed_fires = policy;
+        self
+    }
+
     /// Resolve the effective key for this spec, deriving a default if the
     /// user supplied an empty string.
     pub fn resolved_key(&self) -> String {
@@ -306,44 +374,61 @@ pub(crate) fn next_fire_after(
 /// the scheduler treats the spec as "no future fire" (drops it).
 const FIRST_FUTURE_FIRE_ITERATION_CAP: u32 = 100_000;
 
+/// Outcome of [`first_future_fire`]'s advance loop. The scheduler decides
+/// what to do with the spec based on which variant it lands on:
+///
+/// - [`AdvanceOutcome::Future`]: arm the spec's next ZSET score to this
+///   instant.
+/// - [`AdvanceOutcome::Exhausted`]: pattern can't fire again (cron with no
+///   future match, `every:0`); the scheduler removes the spec.
+/// - [`AdvanceOutcome::CapReached`]: the iteration cap fired (see
+///   [`FIRST_FUTURE_FIRE_ITERATION_CAP`]). The scheduler should re-arm the
+///   spec for a short retry rather than deleting it — pathological-but-
+///   recoverable patterns shouldn't silently lose user data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AdvanceOutcome {
+    Future(u64),
+    Exhausted,
+    CapReached,
+}
+
 /// Walk `next_fire_after` from `fire_at_ms` forward until the result is
 /// strictly greater than `now_ms` (or there is no next fire). Used by the
 /// scheduler's catch-up logic to advance past every missed window in one
 /// step without dispatching jobs for them.
 ///
-/// Returns `Ok(None)` if the pattern has no future fire (cron with no
-/// match, `every:0`, or the iteration cap was hit — see
-/// [`FIRST_FUTURE_FIRE_ITERATION_CAP`]). Caller should treat that as
-/// "remove this spec".
+/// Returns [`AdvanceOutcome::Future`] with the first instant strictly
+/// greater than `now_ms`; [`AdvanceOutcome::Exhausted`] if the pattern has
+/// no future fire (cron with no match, `every:0`); or
+/// [`AdvanceOutcome::CapReached`] if the iteration cap fired (see
+/// [`FIRST_FUTURE_FIRE_ITERATION_CAP`]). The cap-reached case is
+/// **recoverable** — the scheduler re-arms the spec rather than deleting
+/// it.
 pub(crate) fn first_future_fire(
     pattern: &RepeatPattern,
     now_ms: u64,
     fire_at_ms: u64,
     start_after_ms: Option<u64>,
-) -> Result<Option<u64>> {
+) -> Result<AdvanceOutcome> {
     let mut at = fire_at_ms;
     for _ in 0..FIRST_FUTURE_FIRE_ITERATION_CAP {
         match next_fire_after(pattern, at, start_after_ms)? {
             Some(next) => {
                 if next > now_ms {
-                    return Ok(Some(next));
+                    return Ok(AdvanceOutcome::Future(next));
                 }
                 if next <= at {
                     // Defensive: pattern didn't advance (shouldn't happen
                     // for any valid `RepeatPattern`, but bail rather than
                     // spin if it does).
-                    return Ok(Some(next));
+                    return Ok(AdvanceOutcome::Future(next));
                 }
                 at = next;
             }
-            None => return Ok(None),
+            None => return Ok(AdvanceOutcome::Exhausted),
         }
     }
-    tracing::warn!(
-        cap = FIRST_FUTURE_FIRE_ITERATION_CAP,
-        "first_future_fire iteration cap reached; treating pattern as exhausted",
-    );
-    Ok(None)
+    Ok(AdvanceOutcome::CapReached)
 }
 
 /// Resolved timezone for a cron spec. Carries either a fixed UTC offset (so
@@ -743,6 +828,36 @@ mod tests {
     }
 
     #[test]
+    fn builder_sets_defaults_and_overrides() {
+        // `new` covers the common path; setters are additive.
+        let s: RepeatableSpec<u32> =
+            RepeatableSpec::new("my-job", RepeatPattern::Every { interval_ms: 1000 }, 7);
+        assert!(s.key.is_empty());
+        assert_eq!(s.job_name, "my-job");
+        assert_eq!(s.payload, 7);
+        assert!(s.limit.is_none());
+        assert!(s.start_after_ms.is_none());
+        assert!(s.end_before_ms.is_none());
+        assert_eq!(s.missed_fires, MissedFiresPolicy::Skip);
+
+        let s2: RepeatableSpec<u32> =
+            RepeatableSpec::new("another", RepeatPattern::Every { interval_ms: 250 }, 42)
+                .with_key("explicit-key")
+                .with_limit(3)
+                .with_start_after_ms(1_000)
+                .with_end_before_ms(2_000)
+                .with_missed_fires(MissedFiresPolicy::FireAll { max_catchup: 5 });
+        assert_eq!(s2.key, "explicit-key");
+        assert_eq!(s2.limit, Some(3));
+        assert_eq!(s2.start_after_ms, Some(1_000));
+        assert_eq!(s2.end_before_ms, Some(2_000));
+        assert_eq!(
+            s2.missed_fires,
+            MissedFiresPolicy::FireAll { max_catchup: 5 }
+        );
+    }
+
+    #[test]
     fn missed_fires_policy_default_is_skip() {
         let p: MissedFiresPolicy = Default::default();
         assert_eq!(p, MissedFiresPolicy::Skip);
@@ -769,17 +884,74 @@ mod tests {
         // fire_at_ms = 1_000_000 (1000s into epoch). now_ms = 1_300_000 (5
         // missed minutes, the 5th in the past). first_future = 1_360_000
         // (the 6th, strictly > now).
-        let next = first_future_fire(&pat, 1_300_000, 1_000_000, None)
-            .unwrap()
-            .unwrap();
-        assert_eq!(next, 1_360_000);
-        assert!(next > 1_300_000);
+        let next = first_future_fire(&pat, 1_300_000, 1_000_000, None).unwrap();
+        assert_eq!(next, AdvanceOutcome::Future(1_360_000));
     }
 
     #[test]
-    fn first_future_fire_every_zero_returns_none() {
+    fn first_future_fire_every_zero_returns_exhausted() {
         let pat = RepeatPattern::Every { interval_ms: 0 };
-        assert_eq!(first_future_fire(&pat, 1_000, 0, None).unwrap(), None);
+        assert_eq!(
+            first_future_fire(&pat, 1_000, 0, None).unwrap(),
+            AdvanceOutcome::Exhausted,
+        );
+    }
+
+    #[test]
+    fn catchup_replays_all_fires_across_nyc_fall_back_dst() {
+        // The headline catch-up + IANA combo: cron `0 * * * *` (top of every
+        // hour) in `America/New_York`, simulating an outage that spanned the
+        // 2026 fall-back transition. Walking the pattern from
+        // `next_fire_ms = 2026-11-01 00:00 EDT` (UTC: 2026-11-01 04:00) up
+        // to `now = 2026-11-02 00:00 EST` (UTC: 2026-11-02 05:00) should
+        // produce **25** fires — the 24 normal hours plus the duplicated
+        // 01:00 EDT/EST pair from the fall-back day. This is the load-
+        // bearing test that the IANA tz support + the catch-up replay path
+        // honor DST transitions in lockstep.
+        //
+        // We exercise this against `next_fire_after` directly (the same
+        // function the scheduler's FireAll loop calls) — `Scheduler<T>`
+        // has no clock-injection seam today, so an integration test would
+        // require backdating to the 2026 transition while `now()` is the
+        // current wall clock. The pattern walk is the *only* DST-sensitive
+        // step in the FireAll loop; the rest is cursor advancement.
+        let pat = RepeatPattern::Cron {
+            expression: "0 * * * *".into(),
+            tz: Some("America/New_York".into()),
+        };
+        // Anchor: 2026-11-01 04:00 UTC (the first 00:00 EDT fire of the
+        // transition day). The scheduler would have recorded this as the
+        // pending `next_fire_ms` going into the outage.
+        let anchor_ms: u64 = 1_793_500_800_000;
+        // Outage end: 2026-11-02 05:00 UTC = 2026-11-02 00:00 EST. 25
+        // wall-clock hours later because the 01:00 hour repeated.
+        let now_ms: u64 = 1_793_590_800_000;
+
+        // First fire is anchor_ms itself (the on-time fire that was missed).
+        let mut at = anchor_ms;
+        let mut fires: Vec<u64> = Vec::new();
+        // Bound the loop generously so a regression that fails to advance
+        // doesn't hang the test.
+        for _ in 0..1_000 {
+            if at > now_ms {
+                break;
+            }
+            fires.push(at);
+            match next_fire_after(&pat, at, None).expect("pattern advance") {
+                Some(n) if n > at => at = n,
+                _ => break,
+            }
+        }
+        assert_eq!(
+            fires.len(),
+            25,
+            "expected 25 missed top-of-hour fires across the NYC fall-back day, got {} ({:?})",
+            fires.len(),
+            fires,
+        );
+        // Sanity-check the boundaries.
+        assert_eq!(fires[0], anchor_ms);
+        assert!(*fires.last().unwrap() <= now_ms);
     }
 
     #[test]
@@ -789,8 +961,8 @@ mod tests {
         let pat = RepeatPattern::Every {
             interval_ms: 60_000,
         };
-        let next = first_future_fire(&pat, 100, 1_000, None).unwrap().unwrap();
-        assert_eq!(next, 61_000); // 1_000 + 60_000
+        let next = first_future_fire(&pat, 100, 1_000, None).unwrap();
+        assert_eq!(next, AdvanceOutcome::Future(61_000)); // 1_000 + 60_000
     }
 
     /// Pre-this-PR shape: the legacy `StoredSpec` without the

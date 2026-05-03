@@ -34,7 +34,9 @@ use crate::redis::keys::{
 };
 #[cfg(test)]
 use crate::repeat::RepeatPattern;
-use crate::repeat::{MissedFiresPolicy, StoredSpec, first_future_fire, next_fire_after};
+use crate::repeat::{
+    AdvanceOutcome, MissedFiresPolicy, StoredSpec, first_future_fire, next_fire_after,
+};
 use bytes::Bytes;
 use fred::clients::Client;
 use fred::interfaces::ClientLike;
@@ -46,6 +48,24 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 const TRANSIENT_BACKOFF_MS: [u64; 4] = [50, 100, 200, 400];
+
+/// Defensive ceiling on how many catch-up fires a single tick can build for
+/// one spec. If `FireAll { max_catchup }` is configured at `u32::MAX` (or a
+/// merely-very-large value) and the spec has been down for a long time on a
+/// short cadence, the per-fire cost (decoding `T`, minting a fresh ULID,
+/// re-encoding the `Job<T>` body, copying its `Bytes` into the EVALSHA
+/// argv) dominates the tick; we cap the build to keep one bad spec from
+/// stalling the scheduler. The cap is 10x lower than
+/// [`FIRST_FUTURE_FIRE_ITERATION_CAP`] in `repeat.rs` because each
+/// FireAll fire allocates a full encoded job body, while a single
+/// `next_fire_after` call is much cheaper.
+const MAX_FIRES_PER_TICK: usize = 10_000;
+
+/// When `first_future_fire` returns [`AdvanceOutcome::CapReached`], the
+/// scheduler re-arms the spec for a short retry instead of deleting it.
+/// Pathological-but-recoverable patterns (e.g. a misconfigured cron the
+/// operator can fix at runtime) shouldn't silently lose user data.
+const CAP_REACHED_RETRY_MS: u64 = 60_000;
 
 /// Job scheduler for repeatable specs.
 ///
@@ -319,16 +339,19 @@ where
         let policy = stored.missed_fires;
         let mut fires: Vec<(i64, Bytes)> = Vec::new();
         let next_fire_ms: u64 = match cadence_next {
-            // Fast path: natural cadence-next is already in the future, so
+            // Fast path: natural cadence-next is at or beyond `now_ms`, so
             // there are no missed windows. One on-time fire, advance by
-            // cadence — original behavior, regardless of policy.
-            Some(next) if next > now_ms => {
+            // cadence — original behavior, regardless of policy. We use
+            // `>=` (not `>`) because a spec exactly on time at
+            // `cadence_next == now_ms` is the on-time case, not catch-up;
+            // routing it through `Skip` would silently drop the fire.
+            Some(next) if next >= now_ms => {
                 let bytes = encode_fire::<T>(&payload_bytes, spec_key)?;
                 fires.push((fire_at_ms as i64, bytes));
                 next
             }
-            // Catch-up path: cadence-next is also <= now_ms (or pattern is
-            // exhausted). Dispatch on policy.
+            // Catch-up path: cadence-next is strictly before `now_ms` (or
+            // pattern is exhausted). Dispatch on policy.
             cadence_next => self.build_catchup_fires::<T>(
                 &stored,
                 spec_key,
@@ -472,17 +495,47 @@ where
                         }
                     }
                 }
+
+                // Defensive cap on the per-tick fires Vec. An operator who
+                // configures `FireAll { max_catchup: u32::MAX }` against a
+                // long outage on a short cadence would otherwise build a
+                // multi-million-entry Vec, copy it into EVALSHA argv, and
+                // stall the scheduler. The cap is large enough that no
+                // realistic catch-up workload bumps into it.
+                if fires.len() > MAX_FIRES_PER_TICK {
+                    tracing::warn!(
+                        spec_key,
+                        count = fires.len(),
+                        max = MAX_FIRES_PER_TICK,
+                        "scheduler: FireAll fires exceeds defensive cap; truncating",
+                    );
+                    fires.truncate(MAX_FIRES_PER_TICK);
+                }
+
                 // After breaking, decide next_fire_ms: prefer the cursor
                 // we landed on if it's now in the future; otherwise walk
-                // first_future_fire from the current cursor.
+                // first_future_fire from the current cursor. CapReached
+                // re-arms the spec for a short retry rather than deleting
+                // it.
                 if at > now_ms {
                     Ok(at)
                 } else {
-                    Ok(
-                        first_future_fire(&stored.pattern, now_ms, at, stored.start_after_ms)
-                            .unwrap_or(None)
-                            .unwrap_or(0),
-                    )
+                    match first_future_fire(&stored.pattern, now_ms, at, stored.start_after_ms) {
+                        Ok(AdvanceOutcome::Future(n)) => Ok(n),
+                        Ok(AdvanceOutcome::Exhausted) => Ok(0),
+                        Ok(AdvanceOutcome::CapReached) => {
+                            tracing::warn!(
+                                spec_key,
+                                retry_ms = CAP_REACHED_RETRY_MS,
+                                "scheduler: first_future_fire iteration cap reached; re-arming spec for retry",
+                            );
+                            Ok(now_ms.saturating_add(CAP_REACHED_RETRY_MS))
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, spec_key, "scheduler: first_future_fire failed; treating as exhausted");
+                            Ok(0)
+                        }
+                    }
                 }
             }
         }
@@ -490,7 +543,10 @@ where
 
     /// Helper used by `Skip` / `FireOnce`: from the cadence_next we already
     /// computed, walk forward until strictly greater than `now_ms`. Returns
-    /// `None` if the pattern has no future fire.
+    /// `None` for `Exhausted` (caller treats as "remove spec"); on
+    /// `CapReached` re-arms the spec for a short retry instead of dropping
+    /// it (so a recoverable pathological pattern doesn't silently lose
+    /// user data).
     fn resolve_first_future(
         &self,
         stored: &StoredSpec,
@@ -507,8 +563,22 @@ where
                 return Some(n);
             }
         }
-        first_future_fire(&stored.pattern, now_ms, fire_at_ms, stored.start_after_ms)
-            .unwrap_or(None)
+        match first_future_fire(&stored.pattern, now_ms, fire_at_ms, stored.start_after_ms) {
+            Ok(AdvanceOutcome::Future(n)) => Some(n),
+            Ok(AdvanceOutcome::Exhausted) => None,
+            Ok(AdvanceOutcome::CapReached) => {
+                tracing::warn!(
+                    spec_key = stored.key.as_str(),
+                    retry_ms = CAP_REACHED_RETRY_MS,
+                    "scheduler: first_future_fire iteration cap reached; re-arming spec for retry",
+                );
+                Some(now_ms.saturating_add(CAP_REACHED_RETRY_MS))
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, spec_key = stored.key.as_str(), "scheduler: first_future_fire failed; treating as exhausted");
+                None
+            }
+        }
     }
 
     async fn hget_spec(
