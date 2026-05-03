@@ -94,12 +94,24 @@ pub struct Job<T> {
     pub created_at_ms: u64,
     #[serde(default)]
     pub attempt: u32,
-    /// Per-job retry overrides. Producer-set, consumer-honored. `None`
-    /// means "fall back to queue-wide `ConsumerConfig` retry settings".
-    /// Skipped on serialization when absent so the wire format is
-    /// identical to the pre-slice-8 layout for jobs that don't use
-    /// overrides — old consumers can still decode new payloads, and
-    /// new consumers default `retry` to `None` for old payloads.
+    /// Per-job retry overrides. Producer-set, consumer-honored.
+    ///
+    /// `None` means "fall back to queue-wide `ConsumerConfig` retry settings".
+    ///
+    /// **Wire-format invariant**: this is the LAST field of `Job<T>` and is
+    /// `skip_serializing_if = Option::is_none`, so payloads with `retry = None`
+    /// encode identically to the pre-slice-8 4-field shape — old consumers
+    /// decode them transparently.
+    ///
+    /// **Deploy-order requirement**: a payload with `retry = Some(...)`
+    /// encodes as a 5-element array, which **cannot** be decoded by a
+    /// pre-slice-8 consumer (rmp-serde positional decode rejects array length
+    /// mismatches). When rolling out per-job retry overrides:
+    /// 1. Deploy the new consumer everywhere first.
+    /// 2. Then deploy producers that emit `retry = Some(...)`.
+    ///
+    /// Producing `retry = Some(...)` while a stale consumer is still running
+    /// will route those jobs to the DLQ (decode failure on read).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<JobRetryOverride>,
 }
@@ -355,5 +367,99 @@ mod tests {
             rmp_serde::from_slice(&bytes).expect("decode into legacy shape");
         assert_eq!(decoded.id, job.id);
         assert_eq!(decoded.attempt, 0);
+    }
+
+    /// Deploy-order regression: a new payload with `retry = Some(...)` is a
+    /// 5-element msgpack array. A pre-slice-8 4-field decode path cannot
+    /// consume it — `rmp-serde`'s positional decode rejects array-length
+    /// mismatches. This pins the asymmetry so we don't accidentally start
+    /// claiming "old consumers can decode new payloads" in docs again. The
+    /// rollout requires deploying the new consumer before any producer that
+    /// emits `retry = Some(...)`.
+    #[test]
+    fn legacy_consumer_fails_on_new_payload_with_retry_some() {
+        // Mimic the pre-slice-8 4-field Job shape.
+        #[derive(serde::Deserialize, Debug)]
+        #[allow(dead_code)]
+        struct LegacyJob {
+            id: String,
+            payload: u32,
+            created_at_ms: u64,
+            attempt: u32,
+        }
+
+        // Produce a current-shape Job with retry = Some(...).
+        let job = Job::with_id("test".into(), 42_u32).with_retry(JobRetryOverride {
+            max_attempts: Some(7),
+            backoff: None,
+        });
+        let bytes = rmp_serde::to_vec(&job).expect("encode");
+
+        // Legacy decode path must fail with an array-length mismatch.
+        let res: std::result::Result<LegacyJob, _> = rmp_serde::from_slice(&bytes);
+        assert!(
+            res.is_err(),
+            "expected legacy 4-field decode to fail on 5-field payload, got {res:?}"
+        );
+        let msg = format!("{:?}", res.unwrap_err());
+        assert!(
+            msg.contains("incorrect length") || msg.contains("4") || msg.contains("array"),
+            "unexpected error message: {msg}"
+        );
+    }
+
+    /// Companion to the "fails" case above: same `LegacyJob<u32>` shape, but
+    /// the new payload has `retry = None`, which is `skip_serializing_if =
+    /// Option::is_none` — so the wire shape collapses back to 4 fields and
+    /// the legacy consumer decodes it transparently.
+    #[test]
+    fn legacy_consumer_decodes_new_payload_with_retry_none() {
+        #[derive(serde::Deserialize, Debug, PartialEq)]
+        struct LegacyJob {
+            id: String,
+            payload: u32,
+            created_at_ms: u64,
+            attempt: u32,
+        }
+
+        let job = Job::with_id("test".into(), 42_u32);
+        assert!(job.retry.is_none());
+        let bytes = rmp_serde::to_vec(&job).expect("encode");
+
+        let decoded: LegacyJob = rmp_serde::from_slice(&bytes).expect("decode");
+        assert_eq!(decoded.id, "test");
+        assert_eq!(decoded.payload, 42);
+        assert_eq!(decoded.attempt, 0);
+    }
+
+    /// Sanity: an `Option::Some` override whose inner `max_attempts` and
+    /// `backoff` are both `None` is *inert* at the consumer level — it's
+    /// equivalent to `retry = None` for retry-decision purposes — but the
+    /// wire shape still grows to 5 elements because `skip_serializing_if`
+    /// is on the outer `Job::retry`, not the inner fields. Documents the
+    /// distinction so a user reading the encoded bytes doesn't think they
+    /// found a bug.
+    #[test]
+    fn empty_override_with_no_inner_fields_set_is_inert() {
+        let opts = JobRetryOverride {
+            max_attempts: None,
+            backoff: None,
+        };
+        let job: Job<u32> = Job::with_id("x".into(), 0).with_retry(opts);
+        let bytes = rmp_serde::to_vec(&job).expect("encode");
+
+        // Round-trips through Job<u32> with retry intact and inner fields
+        // both still None — the encode path doesn't drop them.
+        let back: Job<u32> = rmp_serde::from_slice(&bytes).expect("round-trip");
+        assert!(back.retry.is_some(), "outer retry must survive encode");
+        let r = back.retry.unwrap();
+        assert!(
+            r.max_attempts.is_none(),
+            "empty override stays empty after round-trip"
+        );
+        assert!(
+            r.backoff.is_none(),
+            "empty override stays empty after round-trip"
+        );
     }
 }

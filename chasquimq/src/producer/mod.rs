@@ -462,11 +462,15 @@ impl<T: Serialize> Producer<T> {
     }
 
     /// Bulk variant of [`Producer::add_with_options`]. All entries share
-    /// one [`AddOptions`] instance — same retry override applied to every
-    /// job in the batch. If `opts.id` is set it is used for the **first**
-    /// job only; the remainder receive freshly-generated ULIDs. (For
-    /// per-entry ids, build the calls yourself or use the `_with_ids`
-    /// idempotent variants.)
+    /// one [`AddOptions`] instance — the same retry override is applied to
+    /// every job in the batch.
+    ///
+    /// Setting `opts.id` with multiple payloads is rejected with
+    /// `Error::Config`; a single id can't be reused across `n` jobs and
+    /// silently using it for the first job only would be a footgun. Use
+    /// [`Producer::add_in_bulk_with_ids`] when you need per-job stable IDs.
+    /// `opts.id` set with exactly one payload is fine — it's the same as
+    /// [`Producer::add_with_options`] one call deep.
     pub async fn add_bulk_with_options(
         &self,
         payloads: Vec<T>,
@@ -474,6 +478,13 @@ impl<T: Serialize> Producer<T> {
     ) -> Result<Vec<JobId>> {
         if payloads.is_empty() {
             return Ok(Vec::new());
+        }
+        if opts.id.is_some() && payloads.len() > 1 {
+            return Err(Error::Config(
+                "add_bulk_with_options: opts.id can only be set when payloads.len() == 1; \
+                 use add_in_bulk_with_ids for per-job stable IDs"
+                    .into(),
+            ));
         }
         let mut encoded: Vec<(JobId, Bytes)> = Vec::with_capacity(payloads.len());
         let mut consumed_id = opts.id;

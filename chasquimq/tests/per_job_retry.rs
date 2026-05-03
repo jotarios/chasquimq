@@ -7,8 +7,8 @@
 
 use chasquimq::config::{ConsumerConfig, ProducerConfig, RetryConfig};
 use chasquimq::consumer::Consumer;
-use chasquimq::producer::{AddOptions, Producer, dlq_key};
-use chasquimq::{BackoffKind, BackoffSpec, HandlerError, Job, JobRetryOverride};
+use chasquimq::producer::{AddOptions, Producer, delayed_key, dlq_key};
+use chasquimq::{BackoffKind, BackoffSpec, Error, HandlerError, Job, JobRetryOverride};
 use fred::clients::Client;
 use fred::interfaces::ClientLike;
 use fred::prelude::Config;
@@ -16,7 +16,7 @@ use fred::types::{ClusterHash, CustomCommand, Value};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use tokio_util::sync::CancellationToken;
 
 fn redis_url() -> String {
@@ -550,6 +550,316 @@ async fn replay_dlq_preserves_retry_override() {
     );
 
     let _: () = admin.quit().await.unwrap();
+}
+
+/// Reader-side CLAIM-path regression: when a consumer reads a job, leaves it
+/// pending without acking, and then shuts down, the entry remains in the
+/// PEL. A second consumer started against the same group will reclaim it
+/// via XREADGROUP's `CLAIM <ms>` directive (Redis 8.4 idle-pending read)
+/// once the idle threshold passes. The test pins that the per-job
+/// `JobRetryOverride { max_attempts: 7 }` carried in the encoded payload
+/// is still honored on the reclaim — i.e. the dispatch-time DLQ gate uses
+/// the per-job override and not just the queue-wide `max_attempts`.
+///
+/// Without this guarantee a worker crash + reclaim would silently fall
+/// back to the queue-wide retry budget, defeating the per-job override
+/// for any job that was unlucky enough to be reclaimed. The same dispatch
+/// code path serves fresh reads and reclaimed reads (`dispatch_one` in
+/// `consumer/reader.rs`), so this is more a pinning test than a behavior
+/// test, but the audit on PR #14 explicitly asked for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires REDIS_URL"]
+async fn per_job_override_honored_after_claim_reclaim() {
+    let admin = admin().await;
+    let queue = "perjob_claim_reclaim";
+    flush_all(&admin, queue).await;
+
+    let producer: Producer<Sample> = Producer::connect(&redis_url(), producer_cfg(queue))
+        .await
+        .expect("producer");
+
+    // Per-job budget of 7 attempts; queue-wide budget is 2 — if the
+    // reclaim path silently fell back to the queue config, the job would
+    // hit DLQ after attempt 2 and the test would observe < 7 calls.
+    producer
+        .add_with_options(
+            Sample { n: 1 },
+            AddOptions::new().with_retry(JobRetryOverride {
+                max_attempts: Some(7),
+                backoff: Some(BackoffSpec {
+                    kind: BackoffKind::Fixed,
+                    delay_ms: 30,
+                    max_delay_ms: None,
+                    multiplier: None,
+                    jitter_ms: Some(0),
+                }),
+            }),
+        )
+        .await
+        .expect("add");
+
+    // Consumer A: reads the job, parks the handler so it never acks, then
+    // we shut it down. After shutdown the entry remains pending against
+    // consumer A's name in the PEL.
+    let a_started = Arc::new(AtomicUsize::new(0));
+    let a_started_h = a_started.clone();
+    let mut cfg_a = fast_consumer_cfg(queue, "c_a", 2);
+    cfg_a.claim_min_idle_ms = 250;
+    let consumer_a: Consumer<Sample> = Consumer::new(redis_url(), cfg_a);
+    let shutdown_a = CancellationToken::new();
+    let shutdown_a_clone = shutdown_a.clone();
+    let join_a = tokio::spawn(async move {
+        consumer_a
+            .run(
+                move |_: Job<Sample>| {
+                    let started = a_started_h.clone();
+                    async move {
+                        started.fetch_add(1, Ordering::SeqCst);
+                        // Park the handler past A's lifetime so the entry
+                        // never gets acked and stays pending.
+                        tokio::time::sleep(Duration::from_secs(60)).await;
+                        Ok::<(), HandlerError>(())
+                    }
+                },
+                shutdown_a_clone,
+            )
+            .await
+    });
+
+    // Wait until consumer A picks up the job (handler started).
+    wait_until(Duration::from_secs(5), || {
+        let a_started = a_started.clone();
+        async move { a_started.load(Ordering::SeqCst) >= 1 }
+    })
+    .await;
+    assert_eq!(
+        a_started.load(Ordering::SeqCst),
+        1,
+        "consumer A should have read the job exactly once"
+    );
+
+    // Tear consumer A down without letting the handler finish — the
+    // shutdown deadline is short so the parked handler is aborted.
+    shutdown_a.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(2), join_a).await;
+
+    // Wait long enough that the PEL entry exceeds `claim_min_idle_ms` so
+    // consumer B's first XREADGROUP picks it up via the CLAIM directive
+    // (the Redis 8.4 idle-pending read).
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    // Consumer B: same group, different consumer name. Counts handler
+    // calls. Returns Err every time so we exercise the full retry budget
+    // — the override of max_attempts=7 must win over the queue-wide 2.
+    let b_calls = Arc::new(AtomicUsize::new(0));
+    let b_calls_h = b_calls.clone();
+    let mut cfg_b = fast_consumer_cfg(queue, "c_b", 2);
+    cfg_b.claim_min_idle_ms = 250;
+    let consumer_b: Consumer<Sample> = Consumer::new(redis_url(), cfg_b);
+    let shutdown_b = CancellationToken::new();
+    let shutdown_b_clone = shutdown_b.clone();
+    let join_b = tokio::spawn(async move {
+        consumer_b
+            .run(
+                move |_: Job<Sample>| {
+                    let calls = b_calls_h.clone();
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        Err::<(), _>(HandlerError::new(std::io::Error::other("nope")))
+                    }
+                },
+                shutdown_b_clone,
+            )
+            .await
+    });
+
+    let dlq = dlq_key(queue);
+    wait_until(Duration::from_secs(15), || {
+        let admin = admin.clone();
+        let dlq = dlq.clone();
+        async move { xlen(&admin, &dlq).await >= 1 }
+    })
+    .await;
+
+    // The job was first started by consumer A (counted once in `a_started`)
+    // but never delivered (parked + aborted). Consumer B reclaims and runs
+    // it. The dispatch-time gate honors the per-job `max_attempts: 7` so
+    // B's handler should fire 7 times before the entry hits the DLQ.
+    //
+    // The CLAIM-derived `delivery_count` is at least 2 by the time B sees
+    // the entry (one read by A + one read by B), so the arrival-time
+    // check (`prior_attempts = max(job.attempt, claim_seen)`) accepts the
+    // first delivery without immediately routing to DLQ. From there the
+    // per-handler retry path drives `job.attempt` to grow naturally.
+    //
+    // We assert >= 5 to stay well clear of the queue-wide budget of 2 —
+    // any reclaim regression would observe ≤ 2 here.
+    let calls = b_calls.load(Ordering::SeqCst);
+    assert!(
+        calls >= 5,
+        "per-job max_attempts=7 must survive CLAIM reclaim; observed {calls} handler calls (queue-wide budget is 2)"
+    );
+
+    shutdown_b.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), join_b).await;
+    let _: () = admin.quit().await.unwrap();
+}
+
+/// `add_in_with_options` already has implicit coverage; mirror it for the
+/// absolute-time `add_at_with_options` so both delayed entry points are
+/// pinned with per-job retry overrides riding inside the encoded payload.
+///
+/// The job is scheduled ~150ms in the future; the consumer (with the
+/// inline promoter enabled) drains the delayed ZSET, and the per-job
+/// override is observed on the handler's `Job<T>::retry` field — proof
+/// the override survived ZADD → ZRANGEBYSCORE → XADD → XREADGROUP →
+/// rmp_serde::from_slice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires REDIS_URL"]
+async fn add_at_with_options_carries_retry_override() {
+    let admin = admin().await;
+    let queue = "perjob_add_at_opts";
+    flush_all(&admin, queue).await;
+
+    let producer: Producer<Sample> = Producer::connect(&redis_url(), producer_cfg(queue))
+        .await
+        .expect("producer");
+
+    let want = JobRetryOverride {
+        max_attempts: Some(4),
+        backoff: Some(BackoffSpec {
+            kind: BackoffKind::Fixed,
+            delay_ms: 25,
+            max_delay_ms: None,
+            multiplier: None,
+            jitter_ms: Some(0),
+        }),
+    };
+
+    let when = SystemTime::now() + Duration::from_millis(150);
+    producer
+        .add_at_with_options(when, Sample { n: 7 }, AddOptions::new().with_retry(want))
+        .await
+        .expect("add_at_with_options");
+
+    // Until the delay fires the entry sits in the delayed ZSET and the
+    // main stream is empty. Sanity-check that path before spinning up
+    // the consumer.
+    let dkey = delayed_key(queue);
+    assert_eq!(
+        zcard_admin(&admin, &dkey).await,
+        1,
+        "scheduled entry should land in the delayed ZSET"
+    );
+
+    let observed: Arc<std::sync::Mutex<Vec<Option<JobRetryOverride>>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed_h = observed.clone();
+    let consumer: Consumer<Sample> = Consumer::new(redis_url(), fast_consumer_cfg(queue, "c1", 99));
+    let shutdown = CancellationToken::new();
+    let shutdown_clone = shutdown.clone();
+    let join = tokio::spawn(async move {
+        consumer
+            .run(
+                move |job: Job<Sample>| {
+                    let observed = observed_h.clone();
+                    async move {
+                        observed.lock().unwrap().push(job.retry);
+                        Ok::<(), HandlerError>(())
+                    }
+                },
+                shutdown_clone,
+            )
+            .await
+    });
+
+    wait_until(Duration::from_secs(5), || {
+        let observed = observed.clone();
+        async move { !observed.lock().unwrap().is_empty() }
+    })
+    .await;
+
+    let seen = observed.lock().unwrap().clone();
+    assert_eq!(
+        seen.len(),
+        1,
+        "exactly one delivery expected (handler returns Ok)"
+    );
+    assert_eq!(
+        seen[0].as_ref(),
+        Some(&want),
+        "per-job override must survive the delayed-ZSET → stream round trip"
+    );
+
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), join).await;
+    let _: () = admin.quit().await.unwrap();
+}
+
+/// `add_bulk_with_options` rejects `opts.id` when there's more than one
+/// payload — silently using the id for the first job only would be a
+/// footgun. With exactly one payload `opts.id` is allowed (it's the
+/// single-job idempotent path). Empty payloads short-circuit without
+/// touching Redis or the validation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires REDIS_URL"]
+async fn add_bulk_with_options_rejects_id_with_multiple_payloads() {
+    let admin = admin().await;
+    let queue = "perjob_bulk_id_rejects";
+    flush_all(&admin, queue).await;
+
+    let producer: Producer<Sample> = Producer::connect(&redis_url(), producer_cfg(queue))
+        .await
+        .expect("producer");
+
+    // > 1 payload + opts.id → Error::Config, no Redis touch.
+    let res = producer
+        .add_bulk_with_options(
+            vec![Sample { n: 1 }, Sample { n: 2 }],
+            AddOptions::new().with_id("shared".to_string()),
+        )
+        .await;
+    assert!(
+        matches!(res, Err(Error::Config(_))),
+        "expected Error::Config for opts.id + multiple payloads; got {res:?}"
+    );
+
+    // Exactly one payload + opts.id → fine, equivalent to add_with_options.
+    let ids = producer
+        .add_bulk_with_options(
+            vec![Sample { n: 1 }],
+            AddOptions::new().with_id("solo".to_string()),
+        )
+        .await
+        .expect("single payload + opts.id should work");
+    assert_eq!(ids, vec!["solo".to_string()]);
+
+    // Empty payloads short-circuits without hitting the validation.
+    let ids = producer
+        .add_bulk_with_options(
+            Vec::<Sample>::new(),
+            AddOptions::new().with_id("ignored".to_string()),
+        )
+        .await
+        .expect("empty + opts.id is a noop");
+    assert!(ids.is_empty());
+
+    let _: () = admin.quit().await.unwrap();
+}
+
+async fn zcard_admin(admin: &Client, key: &str) -> i64 {
+    match admin
+        .custom::<Value, Value>(
+            CustomCommand::new_static("ZCARD", ClusterHash::FirstKey, false),
+            vec![Value::from(key)],
+        )
+        .await
+        .expect("ZCARD")
+    {
+        Value::Integer(n) => n,
+        Value::Null => 0,
+        other => panic!("ZCARD unexpected: {other:?}"),
+    }
 }
 
 fn extract_first_payload(v: &Value) -> Option<bytes::Bytes> {
