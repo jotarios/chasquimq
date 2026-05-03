@@ -15,6 +15,7 @@ use fred::clients::Client;
 use fred::interfaces::ClientLike;
 use fred::types::{ClusterHash, CustomCommand, Value};
 use serde::de::IgnoredAny;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
@@ -26,6 +27,13 @@ pub struct Promoter {
     stream_key: String,
     delayed_key: String,
     lock_key: String,
+    /// Shared events writer handed in by the embedding `Consumer`. When
+    /// `Some`, the promoter emits through this writer instead of opening a
+    /// second Redis connection — collapsing the worker process from two
+    /// events connections (one per role) to one. `None` for the standalone
+    /// `Promoter::new` case, which keeps the original behavior of building
+    /// its own writer based on `cfg.events_enabled`.
+    shared_events: Option<Arc<EventsWriter>>,
 }
 
 impl Promoter {
@@ -39,24 +47,56 @@ impl Promoter {
             stream_key,
             delayed_key,
             lock_key,
+            shared_events: None,
+        }
+    }
+
+    /// Construct a promoter that emits through the supplied `Arc<EventsWriter>`
+    /// instead of opening its own Redis connection. Used by `Consumer::run`
+    /// so the in-process consumer + embedded promoter share one events
+    /// connection. The `cfg.events_enabled` / `cfg.events_max_stream_len`
+    /// fields are ignored on this path — the shared writer carries that
+    /// state already.
+    pub(crate) fn with_shared_events(
+        redis_url: impl Into<String>,
+        cfg: PromoterConfig,
+        events: Arc<EventsWriter>,
+    ) -> Self {
+        let stream_key = stream_key(&cfg.queue_name);
+        let delayed_key = delayed_key(&cfg.queue_name);
+        let lock_key = promoter_lock_key(&cfg.queue_name);
+        Self {
+            redis_url: redis_url.into(),
+            cfg,
+            stream_key,
+            delayed_key,
+            lock_key,
+            shared_events: Some(events),
         }
     }
 
     pub async fn run(self, shutdown: CancellationToken) -> Result<()> {
         let client = connect(&self.redis_url).await?;
-        // Separate connection for the events writer so a slow XADD on the
-        // events stream cannot serialize with the promote-script EVAL on
-        // the main client. When `events_enabled` is false we skip the
-        // extra connect entirely.
-        let events = if self.cfg.events_enabled {
-            let events_client = connect(&self.redis_url).await?;
-            EventsWriter::new(
-                events_client,
-                &self.cfg.queue_name,
-                self.cfg.events_max_stream_len,
-            )
-        } else {
-            EventsWriter::disabled()
+        // Three cases for the events writer:
+        // 1. Shared writer supplied (embedded promoter): clone the `Arc`-shared
+        //    writer; no extra Redis connection. This is the conn-share fast
+        //    path.
+        // 2. No shared writer, `events_enabled = true` (standalone promoter):
+        //    open a separate connection so a slow XADD on the events stream
+        //    cannot serialize with the promote-script EVAL on the main client.
+        // 3. No shared writer, `events_enabled = false`: noop writer; no
+        //    extra connection.
+        let events = match &self.shared_events {
+            Some(shared) => EventsWriter::clone(shared),
+            None if self.cfg.events_enabled => {
+                let events_client = connect(&self.redis_url).await?;
+                EventsWriter::new(
+                    events_client,
+                    &self.cfg.queue_name,
+                    self.cfg.events_max_stream_len,
+                )
+            }
+            None => EventsWriter::disabled(),
         };
         let mut promote_sha = load_script(&client, PROMOTE_SCRIPT).await?;
         let mut lock_sha = load_script(&client, ACQUIRE_LOCK_SCRIPT).await?;
