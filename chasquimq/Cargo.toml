@@ -20,6 +20,10 @@ thiserror = "1"
 tracing = "0.1"
 async-channel = "2"
 futures-util = "0.3"
+croner = "3.0.1"
+# `chrono` is only used for cron next-fire computation (via `croner`'s
+# `find_next_occurrence`); keep features minimal.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

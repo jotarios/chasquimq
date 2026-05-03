@@ -176,6 +176,67 @@ impl std::fmt::Debug for PromoterConfig {
     }
 }
 
+/// Configuration for the standalone [`crate::Scheduler`] (slice 10).
+///
+/// The scheduler tails the per-queue repeat ZSET (`{chasqui:<queue>}:repeat`)
+/// at `tick_interval_ms`, materializes one fire of each due spec, schedules
+/// the resulting job (immediately to the stream or to the delayed ZSET if
+/// dispatch should still wait), and updates the spec's next-fire score in
+/// the same Lua round trip. Leader-elected via `SET NX EX` on
+/// `{chasqui:<queue>}:scheduler:lock` so multiple replicas can hot-spare
+/// without double-firing.
+#[derive(Clone)]
+pub struct SchedulerConfig {
+    pub queue_name: String,
+    /// How often the leader drains due specs from the repeat ZSET. Default
+    /// 1000ms — the lower bound on per-spec fire jitter is roughly this
+    /// interval (a spec scheduled for 100ms-from-now still has to wait for
+    /// the next tick to be picked up).
+    pub tick_interval_ms: u64,
+    /// Max specs hydrated per tick. Specs beyond this batch wait for the
+    /// next tick — keeps a single fat tick from monopolizing the leader.
+    pub batch: usize,
+    /// `MAXLEN ~` cap forwarded to the script's XADD on the immediate-
+    /// dispatch path.
+    pub max_stream_len: u64,
+    pub lock_ttl_secs: u64,
+    pub holder_id: String,
+    /// Forwarded into ack of metrics for tick / lock-outcome events.
+    /// Defaults to [`crate::metrics::NoopSink`]. The scheduler currently
+    /// emits the same `LockOutcome` events as the promoter; spec-level
+    /// metrics (fires per tick, exhaustion events) are intentionally
+    /// reserved for a follow-up slice.
+    pub metrics: std::sync::Arc<dyn crate::metrics::MetricsSink>,
+}
+
+impl std::fmt::Debug for SchedulerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SchedulerConfig")
+            .field("queue_name", &self.queue_name)
+            .field("tick_interval_ms", &self.tick_interval_ms)
+            .field("batch", &self.batch)
+            .field("max_stream_len", &self.max_stream_len)
+            .field("lock_ttl_secs", &self.lock_ttl_secs)
+            .field("holder_id", &self.holder_id)
+            .field("metrics", &"<dyn MetricsSink>")
+            .finish()
+    }
+}
+
+impl Default for SchedulerConfig {
+    fn default() -> Self {
+        Self {
+            queue_name: "default".to_string(),
+            tick_interval_ms: 1_000,
+            batch: 256,
+            max_stream_len: 1_000_000,
+            lock_ttl_secs: 5,
+            holder_id: format!("s-{}", uuid::Uuid::new_v4()),
+            metrics: crate::metrics::noop_sink(),
+        }
+    }
+}
+
 impl Default for PromoterConfig {
     fn default() -> Self {
         Self {

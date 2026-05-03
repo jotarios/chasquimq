@@ -8,8 +8,10 @@ pub mod metrics;
 pub mod producer;
 pub mod promoter;
 pub(crate) mod redis;
+pub mod repeat;
+pub mod scheduler;
 
-pub use config::{ConsumerConfig, ProducerConfig, PromoterConfig, RetryConfig};
+pub use config::{ConsumerConfig, ProducerConfig, PromoterConfig, RetryConfig, SchedulerConfig};
 pub use consumer::Consumer;
 pub use error::{Error, HandlerError, Result};
 pub use job::{BackoffSpec, Job, JobId, JobRetryOverride};
@@ -19,3 +21,5 @@ pub use metrics::{
 };
 pub use producer::{DlqEntry, Producer};
 pub use promoter::Promoter;
+pub use repeat::{RepeatPattern, RepeatableMeta, RepeatableSpec};
+pub use scheduler::Scheduler;
