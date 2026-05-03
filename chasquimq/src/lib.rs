@@ -11,7 +11,7 @@ pub(crate) mod redis;
 pub use config::{ConsumerConfig, ProducerConfig, PromoterConfig, RetryConfig};
 pub use consumer::Consumer;
 pub use error::{Error, HandlerError, Result};
-pub use job::{Job, JobId};
+pub use job::{BackoffSpec, Job, JobId, JobRetryOverride};
 pub use metrics::{
     DlqReason, DlqRouted, JobOutcome, JobOutcomeKind, LockOutcome, MetricsSink, NoopSink,
     PromoterTick, ReaderBatch, RetryScheduled, noop_sink,

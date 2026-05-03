@@ -2,7 +2,7 @@ mod dlq;
 
 use crate::config::ProducerConfig;
 use crate::error::{Error, Result};
-use crate::job::{Job, JobId, now_ms};
+use crate::job::{Job, JobId, JobRetryOverride, now_ms};
 use crate::redis::commands::{
     CANCEL_DELAYED_SCRIPT, SCHEDULE_DELAYED_IDEMPOTENT_SCRIPT, eval_cancel_delayed_args,
     eval_schedule_delayed_idempotent_args, evalsha_cancel_delayed_args,
@@ -30,6 +30,42 @@ pub struct DlqEntry {
     pub reason: String,
     pub detail: Option<String>,
     pub payload: Bytes,
+}
+
+/// Per-job options for the `*_with_options` family of producer methods.
+///
+/// Kept intentionally minimal — only knobs already supported by the engine
+/// hot path. BullMQ-shaped surface fields (priority, progress, lifo, etc.)
+/// belong in higher SDK layers, not here.
+///
+/// `id`: stable [`JobId`] for at-most-once / idempotent scheduling. Mirrors
+/// `add_with_id` / `add_in_with_id` semantics. `None` → engine generates a
+/// fresh ULID.
+///
+/// `retry`: per-job overrides of [`crate::config::ConsumerConfig::max_attempts`]
+/// and [`crate::config::ConsumerConfig::retry`]. Carried in the encoded
+/// `Job<T>` payload and honored by the consumer's retry / DLQ gates. `None`
+/// → consumer falls back to its queue-wide retry config.
+#[derive(Default, Clone, Debug)]
+pub struct AddOptions {
+    pub id: Option<JobId>,
+    pub retry: Option<JobRetryOverride>,
+}
+
+impl AddOptions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_id(mut self, id: JobId) -> Self {
+        self.id = Some(id);
+        self
+    }
+
+    pub fn with_retry(mut self, retry: JobRetryOverride) -> Self {
+        self.retry = Some(retry);
+        self
+    }
 }
 
 pub struct Producer<T> {
@@ -216,6 +252,73 @@ impl<T: Serialize> Producer<T> {
         Ok(id)
     }
 
+    /// Like [`Producer::add`], but accepts an [`AddOptions`] carrying an
+    /// optional stable [`JobId`] and optional per-job [`JobRetryOverride`].
+    /// Per-job overrides ride along inside the encoded `Job<T>` and are
+    /// honored by the consumer's retry / DLQ gates.
+    pub async fn add_with_options(&self, payload: T, opts: AddOptions) -> Result<JobId> {
+        let mut job = match opts.id {
+            Some(id) => Job::with_id(id, payload),
+            None => Job::new(payload),
+        };
+        if let Some(retry) = opts.retry {
+            job.retry = Some(retry);
+        }
+        let id = job.id.clone();
+        let bytes = Bytes::from(rmp_serde::to_vec(&job)?);
+        self.xadd(&id, bytes).await?;
+        Ok(id)
+    }
+
+    /// Bulk variant of [`Producer::add_with_options`]. All entries share
+    /// one [`AddOptions`] instance — same retry override applied to every
+    /// job in the batch. If `opts.id` is set it is used for the **first**
+    /// job only; the remainder receive freshly-generated ULIDs. (For
+    /// per-entry ids, build the calls yourself or use the `_with_ids`
+    /// idempotent variants.)
+    pub async fn add_bulk_with_options(
+        &self,
+        payloads: Vec<T>,
+        opts: AddOptions,
+    ) -> Result<Vec<JobId>> {
+        if payloads.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut encoded: Vec<(JobId, Bytes)> = Vec::with_capacity(payloads.len());
+        let mut consumed_id = opts.id;
+        for payload in payloads {
+            let mut job = match consumed_id.take() {
+                Some(id) => Job::with_id(id, payload),
+                None => Job::new(payload),
+            };
+            if let Some(retry) = opts.retry.clone() {
+                job.retry = Some(retry);
+            }
+            let id = job.id.clone();
+            let bytes = Bytes::from(rmp_serde::to_vec(&job)?);
+            encoded.push((id, bytes));
+        }
+
+        let client = self.pool.next_connected();
+        let pipeline = client.pipeline();
+        let cmd = CustomCommand::new_static("XADD", ClusterHash::FirstKey, false);
+        for (iid, bytes) in &encoded {
+            let args = xadd_args(
+                self.stream_key.as_ref(),
+                self.producer_id.as_ref(),
+                iid,
+                self.max_stream_len,
+                bytes.clone(),
+            );
+            let _: () = pipeline
+                .custom(cmd.clone(), args)
+                .await
+                .map_err(Error::Redis)?;
+        }
+        let _: Vec<Value> = pipeline.all().await.map_err(Error::Redis)?;
+        Ok(encoded.into_iter().map(|(id, _)| id).collect())
+    }
+
     pub async fn add_bulk(&self, payloads: Vec<T>) -> Result<Vec<JobId>> {
         if payloads.is_empty() {
             return Ok(Vec::new());
@@ -300,6 +403,76 @@ impl<T: Serialize> Producer<T> {
             return self.add_bulk(payloads).await;
         }
         self.zadd_delayed_bulk(payloads, run_at_ms).await
+    }
+
+    /// Like [`Producer::add_in`], but accepts an [`AddOptions`] carrying an
+    /// optional stable [`JobId`] and optional per-job [`JobRetryOverride`].
+    ///
+    /// When `opts.id` is set, this routes through the idempotent
+    /// `SCHEDULE_DELAYED_IDEMPOTENT_SCRIPT` path (same dedup-marker semantics
+    /// as [`Producer::add_in_with_id`]). When `opts.id` is `None`, this
+    /// uses the at-least-once `ZADD` path. Either way, the per-job retry
+    /// override rides inside the encoded `Job<T>`.
+    pub async fn add_in_with_options(
+        &self,
+        delay: Duration,
+        payload: T,
+        opts: AddOptions,
+    ) -> Result<JobId> {
+        self.check_delay_secs(delay.as_secs())?;
+        if delay.is_zero() {
+            return self.add_with_options(payload, opts).await;
+        }
+        let now = now_ms();
+        let run_at_ms = now.saturating_add(delay.as_millis() as u64);
+        if run_at_ms <= now {
+            return self.add_with_options(payload, opts).await;
+        }
+        match opts.id {
+            Some(id) => {
+                let delay_secs = delay.as_secs().max(1);
+                self.schedule_delayed_idempotent_with_retry(
+                    id, payload, run_at_ms, delay_secs, opts.retry,
+                )
+                .await
+            }
+            None => {
+                self.zadd_delayed_with_retry(payload, run_at_ms, opts.retry)
+                    .await
+            }
+        }
+    }
+
+    /// Like [`Producer::add_at`], but accepts an [`AddOptions`]. See
+    /// [`Producer::add_in_with_options`] for the dedup / retry-carry model.
+    pub async fn add_at_with_options(
+        &self,
+        run_at: SystemTime,
+        payload: T,
+        opts: AddOptions,
+    ) -> Result<JobId> {
+        let run_at_ms = match run_at.duration_since(UNIX_EPOCH) {
+            Ok(d) => u128_to_u64_or_err(d.as_millis())?,
+            Err(_) => 0,
+        };
+        let now = now_ms();
+        if run_at_ms <= now {
+            return self.add_with_options(payload, opts).await;
+        }
+        let delay_secs = ((run_at_ms - now) / 1000).max(1);
+        self.check_delay_secs(delay_secs)?;
+        match opts.id {
+            Some(id) => {
+                self.schedule_delayed_idempotent_with_retry(
+                    id, payload, run_at_ms, delay_secs, opts.retry,
+                )
+                .await
+            }
+            None => {
+                self.zadd_delayed_with_retry(payload, run_at_ms, opts.retry)
+                    .await
+            }
+        }
     }
 
     /// Idempotent variant of [`Producer::add_in`]: the caller supplies a stable
@@ -417,7 +590,19 @@ impl<T: Serialize> Producer<T> {
     }
 
     async fn zadd_delayed(&self, payload: T, run_at_ms: u64) -> Result<JobId> {
-        let job = Job::new(payload);
+        self.zadd_delayed_with_retry(payload, run_at_ms, None).await
+    }
+
+    async fn zadd_delayed_with_retry(
+        &self,
+        payload: T,
+        run_at_ms: u64,
+        retry: Option<JobRetryOverride>,
+    ) -> Result<JobId> {
+        let mut job = Job::new(payload);
+        if retry.is_some() {
+            job.retry = retry;
+        }
         let id = job.id.clone();
         let bytes = Bytes::from(rmp_serde::to_vec(&job)?);
         let client = self.pool.next_connected();
@@ -462,7 +647,22 @@ impl<T: Serialize> Producer<T> {
         run_at_ms: u64,
         delay_secs: u64,
     ) -> Result<JobId> {
-        let job = Job::with_id(id.clone(), payload);
+        self.schedule_delayed_idempotent_with_retry(id, payload, run_at_ms, delay_secs, None)
+            .await
+    }
+
+    async fn schedule_delayed_idempotent_with_retry(
+        &self,
+        id: JobId,
+        payload: T,
+        run_at_ms: u64,
+        delay_secs: u64,
+        retry: Option<JobRetryOverride>,
+    ) -> Result<JobId> {
+        let mut job = Job::with_id(id.clone(), payload);
+        if retry.is_some() {
+            job.retry = retry;
+        }
         let bytes = Bytes::from(rmp_serde::to_vec(&job)?);
         let marker_key = dedup_marker_key(self.queue_name.as_ref(), &id);
         let index_key = delayed_index_key(self.queue_name.as_ref(), &id);

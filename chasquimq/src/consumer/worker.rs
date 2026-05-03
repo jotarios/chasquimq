@@ -129,7 +129,15 @@ async fn on_handler_failure<T: Serialize + Send + 'static>(
     let just_ran = job.attempt.saturating_add(1);
     let will_run_next = just_ran.saturating_add(1);
 
-    if next_attempt >= wiring.max_attempts {
+    // Per-job override: `Job::retry.max_attempts` wins over the queue-wide
+    // `WorkerWiring::max_attempts` when set. None → fall back.
+    let max_attempts = job
+        .retry
+        .as_ref()
+        .and_then(|r| r.max_attempts)
+        .unwrap_or(wiring.max_attempts);
+
+    if next_attempt >= max_attempts {
         dlq::enqueue(
             &wiring.dlq_tx,
             entry_id,
@@ -141,6 +149,14 @@ async fn on_handler_failure<T: Serialize + Send + 'static>(
         return;
     }
 
+    // Per-job override: `Job::retry.backoff` wins over the queue-wide
+    // `WorkerWiring::retry_cfg` when set. None → fall back to the
+    // existing exponential math driven by `RetryConfig`.
+    let backoff = match job.retry.as_ref().and_then(|r| r.backoff.as_ref()) {
+        Some(spec) => retry::backoff_ms_from_spec(next_attempt, spec, &wiring.retry_cfg),
+        None => retry::backoff_ms(next_attempt, &wiring.retry_cfg),
+    };
+
     job.attempt = next_attempt;
     let encoded_with_bumped = match rmp_serde::to_vec(&job) {
         Ok(b) => Bytes::from(b),
@@ -149,7 +165,6 @@ async fn on_handler_failure<T: Serialize + Send + 'static>(
             return;
         }
     };
-    let backoff = retry::backoff_ms(next_attempt, &wiring.retry_cfg);
     let run_at = now_ms().saturating_add(backoff);
     let run_at_i64 = i64::try_from(run_at).unwrap_or(i64::MAX);
     retry::enqueue(
