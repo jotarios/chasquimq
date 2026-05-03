@@ -2,8 +2,8 @@
 
 use chasquimq::config::{ConsumerConfig, ProducerConfig, SchedulerConfig};
 use chasquimq::consumer::Consumer;
-use chasquimq::producer::{Producer, repeat_key as repeat_key_fn, repeat_spec_key};
-use chasquimq::repeat::{RepeatPattern, RepeatableSpec};
+use chasquimq::producer::{Producer, repeat_key as repeat_key_fn, repeat_spec_key, stream_key};
+use chasquimq::repeat::{MissedFiresPolicy, RepeatPattern, RepeatableSpec};
 use chasquimq::scheduler::Scheduler;
 use fred::clients::Client;
 use fred::interfaces::ClientLike;
@@ -105,6 +105,68 @@ async fn zcard(admin: &Client, key: &str) -> i64 {
         Value::Null => 0,
         other => panic!("ZCARD unexpected: {other:?}"),
     }
+}
+
+async fn xlen(admin: &Client, key: &str) -> i64 {
+    match admin
+        .custom::<Value, Value>(
+            CustomCommand::new_static("XLEN", ClusterHash::FirstKey, false),
+            vec![Value::from(key)],
+        )
+        .await
+        .expect("XLEN")
+    {
+        Value::Integer(n) => n,
+        Value::Null => 0,
+        other => panic!("XLEN unexpected: {other:?}"),
+    }
+}
+
+async fn zscore(admin: &Client, key: &str, member: &str) -> Option<u64> {
+    match admin
+        .custom::<Value, Value>(
+            CustomCommand::new_static("ZSCORE", ClusterHash::FirstKey, false),
+            vec![Value::from(key), Value::from(member)],
+        )
+        .await
+        .expect("ZSCORE")
+    {
+        Value::Double(d) => Some(d.max(0.0) as u64),
+        Value::Integer(n) => Some(n.max(0) as u64),
+        Value::String(s) => s.parse::<f64>().ok().map(|f| f.max(0.0) as u64),
+        Value::Bytes(b) => std::str::from_utf8(&b)
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .map(|f| f.max(0.0) as u64),
+        Value::Null => None,
+        _ => None,
+    }
+}
+
+/// Backdate the spec's `next_fire_ms` to simulate scheduler downtime: the
+/// spec was alive, then the scheduler was down long enough that
+/// `next_fire_ms` is now far in the past. ZADD with same member updates the
+/// score in place.
+async fn backdate_spec_score(admin: &Client, queue: &str, spec_key: &str, score_ms: u64) {
+    let rkey = repeat_key_fn(queue);
+    let _: Value = admin
+        .custom(
+            CustomCommand::new_static("ZADD", ClusterHash::FirstKey, false),
+            vec![
+                Value::from(rkey),
+                Value::from(score_ms as i64),
+                Value::from(spec_key),
+            ],
+        )
+        .await
+        .expect("ZADD backdate");
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 async fn exists(admin: &Client, key: &str) -> bool {
@@ -239,6 +301,7 @@ async fn every_pattern_fires_repeatedly() {
             limit: None,
             start_after_ms: None,
             end_before_ms: None,
+            missed_fires: Default::default(),
         })
         .await
         .expect("upsert");
@@ -287,6 +350,7 @@ async fn cron_pattern_fires_at_least_once() {
             limit: None,
             start_after_ms: None,
             end_before_ms: None,
+            missed_fires: Default::default(),
         })
         .await
         .expect("upsert");
@@ -333,6 +397,7 @@ async fn limit_caps_total_fires_and_removes_spec() {
             limit: Some(2),
             start_after_ms: None,
             end_before_ms: None,
+            missed_fires: Default::default(),
         })
         .await
         .expect("upsert");
@@ -391,6 +456,7 @@ async fn remove_repeatable_stops_future_fires() {
             limit: None,
             start_after_ms: None,
             end_before_ms: None,
+            missed_fires: Default::default(),
         })
         .await
         .expect("upsert");
@@ -447,6 +513,7 @@ async fn list_repeatable_returns_specs() {
             limit: None,
             start_after_ms: None,
             end_before_ms: None,
+            missed_fires: Default::default(),
         })
         .await
         .expect("upsert a");
@@ -462,6 +529,7 @@ async fn list_repeatable_returns_specs() {
             limit: Some(10),
             start_after_ms: None,
             end_before_ms: None,
+            missed_fires: Default::default(),
         })
         .await
         .expect("upsert b");
@@ -499,6 +567,7 @@ async fn upsert_overwrites_existing_spec() {
             limit: None,
             start_after_ms: None,
             end_before_ms: None,
+            missed_fires: Default::default(),
         })
         .await
         .expect("upsert v1");
@@ -511,6 +580,7 @@ async fn upsert_overwrites_existing_spec() {
             limit: None,
             start_after_ms: None,
             end_before_ms: None,
+            missed_fires: Default::default(),
         })
         .await
         .expect("upsert v2");
@@ -556,6 +626,7 @@ async fn leader_election_no_double_fire() {
             limit: Some(3),
             start_after_ms: None,
             end_before_ms: None,
+            missed_fires: Default::default(),
         })
         .await
         .expect("upsert");
@@ -580,5 +651,334 @@ async fn leader_election_no_double_fire() {
     let _ = tokio::time::timeout(Duration::from_secs(5), h_b).await;
     shutdown_consumer.cancel();
     let _ = tokio::time::timeout(Duration::from_secs(5), h_consumer).await;
+    let _: () = admin.quit().await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Catch-up policy tests (slice 10 follow-up).
+//
+// Pattern: upsert a spec, then backdate its `next_fire_ms` in the repeat ZSET
+// to simulate scheduler downtime. Spawn the scheduler for a brief window and
+// observe what landed in the stream and what the new ZSET score is. We don't
+// run a consumer in these tests — XLEN on the stream is the source of truth
+// for "how many fires were dispatched". This decouples the test from any
+// consumer-side timing noise.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires REDIS_URL"]
+async fn catchup_skip_advances_past_missed_fires() {
+    let admin = admin().await;
+    let queue = "repeat_catchup_skip";
+    flush_all(&admin, queue).await;
+
+    let producer: Producer<Sample> = Producer::connect(&redis_url(), producer_cfg(queue))
+        .await
+        .expect("connect producer");
+
+    let key = producer
+        .upsert_repeatable(RepeatableSpec {
+            key: "skip-me".into(),
+            job_name: "tick".into(),
+            pattern: RepeatPattern::Every { interval_ms: 1_000 },
+            payload: Sample { n: 0 },
+            limit: None,
+            start_after_ms: None,
+            end_before_ms: None,
+            missed_fires: MissedFiresPolicy::Skip,
+        })
+        .await
+        .expect("upsert");
+
+    // Backdate to 5 minutes ago — 300 missed fires of an `every:1s` spec.
+    let now = now_ms();
+    let backdated = now.saturating_sub(300_000);
+    backdate_spec_score(&admin, queue, &key, backdated).await;
+
+    let shutdown = CancellationToken::new();
+    let h = spawn_scheduler(queue, "s1", 50, shutdown.clone());
+    // One tick is enough; give the scheduler a small window to acquire the
+    // lock + tick.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), h).await;
+
+    // Skip policy: zero jobs dispatched, zero in delayed ZSET. Spec still
+    // alive with a future score.
+    let stream = stream_key(queue);
+    let n = xlen(&admin, &stream).await;
+    assert_eq!(
+        n, 0,
+        "Skip must drop missed fires; expected 0 stream entries, saw {n}"
+    );
+
+    let next_score = zscore(&admin, &repeat_key_fn(queue), &key).await;
+    let next = next_score.expect("spec must still be in repeat ZSET");
+    assert!(
+        next > now,
+        "Skip must advance next_fire_ms past now; now={now} next={next}"
+    );
+
+    let _: () = admin.quit().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires REDIS_URL"]
+async fn catchup_fire_once_emits_one_job() {
+    let admin = admin().await;
+    let queue = "repeat_catchup_once";
+    flush_all(&admin, queue).await;
+
+    let producer: Producer<Sample> = Producer::connect(&redis_url(), producer_cfg(queue))
+        .await
+        .expect("connect producer");
+
+    let key = producer
+        .upsert_repeatable(RepeatableSpec {
+            key: "fire-once".into(),
+            job_name: "tick".into(),
+            pattern: RepeatPattern::Every { interval_ms: 1_000 },
+            payload: Sample { n: 0 },
+            limit: None,
+            start_after_ms: None,
+            end_before_ms: None,
+            missed_fires: MissedFiresPolicy::FireOnce,
+        })
+        .await
+        .expect("upsert");
+
+    let now = now_ms();
+    let backdated = now.saturating_sub(300_000);
+    backdate_spec_score(&admin, queue, &key, backdated).await;
+
+    let shutdown = CancellationToken::new();
+    let h = spawn_scheduler(queue, "s1", 50, shutdown.clone());
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), h).await;
+
+    let stream = stream_key(queue);
+    let n = xlen(&admin, &stream).await;
+    assert_eq!(
+        n, 1,
+        "FireOnce must dispatch exactly 1 job for the missed window(s); saw {n}"
+    );
+
+    let next_score = zscore(&admin, &repeat_key_fn(queue), &key).await;
+    let next = next_score.expect("spec must still be in repeat ZSET");
+    assert!(
+        next > now,
+        "FireOnce must advance past now; now={now} next={next}"
+    );
+
+    let _: () = admin.quit().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires REDIS_URL"]
+async fn catchup_fire_all_capped_at_max_catchup() {
+    let admin = admin().await;
+    let queue = "repeat_catchup_all_capped";
+    flush_all(&admin, queue).await;
+
+    let producer: Producer<Sample> = Producer::connect(&redis_url(), producer_cfg(queue))
+        .await
+        .expect("connect producer");
+
+    // every:60s, backdated 5 minutes → ~5 missed windows. Cap at 3.
+    let key = producer
+        .upsert_repeatable(RepeatableSpec {
+            key: "fire-all-capped".into(),
+            job_name: "tick".into(),
+            pattern: RepeatPattern::Every {
+                interval_ms: 60_000,
+            },
+            payload: Sample { n: 0 },
+            limit: None,
+            start_after_ms: None,
+            end_before_ms: None,
+            missed_fires: MissedFiresPolicy::FireAll { max_catchup: 3 },
+        })
+        .await
+        .expect("upsert");
+
+    let now = now_ms();
+    let backdated = now.saturating_sub(300_000);
+    backdate_spec_score(&admin, queue, &key, backdated).await;
+
+    let shutdown = CancellationToken::new();
+    let h = spawn_scheduler(queue, "s1", 50, shutdown.clone());
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), h).await;
+
+    let stream = stream_key(queue);
+    let n = xlen(&admin, &stream).await;
+    assert_eq!(
+        n, 3,
+        "FireAll {{ max_catchup: 3 }} must dispatch exactly 3 jobs; saw {n}"
+    );
+
+    let next_score = zscore(&admin, &repeat_key_fn(queue), &key).await;
+    let next = next_score.expect("spec must still be in repeat ZSET");
+    assert!(
+        next > now,
+        "FireAll cap-reached path must advance past now; now={now} next={next}"
+    );
+
+    let _: () = admin.quit().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires REDIS_URL"]
+async fn catchup_fire_all_uncapped_under_limit() {
+    let admin = admin().await;
+    let queue = "repeat_catchup_all_uncapped";
+    flush_all(&admin, queue).await;
+
+    let producer: Producer<Sample> = Producer::connect(&redis_url(), producer_cfg(queue))
+        .await
+        .expect("connect producer");
+
+    // 5 missed fires, max_catchup well above that — must replay all 5.
+    let key = producer
+        .upsert_repeatable(RepeatableSpec {
+            key: "fire-all-uncapped".into(),
+            job_name: "tick".into(),
+            pattern: RepeatPattern::Every {
+                interval_ms: 60_000,
+            },
+            payload: Sample { n: 0 },
+            limit: None,
+            start_after_ms: None,
+            end_before_ms: None,
+            missed_fires: MissedFiresPolicy::FireAll { max_catchup: 100 },
+        })
+        .await
+        .expect("upsert");
+
+    let now = now_ms();
+    let backdated = now.saturating_sub(300_000);
+    backdate_spec_score(&admin, queue, &key, backdated).await;
+
+    let shutdown = CancellationToken::new();
+    let h = spawn_scheduler(queue, "s1", 50, shutdown.clone());
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), h).await;
+
+    let stream = stream_key(queue);
+    let n = xlen(&admin, &stream).await;
+    // Exactly 5 missed windows (offsets 0, +60s, +120s, +180s, +240s, all
+    // <= now since backdated is now-300s); the 6th is at backdated+300s ==
+    // now, which the loop also fires (at <= now). The 7th is at
+    // backdated+360s, strictly > now. So we expect 6.
+    //
+    // (Allow a tolerance band of [5, 6] to account for the small wall-clock
+    // drift between `now_ms()` capture and the scheduler's tick.)
+    assert!(
+        (5..=6).contains(&n),
+        "FireAll uncapped must replay every missed window; expected 5-6, saw {n}"
+    );
+
+    let _: () = admin.quit().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires REDIS_URL"]
+async fn catchup_respects_spec_limit() {
+    let admin = admin().await;
+    let queue = "repeat_catchup_limit";
+    flush_all(&admin, queue).await;
+
+    let producer: Producer<Sample> = Producer::connect(&redis_url(), producer_cfg(queue))
+        .await
+        .expect("connect producer");
+
+    // FireAll would otherwise replay ~5; spec limit caps at 2.
+    let key = producer
+        .upsert_repeatable(RepeatableSpec {
+            key: "limited".into(),
+            job_name: "tick".into(),
+            pattern: RepeatPattern::Every {
+                interval_ms: 60_000,
+            },
+            payload: Sample { n: 0 },
+            limit: Some(2),
+            start_after_ms: None,
+            end_before_ms: None,
+            missed_fires: MissedFiresPolicy::FireAll { max_catchup: 100 },
+        })
+        .await
+        .expect("upsert");
+
+    let now = now_ms();
+    let backdated = now.saturating_sub(300_000);
+    backdate_spec_score(&admin, queue, &key, backdated).await;
+
+    let shutdown = CancellationToken::new();
+    let h = spawn_scheduler(queue, "s1", 50, shutdown.clone());
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), h).await;
+
+    let stream = stream_key(queue);
+    let n = xlen(&admin, &stream).await;
+    assert_eq!(n, 2, "spec limit=2 must cap catch-up replay at 2; saw {n}");
+
+    // Spec should be removed (limit hit).
+    assert_eq!(zcard(&admin, &repeat_key_fn(queue)).await, 0);
+    let hkey = repeat_spec_key(queue, &key);
+    assert!(!exists(&admin, &hkey).await);
+
+    let _: () = admin.quit().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires REDIS_URL"]
+async fn catchup_no_op_when_on_time() {
+    // Sanity: when fire_at_ms is within one cadence of now (the normal
+    // case, no catch-up), every policy behaves identically — one fire,
+    // ZADD cadence-next.
+    let admin = admin().await;
+    let queue = "repeat_catchup_ontime";
+    flush_all(&admin, queue).await;
+
+    let producer: Producer<Sample> = Producer::connect(&redis_url(), producer_cfg(queue))
+        .await
+        .expect("connect producer");
+
+    // Use FireAll with a low cap — if the policy logic ever incorrectly
+    // dispatches catch-up on the on-time path, this would visibly
+    // multiply jobs.
+    let key = producer
+        .upsert_repeatable(RepeatableSpec {
+            key: "on-time".into(),
+            job_name: "tick".into(),
+            pattern: RepeatPattern::Every { interval_ms: 200 },
+            payload: Sample { n: 0 },
+            limit: Some(1),
+            start_after_ms: None,
+            end_before_ms: None,
+            missed_fires: MissedFiresPolicy::FireAll { max_catchup: 100 },
+        })
+        .await
+        .expect("upsert");
+    assert_eq!(key, "on-time");
+
+    let shutdown = CancellationToken::new();
+    let h = spawn_scheduler(queue, "s1", 50, shutdown.clone());
+    // Wait long enough for the scheduler to fire on-time (interval=200ms).
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), h).await;
+
+    let stream = stream_key(queue);
+    let n = xlen(&admin, &stream).await;
+    assert_eq!(
+        n, 1,
+        "on-time path under FireAll must still fire exactly limit=1 job; saw {n}"
+    );
+
     let _: () = admin.quit().await.unwrap();
 }

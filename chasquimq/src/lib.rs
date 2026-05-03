@@ -21,5 +21,5 @@ pub use metrics::{
 };
 pub use producer::{DlqEntry, Producer};
 pub use promoter::Promoter;
-pub use repeat::{RepeatPattern, RepeatableMeta, RepeatableSpec};
+pub use repeat::{MissedFiresPolicy, RepeatPattern, RepeatableMeta, RepeatableSpec};
 pub use scheduler::Scheduler;

@@ -34,7 +34,7 @@ use crate::redis::keys::{
 };
 #[cfg(test)]
 use crate::repeat::RepeatPattern;
-use crate::repeat::{StoredSpec, next_fire_after};
+use crate::repeat::{MissedFiresPolicy, StoredSpec, first_future_fire, next_fire_after};
 use bytes::Bytes;
 use fred::clients::Client;
 use fred::interfaces::ClientLike;
@@ -292,12 +292,23 @@ where
             }
         };
 
-        // Compute the next fire time *after* this fire. Pass `fire_at_ms`,
-        // not `now_ms`, so for `every:N` we keep regular cadence (N apart)
-        // even if the scheduler tick was late.
-        let next_fire_ms = match next_fire_after(&stored.pattern, fire_at_ms, stored.start_after_ms)
+        // Decode the stored payload bytes back into `T` once. We'll mint a
+        // fresh `Job<T>` per fire below (new ULID, fresh `created_at_ms`,
+        // zeroed `attempt`) so each fire is independently traceable. Decode
+        // here, not per fire — `T` is `DeserializeOwned` and rmp-serde
+        // cloning a deserialized `T` per fire would force `T: Clone` on
+        // every consumer.
+        let payload_bytes = stored.payload.clone();
+
+        // Decide the fire list and the next_fire_ms based on the catch-up
+        // policy. The "fast path" (no catch-up) is when the natural next
+        // fire after `fire_at_ms` is already strictly greater than `now_ms`
+        // — i.e. there's exactly one window due (the on-time one). The
+        // policy logic only kicks in when at least one *additional* window
+        // would have elapsed.
+        let cadence_next = match next_fire_after(&stored.pattern, fire_at_ms, stored.start_after_ms)
         {
-            Ok(v) => v.unwrap_or(0),
+            Ok(v) => v,
             Err(e) => {
                 tracing::warn!(error = %e, spec_key = spec_key, "scheduler: next_fire_after failed; removing spec");
                 self.zrem_spec(client, spec_key).await.ok();
@@ -305,25 +316,28 @@ where
             }
         };
 
-        // Decode the stored payload bytes back into `T`, then mint a fresh
-        // `Job<T>` for this fire (new ULID, fresh `created_at_ms`, zeroed
-        // `attempt`) and re-encode for the wire. The decode-then-re-encode
-        // round trip keeps the wire format identical to what `Producer::add`
-        // emits, so consumers can use a plain `Consumer<T>` regardless of
-        // whether jobs come from one-shot or repeatable producers.
-        let payload: T = match rmp_serde::from_slice(&stored.payload) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!(error = %e, spec_key = spec_key, "scheduler: payload decode failed; removing spec");
-                self.zrem_spec(client, spec_key).await.ok();
-                return Ok(());
+        let policy = stored.missed_fires;
+        let mut fires: Vec<(i64, Bytes)> = Vec::new();
+        let next_fire_ms: u64 = match cadence_next {
+            // Fast path: natural cadence-next is already in the future, so
+            // there are no missed windows. One on-time fire, advance by
+            // cadence — original behavior, regardless of policy.
+            Some(next) if next > now_ms => {
+                let bytes = encode_fire::<T>(&payload_bytes, spec_key)?;
+                fires.push((fire_at_ms as i64, bytes));
+                next
             }
-        };
-        let job_id = ulid::Ulid::new().to_string();
-        let job = Job::with_id(job_id, payload);
-        let bytes = match rmp_serde::to_vec(&job) {
-            Ok(v) => Bytes::from(v),
-            Err(e) => return Err(TickError::Engine(Error::Encode(e))),
+            // Catch-up path: cadence-next is also <= now_ms (or pattern is
+            // exhausted). Dispatch on policy.
+            cadence_next => self.build_catchup_fires::<T>(
+                &stored,
+                spec_key,
+                fire_at_ms,
+                now_ms,
+                cadence_next,
+                policy,
+                &mut fires,
+            )?,
         };
 
         let limit = stored.limit.unwrap_or(0);
@@ -337,13 +351,12 @@ where
             &self.repeat_key,
             &spec_hash_key,
             now_ms as i64,
-            fire_at_ms as i64,
             next_fire_ms as i64,
             self.cfg.max_stream_len,
             spec_key,
             limit,
             end_before_ms,
-            bytes.clone(),
+            &fires,
         );
 
         let res: std::result::Result<Value, _> = client.custom(cmd, args).await;
@@ -360,13 +373,12 @@ where
                     &self.repeat_key,
                     &spec_hash_key,
                     now_ms as i64,
-                    fire_at_ms as i64,
                     next_fire_ms as i64,
                     self.cfg.max_stream_len,
                     spec_key,
                     limit,
                     end_before_ms,
-                    bytes,
+                    &fires,
                 );
                 let _: Value = client
                     .custom(cmd, args)
@@ -380,6 +392,123 @@ where
                 TickError::Permanent(e)
             }),
         }
+    }
+
+    /// Build the fire list and resolve `next_fire_ms` for a spec whose
+    /// cadence-next is *also* in the past (i.e. at least one window has
+    /// been missed beyond the on-time fire). Dispatches on the spec's
+    /// [`MissedFiresPolicy`].
+    #[allow(clippy::too_many_arguments)]
+    fn build_catchup_fires<U>(
+        &self,
+        stored: &StoredSpec,
+        spec_key: &str,
+        fire_at_ms: u64,
+        now_ms: u64,
+        cadence_next: Option<u64>,
+        policy: MissedFiresPolicy,
+        fires: &mut Vec<(i64, Bytes)>,
+    ) -> std::result::Result<u64, TickError>
+    where
+        U: Serialize + DeserializeOwned,
+    {
+        let payload_bytes = &stored.payload;
+        match policy {
+            MissedFiresPolicy::Skip => {
+                // No fires this tick. Just jump next_fire_ms past `now_ms`.
+                Ok(self
+                    .resolve_first_future(stored, fire_at_ms, now_ms, cadence_next)
+                    .unwrap_or(0))
+            }
+            MissedFiresPolicy::FireOnce => {
+                // Emit exactly one job representing the missed window(s),
+                // dated at the original `fire_at_ms`. Then advance past
+                // `now_ms` so we don't immediately reprocess on the next
+                // tick.
+                let bytes = encode_fire::<U>(payload_bytes, spec_key)?;
+                fires.push((fire_at_ms as i64, bytes));
+                Ok(self
+                    .resolve_first_future(stored, fire_at_ms, now_ms, cadence_next)
+                    .unwrap_or(0))
+            }
+            MissedFiresPolicy::FireAll { max_catchup } => {
+                let mut at = fire_at_ms;
+                let mut count: u32 = 0;
+                let mut next_after = cadence_next;
+                loop {
+                    if at > now_ms {
+                        break;
+                    }
+                    if count >= max_catchup {
+                        tracing::warn!(
+                            spec_key,
+                            max_catchup,
+                            "scheduler: FireAll cap reached; advancing past missed fires",
+                        );
+                        break;
+                    }
+                    let bytes = encode_fire::<U>(payload_bytes, spec_key)?;
+                    fires.push((at as i64, bytes));
+                    count += 1;
+                    match next_after {
+                        Some(n) if n > at => {
+                            at = n;
+                            next_after = match next_fire_after(
+                                &stored.pattern,
+                                at,
+                                stored.start_after_ms,
+                            ) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    tracing::warn!(error = %e, spec_key, "scheduler: next_fire_after failed mid-catchup; stopping replay");
+                                    break;
+                                }
+                            };
+                        }
+                        _ => {
+                            // Pattern exhausted (cron with no future
+                            // match) or didn't advance (defensive). Stop.
+                            break;
+                        }
+                    }
+                }
+                // After breaking, decide next_fire_ms: prefer the cursor
+                // we landed on if it's now in the future; otherwise walk
+                // first_future_fire from the current cursor.
+                if at > now_ms {
+                    Ok(at)
+                } else {
+                    Ok(
+                        first_future_fire(&stored.pattern, now_ms, at, stored.start_after_ms)
+                            .unwrap_or(None)
+                            .unwrap_or(0),
+                    )
+                }
+            }
+        }
+    }
+
+    /// Helper used by `Skip` / `FireOnce`: from the cadence_next we already
+    /// computed, walk forward until strictly greater than `now_ms`. Returns
+    /// `None` if the pattern has no future fire.
+    fn resolve_first_future(
+        &self,
+        stored: &StoredSpec,
+        fire_at_ms: u64,
+        now_ms: u64,
+        cadence_next: Option<u64>,
+    ) -> Option<u64> {
+        // If cadence_next is itself already > now_ms, take it. Otherwise
+        // re-walk from fire_at_ms (covers the case where the natural next
+        // fire after `fire_at_ms` is also <= now_ms — common for `every:N`
+        // when the outage is long).
+        if let Some(n) = cadence_next {
+            if n > now_ms {
+                return Some(n);
+            }
+        }
+        first_future_fire(&stored.pattern, now_ms, fire_at_ms, stored.start_after_ms)
+            .unwrap_or(None)
     }
 
     async fn hget_spec(
@@ -466,6 +595,32 @@ where
         let args = eval_release_lock_args(RELEASE_LOCK_SCRIPT, &self.lock_key, &self.cfg.holder_id);
         let _: std::result::Result<Value, _> = client.custom(cmd, args).await;
     }
+}
+
+/// Decode the stored payload bytes into `T`, mint a fresh `Job<T>` (new
+/// ULID, fresh `created_at_ms`, zeroed `attempt`), and re-encode for the
+/// wire. Each catch-up fire gets its own ULID so consumers see distinct
+/// jobs.
+///
+/// The decode-then-re-encode round trip keeps the wire format identical to
+/// what `Producer::add` emits, so consumers can use a plain `Consumer<T>`
+/// regardless of whether jobs come from one-shot or repeatable producers.
+fn encode_fire<U>(payload_bytes: &[u8], spec_key: &str) -> std::result::Result<Bytes, TickError>
+where
+    U: Serialize + DeserializeOwned,
+{
+    let payload: U = match rmp_serde::from_slice(payload_bytes) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, spec_key = spec_key, "scheduler: payload decode failed");
+            return Err(TickError::Engine(Error::Decode(e)));
+        }
+    };
+    let job_id = ulid::Ulid::new().to_string();
+    let job = Job::with_id(job_id, payload);
+    rmp_serde::to_vec(&job)
+        .map(Bytes::from)
+        .map_err(|e| TickError::Engine(Error::Encode(e)))
 }
 
 enum TickError {

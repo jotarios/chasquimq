@@ -10,6 +10,13 @@
 //! in the `{chasqui:<queue>}:repeat:spec:<key>` hash so the scheduler tick
 //! only deserializes due specs (not every spec on every tick).
 //!
+//! Catch-up: when the scheduler returns from extended downtime and finds a
+//! spec whose `next_fire_ms` is many cadences in the past, the per-spec
+//! [`MissedFiresPolicy`] decides whether to drop the missed windows
+//! ([`MissedFiresPolicy::Skip`], default), fire one job to represent them
+//! ([`MissedFiresPolicy::FireOnce`]), or replay every missed window up to a
+//! configured cap ([`MissedFiresPolicy::FireAll`]).
+//!
 //! Key generation: if the user does not supply a stable `key`, we derive one
 //! as `<job_name>::<pattern_signature>` where `pattern_signature` is
 //! `cron:<expr>:<tz>` (or `cron:<expr>:UTC` if no tz) for cron patterns and
@@ -24,6 +31,33 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+
+/// What the scheduler does when it finds a spec whose `next_fire_ms` is more
+/// than one cadence in the past — i.e. the scheduler was down (or partitioned
+/// off the leader lock) long enough to miss multiple windows.
+///
+/// The default is [`MissedFiresPolicy::Skip`] because for most workloads
+/// (email blasts, billing cron, alert fan-out) replaying a backlog of missed
+/// windows after restart is at best confusing and at worst a real incident.
+/// Opt into [`MissedFiresPolicy::FireOnce`] when downstream needs to know a
+/// window was missed but doesn't care how many; opt into
+/// [`MissedFiresPolicy::FireAll`] when each window stands on its own (e.g.
+/// per-window aggregation jobs that idempotently no-op for empty windows).
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum MissedFiresPolicy {
+    /// Default. Drop all missed fires and advance `next_fire_ms` to the
+    /// first future fire strictly after `now`. Safe — no thundering herd.
+    #[default]
+    Skip,
+    /// Fire one job to represent the missed window(s), then advance to
+    /// first-future. Use when downstream needs to know a window was
+    /// missed but doesn't care how many.
+    FireOnce,
+    /// Fire every missed window in this tick. Bounded by `max_catchup`
+    /// to avoid pathological replays after very long outages. After
+    /// `max_catchup` fires, advance to first-future and log a warning.
+    FireAll { max_catchup: u32 },
+}
 
 /// Pattern that drives when a [`RepeatableSpec`] fires.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -76,6 +110,12 @@ impl RepeatPattern {
 /// `T` is the payload type — same constraint as `Producer<T>`. Stored on
 /// Redis as msgpack inside the `{chasqui:<queue>}:repeat:spec:<key>` hash
 /// under field `spec`.
+///
+/// Catch-up after scheduler downtime is governed by
+/// [`RepeatableSpec::missed_fires`]; see [`MissedFiresPolicy`] for the three
+/// options. The default ([`MissedFiresPolicy::Skip`]) drops missed windows
+/// and resumes on the first future fire — safe for any payload, no
+/// thundering herd on restart.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RepeatableSpec<T> {
     /// Stable identifier. Auto-derived from `job_name::pattern_signature` if
@@ -98,6 +138,21 @@ pub struct RepeatableSpec<T> {
     /// Latest fire time in epoch milliseconds. Once `next_fire_ms >
     /// end_before_ms` the spec is removed from the repeat ZSET.
     pub end_before_ms: Option<u64>,
+    /// What to do with windows that elapsed while the scheduler was down.
+    /// Defaults to [`MissedFiresPolicy::Skip`] — drop missed windows and
+    /// resume on the first future fire. See [`MissedFiresPolicy`] for the
+    /// other options.
+    ///
+    /// Trailing optional with `skip_serializing_if` so the field is omitted
+    /// from the encoded msgpack when set to the default — pre-existing
+    /// stored specs (no `missed_fires` field on the wire) continue to decode
+    /// unchanged into the new shape with `Skip`.
+    #[serde(default, skip_serializing_if = "is_default_missed_fires_policy")]
+    pub missed_fires: MissedFiresPolicy,
+}
+
+fn is_default_missed_fires_policy(p: &MissedFiresPolicy) -> bool {
+    matches!(p, MissedFiresPolicy::Skip)
 }
 
 impl<T> RepeatableSpec<T> {
@@ -129,6 +184,13 @@ pub struct RepeatableMeta {
 /// Wire-format spec stored in the repeat:spec:<key> hash. Separate from the
 /// public [`RepeatableSpec<T>`] only because we need a generic-erased shape
 /// to decode into when listing specs without paying for the payload.
+///
+/// **Encoding note**: `rmp-serde` encodes structs as positional arrays.
+/// Trailing optional fields with `#[serde(default, skip_serializing_if =
+/// ...)]` are safe to add — pre-existing encoded specs decode cleanly into
+/// the new shape (the missing trailing slots fall through to `Default`).
+/// **Adding a non-trailing field, or removing the `skip_serializing_if`,
+/// would shift positions and break decode of every spec already in Redis.**
 #[derive(Serialize, Deserialize)]
 pub(crate) struct StoredSpec {
     pub key: String,
@@ -144,6 +206,11 @@ pub(crate) struct StoredSpec {
     /// Number of times the spec has fired so far. Used to enforce `limit`.
     #[serde(default)]
     pub fired: u64,
+    /// Catch-up policy. Trailing-optional with `skip_serializing_if` so
+    /// pre-existing specs (encoded before this field existed) decode
+    /// cleanly with `Skip` (the default). See [`MissedFiresPolicy`].
+    #[serde(default, skip_serializing_if = "is_default_missed_fires_policy")]
+    pub missed_fires: MissedFiresPolicy,
 }
 
 // Hand-rolled `serde_bytes`-compatible module — we don't want to take the
@@ -228,6 +295,55 @@ pub(crate) fn next_fire_after(
         }
     };
     Ok(raw)
+}
+
+/// Hard cap on iterations of [`first_future_fire`]'s advance loop. Protects
+/// against pathological `every:1ms`-with-multi-day-outage replays that would
+/// otherwise spin for tens of millions of iterations on a hot path. At
+/// `every:1s`, 100k iterations covers ~28 hours of catch-up; at `every:1m`,
+/// ~70 days; at `every:1h`, ~11 years — well past any realistic outage.
+/// If exceeded, the function returns `Ok(None)` with a tracing warning and
+/// the scheduler treats the spec as "no future fire" (drops it).
+const FIRST_FUTURE_FIRE_ITERATION_CAP: u32 = 100_000;
+
+/// Walk `next_fire_after` from `fire_at_ms` forward until the result is
+/// strictly greater than `now_ms` (or there is no next fire). Used by the
+/// scheduler's catch-up logic to advance past every missed window in one
+/// step without dispatching jobs for them.
+///
+/// Returns `Ok(None)` if the pattern has no future fire (cron with no
+/// match, `every:0`, or the iteration cap was hit — see
+/// [`FIRST_FUTURE_FIRE_ITERATION_CAP`]). Caller should treat that as
+/// "remove this spec".
+pub(crate) fn first_future_fire(
+    pattern: &RepeatPattern,
+    now_ms: u64,
+    fire_at_ms: u64,
+    start_after_ms: Option<u64>,
+) -> Result<Option<u64>> {
+    let mut at = fire_at_ms;
+    for _ in 0..FIRST_FUTURE_FIRE_ITERATION_CAP {
+        match next_fire_after(pattern, at, start_after_ms)? {
+            Some(next) => {
+                if next > now_ms {
+                    return Ok(Some(next));
+                }
+                if next <= at {
+                    // Defensive: pattern didn't advance (shouldn't happen
+                    // for any valid `RepeatPattern`, but bail rather than
+                    // spin if it does).
+                    return Ok(Some(next));
+                }
+                at = next;
+            }
+            None => return Ok(None),
+        }
+    }
+    tracing::warn!(
+        cap = FIRST_FUTURE_FIRE_ITERATION_CAP,
+        "first_future_fire iteration cap reached; treating pattern as exhausted",
+    );
+    Ok(None)
 }
 
 /// Resolved timezone for a cron spec. Carries either a fixed UTC offset (so
@@ -397,6 +513,7 @@ mod tests {
             limit: None,
             start_after_ms: None,
             end_before_ms: None,
+            missed_fires: MissedFiresPolicy::Skip,
         };
         assert_eq!(s.resolved_key(), "explicit");
     }
@@ -411,6 +528,7 @@ mod tests {
             limit: None,
             start_after_ms: None,
             end_before_ms: None,
+            missed_fires: MissedFiresPolicy::Skip,
         };
         assert_eq!(s.resolved_key(), "my-job::every:1000");
     }
@@ -621,6 +739,154 @@ mod tests {
                 && local.time().hour() == 2
                 && local.time().minute() == 30),
             "got nonexistent local time {local}",
+        );
+    }
+
+    #[test]
+    fn missed_fires_policy_default_is_skip() {
+        let p: MissedFiresPolicy = Default::default();
+        assert_eq!(p, MissedFiresPolicy::Skip);
+    }
+
+    #[test]
+    fn missed_fires_policy_msgpack_round_trip() {
+        for p in [
+            MissedFiresPolicy::Skip,
+            MissedFiresPolicy::FireOnce,
+            MissedFiresPolicy::FireAll { max_catchup: 7 },
+        ] {
+            let bytes = rmp_serde::to_vec(&p).expect("encode");
+            let decoded: MissedFiresPolicy = rmp_serde::from_slice(&bytes).expect("decode");
+            assert_eq!(decoded, p);
+        }
+    }
+
+    #[test]
+    fn first_future_fire_every_skips_to_strictly_after_now() {
+        let pat = RepeatPattern::Every {
+            interval_ms: 60_000,
+        };
+        // fire_at_ms = 1_000_000 (1000s into epoch). now_ms = 1_300_000 (5
+        // missed minutes, the 5th in the past). first_future = 1_360_000
+        // (the 6th, strictly > now).
+        let next = first_future_fire(&pat, 1_300_000, 1_000_000, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(next, 1_360_000);
+        assert!(next > 1_300_000);
+    }
+
+    #[test]
+    fn first_future_fire_every_zero_returns_none() {
+        let pat = RepeatPattern::Every { interval_ms: 0 };
+        assert_eq!(first_future_fire(&pat, 1_000, 0, None).unwrap(), None);
+    }
+
+    #[test]
+    fn first_future_fire_when_already_future_returns_first_step() {
+        // If the pattern's natural next fire from `fire_at_ms` is already
+        // > now_ms, no looping required — return it directly.
+        let pat = RepeatPattern::Every {
+            interval_ms: 60_000,
+        };
+        let next = first_future_fire(&pat, 100, 1_000, None).unwrap().unwrap();
+        assert_eq!(next, 61_000); // 1_000 + 60_000
+    }
+
+    /// Pre-this-PR shape: the legacy `StoredSpec` without the
+    /// `missed_fires` field. Verifies that an existing rmp-serde-encoded
+    /// spec already in Redis decodes cleanly into the new shape with
+    /// `missed_fires = Skip` (the default). This is the deploy-safety test
+    /// — if it ever fails, in-place upgrades will lose all live recurring
+    /// jobs.
+    #[derive(Serialize)]
+    struct LegacyStoredSpec {
+        key: String,
+        job_name: String,
+        pattern: RepeatPattern,
+        #[serde(with = "serde_bytes")]
+        payload: Vec<u8>,
+        limit: Option<u64>,
+        start_after_ms: Option<u64>,
+        end_before_ms: Option<u64>,
+        fired: u64,
+    }
+
+    #[test]
+    fn legacy_storedspec_decodes_with_default_policy() {
+        let legacy = LegacyStoredSpec {
+            key: "legacy-key".into(),
+            job_name: "legacy-job".into(),
+            pattern: RepeatPattern::Every { interval_ms: 1_000 },
+            payload: vec![0xC0], // msgpack nil
+            limit: None,
+            start_after_ms: None,
+            end_before_ms: Some(9_999_999_999),
+            fired: 42,
+        };
+        let bytes = rmp_serde::to_vec(&legacy).expect("encode legacy");
+        let decoded: StoredSpec = rmp_serde::from_slice(&bytes).expect("decode into new shape");
+        assert_eq!(decoded.key, "legacy-key");
+        assert_eq!(decoded.job_name, "legacy-job");
+        assert_eq!(decoded.fired, 42);
+        assert_eq!(decoded.missed_fires, MissedFiresPolicy::Skip);
+    }
+
+    #[test]
+    fn new_storedspec_with_default_policy_omits_field_on_wire() {
+        // skip_serializing_if + Default::default keeps the encoded shape
+        // byte-compatible with the legacy form when the policy is Skip.
+        // This is what makes the back-compat work in *both* directions:
+        // an old reader sees no extra trailing field on a default-policy
+        // spec, and a new reader sees no field at all and falls back to
+        // Default.
+        let new_default = StoredSpec {
+            key: "k".into(),
+            job_name: "j".into(),
+            pattern: RepeatPattern::Every { interval_ms: 1_000 },
+            payload: vec![0xC0],
+            limit: None,
+            start_after_ms: None,
+            end_before_ms: None,
+            fired: 0,
+            missed_fires: MissedFiresPolicy::Skip,
+        };
+        let legacy_eq = LegacyStoredSpec {
+            key: "k".into(),
+            job_name: "j".into(),
+            pattern: RepeatPattern::Every { interval_ms: 1_000 },
+            payload: vec![0xC0],
+            limit: None,
+            start_after_ms: None,
+            end_before_ms: None,
+            fired: 0,
+        };
+        let new_bytes = rmp_serde::to_vec(&new_default).expect("encode new");
+        let legacy_bytes = rmp_serde::to_vec(&legacy_eq).expect("encode legacy");
+        assert_eq!(
+            new_bytes, legacy_bytes,
+            "default-policy StoredSpec must encode identically to the legacy 8-field shape",
+        );
+    }
+
+    #[test]
+    fn new_storedspec_with_non_default_policy_round_trips() {
+        let s = StoredSpec {
+            key: "k".into(),
+            job_name: "j".into(),
+            pattern: RepeatPattern::Every { interval_ms: 1_000 },
+            payload: vec![0xC0],
+            limit: None,
+            start_after_ms: None,
+            end_before_ms: None,
+            fired: 0,
+            missed_fires: MissedFiresPolicy::FireAll { max_catchup: 12 },
+        };
+        let bytes = rmp_serde::to_vec(&s).expect("encode");
+        let decoded: StoredSpec = rmp_serde::from_slice(&bytes).expect("decode");
+        assert_eq!(
+            decoded.missed_fires,
+            MissedFiresPolicy::FireAll { max_catchup: 12 }
         );
     }
 }

@@ -374,6 +374,7 @@ impl<T: Serialize> Producer<T> {
             start_after_ms: spec.start_after_ms,
             end_before_ms: spec.end_before_ms,
             fired: 0,
+            missed_fires: spec.missed_fires,
         };
         let stored_bytes = Bytes::from(rmp_serde::to_vec(&stored)?);
         let next_fire_i64 = run_at_ms_as_i64(next_fire)?;

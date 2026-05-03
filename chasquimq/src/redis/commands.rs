@@ -216,69 +216,91 @@ redis.call('DEL', KEYS[2])
 return removed
 "#;
 
-/// Schedule one fire of a repeatable spec, in a single round trip.
+/// Schedule one or more fires of a repeatable spec, in a single round trip.
 ///
 /// The Rust scheduler picks the due spec out of the repeat ZSET, decodes
-/// the spec hash, computes `next_fire_ms` and the encoded job payload off-
-/// line, and hands all of it to this script. The script:
-/// 1. If `fire_at_ms <= now_ms`, XADDs the encoded `Job<T>` to the stream
-///    (immediate dispatch). Otherwise ZADDs it to the delayed ZSET so the
-///    Promoter picks it up at the right time.
-/// 2. Increments the `fired` counter inside the spec hash.
-/// 3. If `limit > 0` and `fired >= limit`, OR if `next_fire_ms == 0`
-///    (caller's signal that there's no more time left for this pattern),
-///    OR if `next_fire_ms > end_before_ms`, removes the spec entirely.
-///    Otherwise updates the repeat ZSET score to `next_fire_ms`.
+/// the spec hash, builds a list of (fire_at_ms, encoded `Job<T>` bytes)
+/// pairs (one for the on-time fire, plus extras for any catch-up windows
+/// when [`crate::repeat::MissedFiresPolicy::FireAll`] is set), and hands
+/// it all to this script in a single call. The script:
+///
+/// 1. For each `(fire_at_ms, payload)` pair, dispatches it: XADD into the
+///    stream when `fire_at_ms <= now_ms`, otherwise ZADD into the delayed
+///    ZSET (so the Promoter picks it up at the right time). HINCRBY's
+///    `fired` once per dispatched fire. If `fired` would exceed `limit`,
+///    stops dispatching mid-batch and falls through to removal.
+/// 2. After dispatching, decides removal vs reschedule. Removes the spec
+///    entirely (ZREM + DEL) when the limit is hit, when `next_fire_ms >
+///    end_before_ms`, or when `next_fire_ms <= 0` (caller's signal that
+///    the pattern has no more fires). Otherwise ZADDs `next_fire_ms` as
+///    the new score in the repeat ZSET.
 ///
 /// Lua serialization gives us a strong invariant: the scheduler's
-/// "decode → fire → reschedule" sequence cannot be interrupted by another
-/// scheduler tick (the leader-election lock already excludes that, but
-/// this is belt-and-suspenders for the rare ABA case across leader
-/// handover).
+/// "decode → fire (one or many) → reschedule" sequence cannot be
+/// interrupted by another scheduler tick. Catch-up replays of N missed
+/// windows happen atomically with the `next_fire_ms` ZADD — no partial
+/// state is ever visible if the caller crashes mid-script. The leader-
+/// election lock already excludes concurrent scheduler ticks, but this
+/// is belt-and-suspenders for the rare ABA case across leader handover.
 ///
 /// KEYS[1] = stream key
 /// KEYS[2] = delayed ZSET
 /// KEYS[3] = repeat ZSET
 /// KEYS[4] = spec hash
 /// ARGV[1] = now_ms
-/// ARGV[2] = fire_at_ms (when this iteration should run; if <= now_ms,
-///           dispatch immediately; otherwise schedule to the delayed ZSET)
-/// ARGV[3] = next_fire_ms (when the next iteration should fire; 0 = no
+/// ARGV[2] = next_fire_ms (when the next iteration should fire; 0 = no
 ///           more iterations, remove the spec)
-/// ARGV[4] = max_stream_len (for XADD MAXLEN ~)
-/// ARGV[5] = spec_key (member in the repeat ZSET)
-/// ARGV[6] = limit (0 = unlimited)
-/// ARGV[7] = end_before_ms (0 = no end-bound)
-/// ARGV[8] = encoded `Job<T>` bytes
+/// ARGV[3] = max_stream_len (for XADD MAXLEN ~)
+/// ARGV[4] = spec_key (member in the repeat ZSET)
+/// ARGV[5] = limit (0 = unlimited)
+/// ARGV[6] = end_before_ms (0 = no end-bound)
+/// ARGV[7] = fire_count (N — number of (fire_at_ms, payload) pairs that
+///           follow). 0 is legal (Skip policy with no on-time fire — just
+///           reschedule).
+/// ARGV[8 .. 7+2*N] = interleaved `(fire_at_ms_i, payload_i)` pairs, in
+///                    chronological order. Each pair is two ARGV slots.
 ///
 /// Returns `{fired_now, removed}` where:
-/// - `fired_now` is `1` if a job was dispatched (XADD or ZADD), `0`
-///   otherwise (would be 0 only if `fire_at_ms == 0` — currently unused).
+/// - `fired_now` is the count of jobs actually dispatched this call
+///   (XADD + ZADD combined). 0 when ARGV[7] is 0 or when `limit` was
+///   already exhausted before this call.
 /// - `removed` is `1` if the spec was removed (limit hit / end_before
 ///   passed / next_fire_ms == 0), `0` otherwise.
 pub(crate) const SCHEDULE_REPEATABLE_SCRIPT: &str = r#"
 local now_ms = tonumber(ARGV[1])
-local fire_at_ms = tonumber(ARGV[2])
-local next_fire_ms = tonumber(ARGV[3])
-local max_stream_len = tonumber(ARGV[4])
-local spec_key = ARGV[5]
-local limit = tonumber(ARGV[6])
-local end_before_ms = tonumber(ARGV[7])
-local payload = ARGV[8]
+local next_fire_ms = tonumber(ARGV[2])
+local max_stream_len = tonumber(ARGV[3])
+local spec_key = ARGV[4]
+local limit = tonumber(ARGV[5])
+local end_before_ms = tonumber(ARGV[6])
+local fire_count = tonumber(ARGV[7])
 
 local fired_now = 0
-if fire_at_ms <= now_ms then
-  redis.call('XADD', KEYS[1], 'MAXLEN', '~', max_stream_len, '*', 'd', payload)
-  fired_now = 1
-else
-  redis.call('ZADD', KEYS[2], fire_at_ms, payload)
-  fired_now = 1
+local hit_limit = false
+local i = 0
+while i < fire_count do
+  local fire_at_ms = tonumber(ARGV[8 + i * 2])
+  local payload = ARGV[9 + i * 2]
+  if limit > 0 then
+    local fired_so_far = tonumber(redis.call('HGET', KEYS[4], 'fired')) or 0
+    if fired_so_far >= limit then
+      hit_limit = true
+      break
+    end
+  end
+  if fire_at_ms <= now_ms then
+    redis.call('XADD', KEYS[1], 'MAXLEN', '~', max_stream_len, '*', 'd', payload)
+  else
+    redis.call('ZADD', KEYS[2], fire_at_ms, payload)
+  end
+  redis.call('HINCRBY', KEYS[4], 'fired', 1)
+  fired_now = fired_now + 1
+  i = i + 1
 end
 
-local fired = redis.call('HINCRBY', KEYS[4], 'fired', 1)
-
+local fired = tonumber(redis.call('HGET', KEYS[4], 'fired')) or 0
 local removed = 0
-local exhausted = (limit > 0 and fired >= limit)
+local exhausted = (limit > 0 and fired >= limit) or hit_limit
 local past_end = (end_before_ms > 0 and next_fire_ms > end_before_ms)
 local no_next = (next_fire_ms <= 0)
 if exhausted or past_end or no_next then
@@ -705,30 +727,32 @@ pub(crate) fn evalsha_schedule_repeatable_args(
     repeat_key: &str,
     spec_hash_key: &str,
     now_ms: i64,
-    fire_at_ms: i64,
     next_fire_ms: i64,
     max_stream_len: u64,
     spec_key: &str,
     limit: u64,
     end_before_ms: u64,
-    bytes: Bytes,
+    fires: &[(i64, Bytes)],
 ) -> Vec<Value> {
-    vec![
-        Value::from(sha),
-        Value::from(4_i64),
-        Value::from(stream_key),
-        Value::from(delayed_key),
-        Value::from(repeat_key),
-        Value::from(spec_hash_key),
-        Value::from(now_ms),
-        Value::from(fire_at_ms),
-        Value::from(next_fire_ms),
-        Value::from(max_stream_len as i64),
-        Value::from(spec_key),
-        Value::from(limit as i64),
-        Value::from(end_before_ms as i64),
-        Value::Bytes(bytes),
-    ]
+    let mut args: Vec<Value> = Vec::with_capacity(12 + fires.len() * 2);
+    args.push(Value::from(sha));
+    args.push(Value::from(4_i64));
+    args.push(Value::from(stream_key));
+    args.push(Value::from(delayed_key));
+    args.push(Value::from(repeat_key));
+    args.push(Value::from(spec_hash_key));
+    args.push(Value::from(now_ms));
+    args.push(Value::from(next_fire_ms));
+    args.push(Value::from(max_stream_len as i64));
+    args.push(Value::from(spec_key));
+    args.push(Value::from(limit as i64));
+    args.push(Value::from(end_before_ms as i64));
+    args.push(Value::from(fires.len() as i64));
+    for (fire_at_ms, bytes) in fires {
+        args.push(Value::from(*fire_at_ms));
+        args.push(Value::Bytes(bytes.clone()));
+    }
+    args
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -739,30 +763,32 @@ pub(crate) fn eval_schedule_repeatable_args(
     repeat_key: &str,
     spec_hash_key: &str,
     now_ms: i64,
-    fire_at_ms: i64,
     next_fire_ms: i64,
     max_stream_len: u64,
     spec_key: &str,
     limit: u64,
     end_before_ms: u64,
-    bytes: Bytes,
+    fires: &[(i64, Bytes)],
 ) -> Vec<Value> {
-    vec![
-        Value::from(script),
-        Value::from(4_i64),
-        Value::from(stream_key),
-        Value::from(delayed_key),
-        Value::from(repeat_key),
-        Value::from(spec_hash_key),
-        Value::from(now_ms),
-        Value::from(fire_at_ms),
-        Value::from(next_fire_ms),
-        Value::from(max_stream_len as i64),
-        Value::from(spec_key),
-        Value::from(limit as i64),
-        Value::from(end_before_ms as i64),
-        Value::Bytes(bytes),
-    ]
+    let mut args: Vec<Value> = Vec::with_capacity(12 + fires.len() * 2);
+    args.push(Value::from(script));
+    args.push(Value::from(4_i64));
+    args.push(Value::from(stream_key));
+    args.push(Value::from(delayed_key));
+    args.push(Value::from(repeat_key));
+    args.push(Value::from(spec_hash_key));
+    args.push(Value::from(now_ms));
+    args.push(Value::from(next_fire_ms));
+    args.push(Value::from(max_stream_len as i64));
+    args.push(Value::from(spec_key));
+    args.push(Value::from(limit as i64));
+    args.push(Value::from(end_before_ms as i64));
+    args.push(Value::from(fires.len() as i64));
+    for (fire_at_ms, bytes) in fires {
+        args.push(Value::from(*fire_at_ms));
+        args.push(Value::Bytes(bytes.clone()));
+    }
+    args
 }
 
 pub(crate) fn evalsha_acquire_lock_args(
