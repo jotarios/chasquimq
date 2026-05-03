@@ -1,7 +1,7 @@
 use crate::config::RetryConfig;
 use crate::error::{Error, Result};
 use crate::events::EventsWriter;
-use crate::job::{BackoffKind, BackoffSpec, Job};
+use crate::job::{BackoffKind, BackoffSpec};
 use crate::metrics::{self, MetricsSink, RetryScheduled};
 use crate::redis::commands::{
     RETRY_RESCHEDULE_SCRIPT, eval_retry_args, evalsha_retry_args, script_load_args,
@@ -11,7 +11,6 @@ use bytes::Bytes;
 use fred::clients::Client;
 use fred::interfaces::ClientLike;
 use fred::types::{ClusterHash, CustomCommand, Value};
-use serde::de::IgnoredAny;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -30,6 +29,12 @@ const RETRY_REDIS_BASE_MS: u64 = 50;
 
 #[derive(Debug)]
 pub(crate) struct RetryRelocate {
+    /// The job's stable id, plumbed from the worker's already-decoded
+    /// `Job<T>` so the relocator hot path doesn't have to msgpack-decode
+    /// `job_bytes` just to read the id field. Carried for the events-stream
+    /// `retry-scheduled` emit; placed first so debug formatting and any
+    /// field-by-field logging surface the most recognisable handle.
+    pub job_id: String,
     pub entry_id: StreamEntryId,
     pub job_bytes: Bytes,
     pub run_at_ms: i64,
@@ -52,6 +57,7 @@ pub(crate) struct RetryRelocatorConfig {
 
 pub(crate) async fn enqueue(
     tx: &mpsc::Sender<RetryRelocate>,
+    job_id: String,
     entry_id: StreamEntryId,
     job_bytes: Bytes,
     run_at_ms: i64,
@@ -60,6 +66,7 @@ pub(crate) async fn enqueue(
 ) {
     if tx
         .send(RetryRelocate {
+            job_id,
             entry_id,
             job_bytes,
             run_at_ms,
@@ -95,18 +102,18 @@ pub(crate) async fn run_retry_relocator(
                 let sink = &*cfg.metrics;
                 metrics::dispatch("retry_scheduled", || sink.retry_scheduled(event));
                 // Mirror the MetricsSink gating: only emit on the actual
-                // reschedule, never on a lost XACKDEL race. We need the
-                // job id, which the relocator doesn't carry — decode it
-                // from the encoded payload bytes. Cost: one rmp_serde
-                // decode of just the `id` field via `IgnoredAny`. If the
-                // bytes don't decode (corrupt payload), skip the event;
-                // the metric still fires.
+                // reschedule, never on a lost XACKDEL race. The job id is
+                // plumbed in on the `RetryRelocate` so the relocator hot
+                // path doesn't have to msgpack-decode `job_bytes` just to
+                // read the id field.
                 if cfg.events.is_enabled() {
-                    if let Some(job_id) = extract_job_id(&relocate.job_bytes) {
-                        cfg.events
-                            .emit_retry_scheduled(&job_id, relocate.attempt, relocate.backoff_ms)
-                            .await;
-                    }
+                    cfg.events
+                        .emit_retry_scheduled(
+                            &relocate.job_id,
+                            relocate.attempt,
+                            relocate.backoff_ms,
+                        )
+                        .await;
                 }
             }
             Ok(false) => {
@@ -194,16 +201,6 @@ fn script_returned_one(v: &Value) -> bool {
         Value::Bytes(b) => b.as_ref() == b"1",
         _ => false,
     }
-}
-
-/// Decode a `JobId` from a msgpack-encoded `Job<T>` payload without
-/// allocating for the (ignored) `payload` field. Returns `None` for malformed
-/// bytes — used by the events emit on the retry-scheduled path so the
-/// MetricsSink event still fires even if the events-stream emit can't.
-/// Mirrors the helper of the same name in `promoter.rs`.
-fn extract_job_id(bytes: &[u8]) -> Option<String> {
-    let job: Job<IgnoredAny> = rmp_serde::from_slice(bytes).ok()?;
-    Some(job.id)
 }
 
 async fn load_script(client: &Client) -> Result<String> {
@@ -547,5 +544,31 @@ mod tests {
             bytes::Bytes::from_static(b"1")
         )));
         assert!(!script_returned_one(&Value::Null));
+    }
+
+    /// `enqueue` is the only construction site for `RetryRelocate` outside
+    /// of test code. Pin the contract that the caller-supplied `job_id`
+    /// is plumbed onto the struct verbatim so the relocator hot path can
+    /// consume `relocate.job_id` directly without a second msgpack decode.
+    #[tokio::test]
+    async fn enqueue_plumbs_job_id_onto_relocate() {
+        let (tx, mut rx) = mpsc::channel::<RetryRelocate>(1);
+        let entry_id: StreamEntryId = std::sync::Arc::from("1700000000000-0");
+        enqueue(
+            &tx,
+            "job-abc-123".to_string(),
+            entry_id.clone(),
+            Bytes::from_static(b"opaque"),
+            1_700_000_000_500,
+            3,
+            500,
+        )
+        .await;
+        let received = rx.recv().await.expect("relocate sent");
+        assert_eq!(received.job_id, "job-abc-123");
+        assert_eq!(received.entry_id, entry_id);
+        assert_eq!(received.run_at_ms, 1_700_000_000_500);
+        assert_eq!(received.attempt, 3);
+        assert_eq!(received.backoff_ms, 500);
     }
 }

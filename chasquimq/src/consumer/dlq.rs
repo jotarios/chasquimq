@@ -1,6 +1,5 @@
 use crate::error::{Error, Result};
 use crate::events::EventsWriter;
-use crate::job::Job;
 use crate::metrics::{self, DlqRouted, MetricsSink};
 use crate::redis::commands::{xackdel_args, xadd_dlq_args};
 use crate::redis::parse::StreamEntryId;
@@ -8,7 +7,6 @@ use bytes::Bytes;
 use fred::clients::Client;
 use fred::interfaces::ClientLike;
 use fred::types::{ClusterHash, CustomCommand, Value};
-use serde::de::IgnoredAny;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -22,6 +20,14 @@ pub(crate) use crate::metrics::DlqReason;
 
 #[derive(Debug)]
 pub(crate) struct DlqRelocate {
+    /// The job's stable id, plumbed from the upstream call site so the
+    /// relocator hot path doesn't have to msgpack-decode `payload` just
+    /// to read the id field. Carried for the events-stream `dlq` emit;
+    /// placed first so debug formatting and any field-by-field logging
+    /// surface the most recognisable handle. May be empty (`""`) for
+    /// reader-side DLQ routes where the payload never decoded — see the
+    /// emit-side comment in `run_relocator` for the contract.
+    pub job_id: String,
     pub entry_id: StreamEntryId,
     pub payload: Bytes,
     pub reason: DlqReason,
@@ -42,6 +48,7 @@ pub(crate) struct DlqRelocatorConfig {
 
 pub(crate) async fn enqueue(
     dlq_tx: &mpsc::Sender<DlqRelocate>,
+    job_id: String,
     entry_id: StreamEntryId,
     payload: Bytes,
     reason: DlqReason,
@@ -49,6 +56,7 @@ pub(crate) async fn enqueue(
 ) {
     if dlq_tx
         .send(DlqRelocate {
+            job_id,
             entry_id,
             payload,
             reason,
@@ -81,11 +89,13 @@ pub(crate) async fn run_relocator(
                 // fires so subscribers can count "DLQ-routed entries"
                 // without losing the malformed bucket. The event id will
                 // be empty in that case; consumers should treat empty id
-                // as "decode-side reject, no recoverable id".
+                // as "decode-side reject, no recoverable id". The id is
+                // plumbed in on the `DlqRelocate` so the relocator hot
+                // path doesn't have to msgpack-decode `payload` just to
+                // read the id field.
                 if cfg.events.is_enabled() {
-                    let job_id = extract_job_id(&relocate.payload).unwrap_or_default();
                     cfg.events
-                        .emit_dlq(&job_id, relocate.reason.as_str(), relocate.attempt)
+                        .emit_dlq(&relocate.job_id, relocate.reason.as_str(), relocate.attempt)
                         .await;
                 }
             }
@@ -94,16 +104,6 @@ pub(crate) async fn run_relocator(
             }
         }
     }
-}
-
-/// Decode a `JobId` from a msgpack-encoded `Job<T>` payload without
-/// allocating for the (ignored) `payload` field. Returns `None` for
-/// malformed bytes — used so a `dlq` event still fires for reader-side
-/// rejects (with an empty id) without panicking on garbage. Mirrors the
-/// helper of the same name in `promoter.rs` and `retry.rs`.
-fn extract_job_id(bytes: &[u8]) -> Option<String> {
-    let job: Job<IgnoredAny> = rmp_serde::from_slice(bytes).ok()?;
-    Some(job.id)
 }
 
 async fn relocate_with_retry(
@@ -160,4 +160,59 @@ async fn relocate_once(
         .map_err(Error::Redis)?;
     let _: Vec<Value> = pipeline.all().await.map_err(Error::Redis)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `enqueue` is the only construction site for `DlqRelocate` outside
+    /// of test code. Pin the contract that the caller-supplied `job_id`
+    /// is plumbed onto the struct verbatim so the relocator hot path can
+    /// consume `relocate.job_id` directly without a second msgpack decode.
+    #[tokio::test]
+    async fn enqueue_plumbs_job_id_onto_relocate() {
+        let (tx, mut rx) = mpsc::channel::<DlqRelocate>(1);
+        let entry_id: StreamEntryId = std::sync::Arc::from("1700000000000-0");
+        enqueue(
+            &tx,
+            "job-xyz-789".to_string(),
+            entry_id.clone(),
+            Bytes::from_static(b"opaque"),
+            DlqReason::RetriesExhausted,
+            5,
+        )
+        .await;
+        let received = rx.recv().await.expect("relocate sent");
+        assert_eq!(received.job_id, "job-xyz-789");
+        assert_eq!(received.entry_id, entry_id);
+        assert_eq!(received.attempt, 5);
+        assert!(matches!(received.reason, DlqReason::RetriesExhausted));
+    }
+
+    /// Reader-side DLQ routes (malformed / oversize / decode-fail) plumb
+    /// `String::new()` as the job id because the payload never decoded
+    /// into a `Job<T>`. The struct must accept the empty string verbatim
+    /// — the events-stream emit treats `""` as "decode-side reject, no
+    /// recoverable id", and that contract relies on the field being
+    /// untouched in transit.
+    #[tokio::test]
+    async fn enqueue_accepts_empty_job_id_for_reader_side_routes() {
+        let (tx, mut rx) = mpsc::channel::<DlqRelocate>(1);
+        let entry_id: StreamEntryId = std::sync::Arc::from("1700000000000-0");
+        enqueue(
+            &tx,
+            String::new(),
+            entry_id,
+            Bytes::new(),
+            DlqReason::Malformed {
+                reason: "missing payload field",
+            },
+            0,
+        )
+        .await;
+        let received = rx.recv().await.expect("relocate sent");
+        assert_eq!(received.job_id, "");
+        assert_eq!(received.attempt, 0);
+    }
 }

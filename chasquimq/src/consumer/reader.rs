@@ -149,8 +149,19 @@ where
         EntryShape::Ok(e) => e,
         EntryShape::MalformedWithId { id, reason } => {
             tracing::warn!(entry_id = %id, reason, "malformed stream entry; routing to DLQ");
-            // Reader-side DLQ: handler never ran, so attempt is 0.
-            dlq::enqueue(dlq_tx, id, Bytes::new(), DlqReason::Malformed { reason }, 0).await;
+            // Reader-side DLQ: handler never ran, so attempt is 0. No
+            // recoverable job id (the entry never decoded into a `Job<T>`),
+            // so plumb the empty string — the event-emit contract treats
+            // `""` as "decode-side reject".
+            dlq::enqueue(
+                dlq_tx,
+                String::new(),
+                id,
+                Bytes::new(),
+                DlqReason::Malformed { reason },
+                0,
+            )
+            .await;
             return DispatchFlow::Continue;
         }
         EntryShape::Unrecoverable => {
@@ -163,8 +174,13 @@ where
 
     if entry.payload.len() > cfg.max_payload_bytes {
         tracing::warn!(entry_id = %entry.id, size = entry.payload.len(), max = cfg.max_payload_bytes, "payload exceeds max_payload_bytes; routing to DLQ");
+        // Oversize: the payload was never decoded into a `Job<T>`
+        // (we'd be doing the work the size cap exists to prevent), so
+        // plumb the empty job id — the event-emit contract treats `""`
+        // as "decode-side reject".
         dlq::enqueue(
             dlq_tx,
+            String::new(),
             entry.id,
             entry.payload,
             DlqReason::OversizePayload,
@@ -178,7 +194,16 @@ where
         Ok(j) => j,
         Err(decode_err) => {
             tracing::warn!(entry_id = %entry.id, error = %decode_err, "decode failed; routing to DLQ");
-            dlq::enqueue(dlq_tx, entry.id, entry.payload, DlqReason::DecodeFailed, 0).await;
+            // Decode failed: by definition there's no recoverable job id.
+            dlq::enqueue(
+                dlq_tx,
+                String::new(),
+                entry.id,
+                entry.payload,
+                DlqReason::DecodeFailed,
+                0,
+            )
+            .await;
             return DispatchFlow::Continue;
         }
     };
@@ -201,8 +226,11 @@ where
     if next_attempt > max_attempts {
         // Retries-exhausted-on-arrival: carry the prior attempt count so
         // operators can see how many tries the job got before being shed.
+        // The job decoded successfully, so plumb its id directly — the
+        // relocator no longer needs to re-decode `payload` on the hot path.
         dlq::enqueue(
             dlq_tx,
+            job.id.clone(),
             entry.id,
             entry.payload,
             DlqReason::RetriesExhausted,

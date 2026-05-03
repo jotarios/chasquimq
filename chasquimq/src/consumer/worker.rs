@@ -166,6 +166,7 @@ async fn on_handler_failure<T: Serialize + Send + 'static>(
     if next_attempt >= max_attempts {
         dlq::enqueue(
             &wiring.dlq_tx,
+            job.id.clone(),
             entry_id,
             encoded,
             DlqReason::RetriesExhausted,
@@ -195,6 +196,7 @@ async fn on_handler_failure<T: Serialize + Send + 'static>(
     let run_at_i64 = i64::try_from(run_at).unwrap_or(i64::MAX);
     retry::enqueue(
         &wiring.retry_tx,
+        job.id.clone(),
         entry_id,
         encoded_with_bumped,
         run_at_i64,
