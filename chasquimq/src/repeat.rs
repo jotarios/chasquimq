@@ -40,6 +40,10 @@ pub enum RepeatPattern {
     /// IANA names are **DST-aware**: `0 2 * * *` in `America/New_York` fires
     /// at 02:00 local on both sides of spring-forward / fall-back, with the
     /// underlying UTC instant shifting by one hour. Fixed offsets are not.
+    ///
+    /// On fall-back ambiguous local times (e.g. New York `01:30` on the
+    /// November DST end, which exists twice — once as EDT and once as EST),
+    /// the **earlier** of the two UTC instants is selected.
     Cron {
         expression: String,
         tz: Option<String>,
@@ -52,6 +56,10 @@ impl RepeatPattern {
     /// Stable signature used to derive a default key when the caller doesn't
     /// supply one. Two specs with the same `job_name` and the same signature
     /// are considered the same recurring job — re-upserting overwrites.
+    ///
+    /// IANA aliases (e.g. `US/Eastern` and `America/New_York`) produce
+    /// distinct signatures even though they resolve to the same zone — pass
+    /// an explicit `key` if you need alias-collapse.
     pub fn signature(&self) -> String {
         match self {
             RepeatPattern::Cron { expression, tz } => {
@@ -254,32 +262,36 @@ fn next_cron_after(expression: &str, tz: Option<&str>, from_ms: u64) -> Result<O
         .single()
         .ok_or_else(|| Error::Config("invalid from-time".into()))?;
 
-    // Dispatch on the resolved zone kind so each branch instantiates
-    // `find_next_occurrence` with a concrete `TimeZone` impl. `croner` is
-    // generic over `TimeZone` so both branches use the same call shape.
-    let kind = parse_tz(tz)?;
-    let next_ms = match kind {
-        TzKind::Fixed(off) => {
-            let from = utc.with_timezone(&off);
-            let next = cron
-                .find_next_occurrence(&from, false)
-                .map_err(|e| Error::Config(format!("cron scheduling failed: {e}")))?;
-            next.timestamp_millis()
-        }
-        TzKind::Named(zone) => {
-            let from = utc.with_timezone(&zone);
-            let next = cron
-                .find_next_occurrence(&from, false)
-                .map_err(|e| Error::Config(format!("cron scheduling failed: {e}")))?;
-            // Convert back to UTC to flatten to a single epoch-ms value;
-            // `chrono` handles DST gaps/overlaps internally — the local
-            // time `croner` returns has been chosen as a real wall-clock
-            // moment in `zone`, so this conversion is total.
-            next.with_timezone(&Utc).timestamp_millis()
-        }
+    // Dispatch once on the resolved zone kind so each branch instantiates
+    // `find_next_occurrence` with a concrete `TimeZone` impl — no dynamic
+    // dispatch on the hot path. `next_in_zone` does the per-zone work.
+    let next_ms = match parse_tz(tz)? {
+        TzKind::Fixed(off) => next_in_zone(&cron, utc, off)?,
+        TzKind::Named(zone) => next_in_zone(&cron, utc, zone)?,
     };
 
-    Ok(Some(next_ms.max(0) as u64))
+    Ok(Some(next_ms))
+}
+
+/// Convert a UTC instant into the given zone, ask croner for the next
+/// occurrence, and project back to epoch ms. Generic over `TimeZone` so
+/// both `FixedOffset` and `chrono_tz::Tz` callers monomorphize cleanly.
+///
+/// `chrono` handles DST gaps/overlaps internally — the local time croner
+/// returns is always a real wall-clock moment in `tz`, so the round-trip
+/// back to UTC is total (no `LocalResult::None`/`Ambiguous` handling
+/// required here).
+fn next_in_zone<Tz: chrono::TimeZone>(
+    cron: &croner::Cron,
+    from_utc: chrono::DateTime<chrono::Utc>,
+    tz: Tz,
+) -> Result<u64> {
+    use chrono::Utc;
+    let from_local = from_utc.with_timezone(&tz);
+    let next_local = cron
+        .find_next_occurrence(&from_local, false)
+        .map_err(|e| Error::Config(format!("cron scheduling failed: {e}")))?;
+    Ok(next_local.with_timezone(&Utc).timestamp_millis().max(0) as u64)
 }
 
 /// Resolve a user-supplied tz string to a [`TzKind`]. DST-aware for IANA
@@ -537,6 +549,41 @@ mod tests {
         let from_ms: u64 = 1_781_481_600_000; // 2026-06-15 00:00 UTC
         let next = next_fire_after(&pat, from_ms, None).unwrap().unwrap();
         assert_eq!(next, 1_781_510_400_000_u64); // 2026-06-15 08:00 UTC
+    }
+
+    #[test]
+    fn next_fire_after_cron_iana_dst_overlap_picks_consistent_instant() {
+        // Behavior pin: on the NYC fall-back transition, the local time
+        // `01:30` happens twice — once at 01:30 EDT (UTC-4) and again at
+        // 01:30 EST (UTC-5). For 2026, that transition is on
+        // 2026-11-01 02:00 EDT → 01:00 EST.
+        //
+        //   First occurrence:  01:30 EDT = 2026-11-01 05:30 UTC = 1_793_511_000_000 ms
+        //   Second occurrence: 01:30 EST = 2026-11-01 06:30 UTC = 1_793_514_600_000 ms
+        //
+        // Whichever of the two croner picks, we pin it so a future bump
+        // doesn't silently flip the behavior.
+        let pat = RepeatPattern::Cron {
+            expression: "30 1 * * *".into(),
+            tz: Some("America/New_York".into()),
+        };
+        // 2026-11-01 04:00 UTC = 2026-11-01 00:00 EDT (well before any
+        // 01:30 fire on the transition day).
+        let from_ms: u64 = 1_793_505_600_000;
+        let next = next_fire_after(&pat, from_ms, None).unwrap().unwrap();
+
+        let first_edt: u64 = 1_793_511_000_000; // 01:30 EDT (first wall-clock pass)
+        let second_est: u64 = 1_793_514_600_000; // 01:30 EST (second wall-clock pass)
+
+        assert!(
+            next == first_edt || next == second_est,
+            "expected {first_edt} or {second_est}, got {next}",
+        );
+        // Pinned: croner picks the **earlier** of the two ambiguous UTC
+        // instants (01:30 EDT, the first wall-clock occurrence in local
+        // time). If a croner upgrade flips this, this assertion fires
+        // and the doc on `RepeatPattern::Cron` needs updating in lockstep.
+        assert_eq!(next, first_edt);
     }
 
     #[test]
