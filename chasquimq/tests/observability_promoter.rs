@@ -139,6 +139,7 @@ async fn promoter_lag_observed_when_backlog_remains() {
         lock_ttl_secs: 5,
         holder_id: "p1".to_string(),
         metrics: sink.clone() as Arc<dyn MetricsSink>,
+        ..Default::default()
     };
     let promoter = Promoter::new(redis_url(), cfg);
     let handle = tokio::spawn(promoter.run(shutdown.clone()));

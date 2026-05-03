@@ -42,7 +42,7 @@ pub async fn admin() -> Client {
 }
 
 pub async fn flush_all(admin: &Client, queue: &str) {
-    for suffix in ["stream", "dlq", "delayed", "promoter:lock"] {
+    for suffix in ["stream", "dlq", "delayed", "promoter:lock", "events"] {
         let key = format!("{{chasqui:{queue}}}:{suffix}");
         let _: Value = admin
             .custom(
@@ -93,6 +93,7 @@ pub fn promoter_cfg_with_sink(
         lock_ttl_secs: 5,
         holder_id: holder_id.to_string(),
         metrics: sink,
+        ..Default::default()
     }
 }
 

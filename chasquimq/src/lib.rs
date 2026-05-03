@@ -2,6 +2,7 @@ pub mod ack;
 pub mod config;
 pub mod consumer;
 pub mod error;
+pub(crate) mod events;
 pub mod job;
 pub mod metrics;
 pub mod producer;

@@ -1,4 +1,6 @@
 use crate::error::{Error, Result};
+use crate::events::EventsWriter;
+use crate::job::Job;
 use crate::metrics::{self, DlqRouted, MetricsSink};
 use crate::redis::commands::{xackdel_args, xadd_dlq_args};
 use crate::redis::parse::StreamEntryId;
@@ -6,6 +8,7 @@ use bytes::Bytes;
 use fred::clients::Client;
 use fred::interfaces::ClientLike;
 use fred::types::{ClusterHash, CustomCommand, Value};
+use serde::de::IgnoredAny;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -34,6 +37,7 @@ pub(crate) struct DlqRelocatorConfig {
     pub producer_id: Arc<str>,
     pub max_stream_len: u64,
     pub metrics: Arc<dyn MetricsSink>,
+    pub events: EventsWriter,
 }
 
 pub(crate) async fn enqueue(
@@ -71,12 +75,35 @@ pub(crate) async fn run_relocator(
                 };
                 let sink = &*cfg.metrics;
                 metrics::dispatch("dlq_routed", || sink.dlq_routed(event));
+                // Cross-process `dlq` event mirrors the metric. Reader-side
+                // routes (malformed / oversize / decode-fail) carry an
+                // empty payload and an empty job id — the event still
+                // fires so subscribers can count "DLQ-routed entries"
+                // without losing the malformed bucket. The event id will
+                // be empty in that case; consumers should treat empty id
+                // as "decode-side reject, no recoverable id".
+                if cfg.events.is_enabled() {
+                    let job_id = extract_job_id(&relocate.payload).unwrap_or_default();
+                    cfg.events
+                        .emit_dlq(&job_id, relocate.reason.as_str(), relocate.attempt)
+                        .await;
+                }
             }
             Err(e) => {
                 tracing::error!(entry_id = %relocate.entry_id, reason = %relocate.reason.as_str(), error = %e, "DLQ relocation failed permanently; entry remains pending and will be retried on next CLAIM tick");
             }
         }
     }
+}
+
+/// Decode a `JobId` from a msgpack-encoded `Job<T>` payload without
+/// allocating for the (ignored) `payload` field. Returns `None` for
+/// malformed bytes — used so a `dlq` event still fires for reader-side
+/// rejects (with an empty id) without panicking on garbage. Mirrors the
+/// helper of the same name in `promoter.rs` and `retry.rs`.
+fn extract_job_id(bytes: &[u8]) -> Option<String> {
+    let job: Job<IgnoredAny> = rmp_serde::from_slice(bytes).ok()?;
+    Some(job.id)
 }
 
 async fn relocate_with_retry(

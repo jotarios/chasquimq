@@ -25,6 +25,19 @@ pub fn dedup_marker_key(queue_name: &str, job_id: &str) -> String {
     format!("{{chasqui:{queue_name}}}:dlid:{job_id}")
 }
 
+/// Per-queue cross-process events stream. The engine writes engine-internal
+/// transitions (waiting / active / completed / failed / retry-scheduled /
+/// delayed / dlq / drained) here as Redis Stream entries; subscribers in any
+/// process can `XREAD` to observe them. This is a sibling to `MetricsSink`,
+/// not a replacement: `MetricsSink` is in-process (zero IPC), the events
+/// stream is cross-process (subscribable by an external dashboard or the
+/// Node bindings' `QueueEvents` class). Both fire on the same hot-path
+/// occurrences. Same `{chasqui:<queue>}` hash tag so it co-locates with the
+/// other queue keys on a single Redis Cluster slot.
+pub fn events_key(queue_name: &str) -> String {
+    format!("{{chasqui:{queue_name}}}:events")
+}
+
 /// Per-queue, per-job-id side-index key used by `Producer::cancel_delayed`.
 /// Stores the exact encoded ZSET member so cancel can `ZREM` precisely
 /// without a slow `ZRANGE` scan. Written by the idempotent schedule path

@@ -6,6 +6,7 @@ mod worker;
 use crate::ack::{AckFlusherConfig, run_ack_flusher};
 use crate::config::{ConsumerConfig, PromoterConfig};
 use crate::error::{HandlerError, Result};
+use crate::events::EventsWriter;
 use crate::job::Job;
 use crate::promoter::Promoter;
 use crate::redis::conn::connect;
@@ -60,6 +61,21 @@ where
 
         ensure_group(&reader, &self.stream_key, &self.cfg.group).await?;
 
+        // The events writer threads through all four hot-path subsystems
+        // (reader / worker / retry-relocator / dlq-relocator). When
+        // `events_enabled` is false we hand each one a `Disabled` writer so
+        // every emit_* is a single branch + return rather than an XADD.
+        let events = if self.cfg.events_enabled {
+            let events_client = connect(&self.redis_url).await?;
+            EventsWriter::new(
+                events_client,
+                &self.cfg.queue_name,
+                self.cfg.events_max_stream_len,
+            )
+        } else {
+            EventsWriter::disabled()
+        };
+
         let concurrency = self.cfg.concurrency.max(1);
         let (job_tx, job_rx) = async_channel::bounded::<DispatchedJob<T>>(concurrency * 2);
         let (ack_tx, ack_rx) = mpsc::channel::<StreamEntryId>(concurrency * 4);
@@ -87,6 +103,7 @@ where
                 producer_id: dlq_producer_id,
                 max_stream_len: self.cfg.dlq_max_stream_len,
                 metrics: self.cfg.metrics.clone(),
+                events: events.clone(),
             },
             dlq_rx,
         ));
@@ -98,6 +115,7 @@ where
                 delayed_key: self.delayed_key.clone(),
                 group: self.cfg.group.clone(),
                 metrics: self.cfg.metrics.clone(),
+                events: events.clone(),
             },
             retry_rx,
         ));
@@ -111,6 +129,7 @@ where
             max_attempts: self.cfg.max_attempts,
             retry_cfg: self.cfg.retry.clone(),
             metrics: self.cfg.metrics.clone(),
+            events: events.clone(),
         };
         let workers = spawn_workers(concurrency, handler, job_rx, wiring);
         drop(ack_tx);
@@ -124,6 +143,7 @@ where
             dlq_tx,
             shutdown: shutdown.clone(),
             metrics: self.cfg.metrics.clone(),
+            events: events.clone(),
         };
         let reader_outcome = reader_loop::<T>(read_state).await;
 
@@ -175,6 +195,8 @@ where
             max_stream_len: self.cfg.delayed_max_stream_len,
             lock_ttl_secs: self.cfg.delayed_lock_ttl_secs,
             holder_id: self.cfg.consumer_id.clone(),
+            events_enabled: self.cfg.events_enabled,
+            events_max_stream_len: self.cfg.events_max_stream_len,
             metrics: self.cfg.metrics.clone(),
         };
         let promoter = Promoter::new(self.redis_url.clone(), promoter_cfg);
