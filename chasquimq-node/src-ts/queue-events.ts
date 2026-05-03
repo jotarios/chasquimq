@@ -57,18 +57,24 @@ export class QueueEvents extends EventEmitter {
     await this.waitUntilReady()
 
     let lastId = this.opts.lastEventId ?? '$'
+    type XReadResponse = Array<[stream: string, entries: Array<[id: string, fields: string[]]>]> | null
     this.runPromise = (async () => {
       while (this.running) {
         try {
-          const res = await this.client.xread(
+          // ioredis 5.x has a wide XREAD overload set; the variadic
+          // `'BLOCK' | 'COUNT' | 'STREAMS' | ...` form trips its
+          // internal generic resolution. Cast to the concrete shape
+          // we expect from the wire — XRANGE-shaped flat key/value
+          // pairs in `fields`.
+          const res = (await this.client.xread(
             'BLOCK', this.blockingTimeoutMs, 'COUNT', 100,
-            'STREAMS', this.streamKey, lastId
-          )
+            'STREAMS', this.streamKey, lastId,
+          )) as XReadResponse
           if (!res || !this.running) continue
           for (const [, entries] of res) {
             for (const [id, fields] of entries) {
               lastId = id
-              this.dispatchEntry(id, fields as string[])
+              this.dispatchEntry(id, fields)
             }
           }
         } catch (err) {

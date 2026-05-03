@@ -1,15 +1,18 @@
 import { describe, it, expect } from 'vitest'
 import { encode, decode } from '@msgpack/msgpack'
 
-// We import from `..` so the test sees the generated `index.js` /
-// `index.d.ts` produced by `napi build`. The smoke test uses the same
-// pattern.
+// Native bindings are exported from the `chasquimq/native` subpath of
+// the package. The `exports` map in `package.json` resolves the parent
+// path's `./native` entry to the generated `index.js` / `index.d.ts`
+// produced by `napi build`. The bare `'..'` import (no subpath) now
+// resolves to `./dist/index.js` — the high-level shim — which doesn't
+// expose the `Native*` classes.
 import {
   NativeProducer,
   NativeConsumer,
   NativePromoter,
   type NativeJob,
-} from '..'
+} from '../index.js'
 
 const REDIS_URL = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379'
 const HAS_REDIS = Boolean(process.env.REDIS_URL)
