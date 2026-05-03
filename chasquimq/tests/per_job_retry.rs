@@ -8,7 +8,7 @@
 use chasquimq::config::{ConsumerConfig, ProducerConfig, RetryConfig};
 use chasquimq::consumer::Consumer;
 use chasquimq::producer::{AddOptions, Producer, dlq_key};
-use chasquimq::{BackoffSpec, HandlerError, Job, JobRetryOverride};
+use chasquimq::{BackoffKind, BackoffSpec, HandlerError, Job, JobRetryOverride};
 use fred::clients::Client;
 use fred::interfaces::ClientLike;
 use fred::prelude::Config;
@@ -251,7 +251,7 @@ async fn per_job_fixed_backoff_intervals() {
             AddOptions::new().with_retry(JobRetryOverride {
                 max_attempts: Some(4), // 4 runs total → 3 retry intervals
                 backoff: Some(BackoffSpec {
-                    kind: "fixed".into(),
+                    kind: BackoffKind::Fixed,
                     delay_ms: 80,
                     max_delay_ms: None,
                     multiplier: None,
@@ -338,7 +338,7 @@ async fn per_job_exponential_backoff_intervals() {
             AddOptions::new().with_retry(JobRetryOverride {
                 max_attempts: Some(4),
                 backoff: Some(BackoffSpec {
-                    kind: "exponential".into(),
+                    kind: BackoffKind::Exponential,
                     delay_ms: 100,
                     max_delay_ms: Some(10_000),
                     multiplier: Some(3.0),
@@ -417,7 +417,7 @@ async fn per_job_override_survives_retry_round_trip() {
     let want = JobRetryOverride {
         max_attempts: Some(4),
         backoff: Some(BackoffSpec {
-            kind: "exponential".into(),
+            kind: BackoffKind::Exponential,
             delay_ms: 30,
             max_delay_ms: Some(5_000),
             multiplier: Some(2.0),
@@ -425,7 +425,7 @@ async fn per_job_override_survives_retry_round_trip() {
         }),
     };
     producer
-        .add_with_options(Sample { n: 1 }, AddOptions::new().with_retry(want.clone()))
+        .add_with_options(Sample { n: 1 }, AddOptions::new().with_retry(want))
         .await
         .expect("add");
 
@@ -441,7 +441,7 @@ async fn per_job_override_survives_retry_round_trip() {
                 move |job: Job<Sample>| {
                     let observed = observed_h.clone();
                     async move {
-                        observed.lock().unwrap().push(job.retry.clone());
+                        observed.lock().unwrap().push(job.retry);
                         if job.attempt < 2 {
                             Err(HandlerError::new(std::io::Error::other("flaky")))
                         } else {
@@ -489,7 +489,7 @@ async fn replay_dlq_preserves_retry_override() {
     let want = JobRetryOverride {
         max_attempts: Some(7),
         backoff: Some(BackoffSpec {
-            kind: "fixed".into(),
+            kind: BackoffKind::Fixed,
             delay_ms: 42,
             max_delay_ms: None,
             multiplier: None,
@@ -498,7 +498,7 @@ async fn replay_dlq_preserves_retry_override() {
     };
     let mut job = Job::with_id("preserved-job".to_string(), Sample { n: 1 });
     job.attempt = 99;
-    job.retry = Some(want.clone());
+    job.retry = Some(want);
     let bytes = bytes::Bytes::from(rmp_serde::to_vec(&job).unwrap());
     let _: Value = admin
         .custom(

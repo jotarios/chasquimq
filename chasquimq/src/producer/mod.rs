@@ -482,7 +482,7 @@ impl<T: Serialize> Producer<T> {
                 Some(id) => Job::with_id(id, payload),
                 None => Job::new(payload),
             };
-            if let Some(retry) = opts.retry.clone() {
+            if let Some(retry) = opts.retry {
                 job.retry = Some(retry);
             }
             let id = job.id.clone();
