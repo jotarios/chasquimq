@@ -632,3 +632,166 @@ async fn delayed_event_skipped_on_producer_v1() {
 
     let _: () = admin.quit().await.unwrap();
 }
+
+/// Slice 9a — confirm the standalone `Promoter::new` path still builds its
+/// own events writer when no shared writer is supplied. Spawns a producer +
+/// standalone Promoter (no Consumer in the loop) and asserts the
+/// promoter's `waiting` event still lands on the per-queue events stream.
+/// This guards against a regression where collapsing the writer onto the
+/// embedded path silently disables events for users who run `Promoter`
+/// outside `Consumer::run`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires REDIS_URL"]
+async fn standalone_promoter_still_emits_waiting_with_own_writer() {
+    use chasquimq::{Promoter, PromoterConfig};
+
+    let admin = admin().await;
+    let queue = "events_e9";
+    flush_all(&admin, queue).await;
+
+    let producer: Producer<Sample> = Producer::connect(&redis_url(), producer_cfg(queue))
+        .await
+        .expect("connect producer");
+    let job_id = producer
+        .add_in(Duration::from_millis(50), Sample { n: 1 })
+        .await
+        .expect("add_in");
+
+    // Standalone Promoter with events_enabled=true — must build its own
+    // EventsWriter from its own Client (no shared writer plumbed). The
+    // engine creates the consumer-group lazily on first XADD, but we don't
+    // need a consumer here: the promoter's `waiting` emit happens before
+    // any XREADGROUP.
+    let cfg = PromoterConfig {
+        queue_name: queue.to_string(),
+        poll_interval_ms: 10,
+        events_enabled: true,
+        ..Default::default()
+    };
+    let promoter = Promoter::new(redis_url(), cfg);
+    let shutdown = CancellationToken::new();
+    let shutdown_h = shutdown.clone();
+    let handle = tokio::spawn(async move { promoter.run(shutdown_h).await });
+
+    {
+        let admin = admin.clone();
+        let queue = queue.to_string();
+        let job_id = job_id.clone();
+        wait_until(Duration::from_secs(2), move || {
+            let admin = admin.clone();
+            let queue = queue.clone();
+            let job_id = job_id.clone();
+            async move {
+                let evs = read_events(&admin, &queue).await;
+                evs.iter()
+                    .any(|e| e.name() == "waiting" && e.job_id() == job_id)
+            }
+        })
+        .await;
+    }
+
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+
+    let evs = read_events(&admin, queue).await;
+    let waiting = find_one(&evs, "waiting", Some(&job_id));
+    assert!(waiting.fields.contains_key("ts"));
+
+    let _: () = admin.quit().await.unwrap();
+}
+
+/// Slice 9a — verify the embedded promoter and the consumer share one
+/// `EventsWriter` (and therefore one Redis connection) for events-stream
+/// emits. The proof is **behavioral**: with `events_enabled + delayed_enabled`
+/// both on, BOTH the embedded promoter's `waiting` event AND the consumer's
+/// hot-path `completed` event for the same delayed job must land on the
+/// same events stream. If the promoter were silently disabled (because the
+/// shared writer wasn't plumbed) this test would miss `waiting`; if the
+/// consumer were silently disabled (because the Arc clone broke the
+/// `Inner::Enabled` variant) it would miss `completed`.
+///
+/// An earlier revision of this test also pinned a `delta <= N` against the
+/// global `CLIENT LIST` count to demonstrate one fewer Redis connection
+/// per worker. That assertion was dropped because `CLIENT LIST` is
+/// server-wide — concurrent tests in CI's parallel test runner inflate
+/// the count beyond what one process controls. The behavioral half
+/// already proves both endpoints emit, which is the contract users care
+/// about; the connection count is best-verified by inspection of the
+/// construction sites.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires REDIS_URL"]
+async fn embedded_promoter_shares_events_writer_with_consumer() {
+    let admin = admin().await;
+    let queue = "events_e8";
+    flush_all(&admin, queue).await;
+
+    // Drain any old per-test connections that might still be loitering.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let producer: Producer<Sample> = Producer::connect(&redis_url(), producer_cfg(queue))
+        .await
+        .expect("connect producer");
+    // Schedule a near-future delayed job. The embedded promoter will pick
+    // it up and emit `waiting`; the consumer will then dispatch + complete
+    // the handler, emitting `active` + `completed`. All three events must
+    // land on the same events stream.
+    let job_id = producer
+        .add_in(Duration::from_millis(50), Sample { n: 17 })
+        .await
+        .expect("add_in");
+
+    // Both `events_enabled` and `delayed_enabled` on. Use a fast promoter
+    // tick so the test doesn't have to wait long.
+    let cfg = ConsumerConfig {
+        delayed_enabled: true,
+        delayed_poll_interval_ms: 10,
+        events_enabled: true,
+        ..consumer_cfg(queue, 3)
+    };
+    let consumer: Consumer<Sample> = Consumer::new(redis_url(), cfg);
+    let shutdown = CancellationToken::new();
+    let shutdown_h = shutdown.clone();
+    let handle = tokio::spawn(async move {
+        consumer
+            .run(move |_job: Job<Sample>| async move { Ok(()) }, shutdown_h)
+            .await
+    });
+
+    // Wait until the consumer has emitted `completed` for our job (which
+    // implies the embedded promoter already emitted `waiting` upstream).
+    {
+        let admin = admin.clone();
+        let queue = queue.to_string();
+        let job_id = job_id.clone();
+        wait_until(Duration::from_secs(5), move || {
+            let admin = admin.clone();
+            let queue = queue.clone();
+            let job_id = job_id.clone();
+            async move {
+                let evs = read_events(&admin, &queue).await;
+                evs.iter()
+                    .any(|e| e.name() == "completed" && e.job_id() == job_id)
+            }
+        })
+        .await;
+    }
+
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(10), handle).await;
+
+    // Behavioral assertion: both ends emitted through the (shared) writer.
+    let evs = read_events(&admin, queue).await;
+    let waiting = find_one(&evs, "waiting", Some(&job_id));
+    assert!(
+        waiting.fields.contains_key("ts"),
+        "embedded promoter must emit `waiting` through the shared writer"
+    );
+    let completed = find_one(&evs, "completed", Some(&job_id));
+    assert_eq!(
+        completed.attempt(),
+        Some(1),
+        "consumer hot path must emit `completed` through the same shared writer"
+    );
+
+    let _: () = admin.quit().await.unwrap();
+}

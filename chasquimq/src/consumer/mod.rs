@@ -62,10 +62,17 @@ where
         ensure_group(&reader, &self.stream_key, &self.cfg.group).await?;
 
         // The events writer threads through all four hot-path subsystems
-        // (reader / worker / retry-relocator / dlq-relocator). When
-        // `events_enabled` is false we hand each one a `Disabled` writer so
-        // every emit_* is a single branch + return rather than an XADD.
-        let events = if self.cfg.events_enabled {
+        // (reader / worker / retry-relocator / dlq-relocator) AND the
+        // embedded promoter. When `events_enabled` is false we hand each one
+        // a `Disabled` writer so every emit_* is a single branch + return
+        // rather than an XADD.
+        //
+        // Wrapped in `Arc` so the embedded promoter can hold a refcounted
+        // share without a second Redis connection. Hot-path subsystems get
+        // a cheap `(*events).clone()` (the inner `EventsWriter` is itself
+        // clone-by-Arc on its underlying fred `Client`), keeping their
+        // `events: EventsWriter` field shape unchanged.
+        let events = Arc::new(if self.cfg.events_enabled {
             let events_client = connect(&self.redis_url).await?;
             EventsWriter::new(
                 events_client,
@@ -74,7 +81,7 @@ where
             )
         } else {
             EventsWriter::disabled()
-        };
+        });
 
         let concurrency = self.cfg.concurrency.max(1);
         let (job_tx, job_rx) = async_channel::bounded::<DispatchedJob<T>>(concurrency * 2);
@@ -103,7 +110,7 @@ where
                 producer_id: dlq_producer_id,
                 max_stream_len: self.cfg.dlq_max_stream_len,
                 metrics: self.cfg.metrics.clone(),
-                events: events.clone(),
+                events: (*events).clone(),
             },
             dlq_rx,
         ));
@@ -115,12 +122,12 @@ where
                 delayed_key: self.delayed_key.clone(),
                 group: self.cfg.group.clone(),
                 metrics: self.cfg.metrics.clone(),
-                events: events.clone(),
+                events: (*events).clone(),
             },
             retry_rx,
         ));
 
-        let promoter_handle = self.spawn_promoter(shutdown.clone());
+        let promoter_handle = self.spawn_promoter(shutdown.clone(), events.clone());
 
         let wiring = WorkerWiring {
             ack_tx: ack_tx.clone(),
@@ -129,7 +136,7 @@ where
             max_attempts: self.cfg.max_attempts,
             retry_cfg: self.cfg.retry.clone(),
             metrics: self.cfg.metrics.clone(),
-            events: events.clone(),
+            events: (*events).clone(),
         };
         let workers = spawn_workers(concurrency, handler, job_rx, wiring);
         drop(ack_tx);
@@ -143,7 +150,7 @@ where
             dlq_tx,
             shutdown: shutdown.clone(),
             metrics: self.cfg.metrics.clone(),
-            events: events.clone(),
+            events: (*events).clone(),
         };
         let reader_outcome = reader_loop::<T>(read_state).await;
 
@@ -184,6 +191,7 @@ where
     fn spawn_promoter(
         &self,
         shutdown: CancellationToken,
+        events: Arc<EventsWriter>,
     ) -> Option<tokio::task::JoinHandle<Result<()>>> {
         if !self.cfg.delayed_enabled {
             return None;
@@ -195,11 +203,20 @@ where
             max_stream_len: self.cfg.delayed_max_stream_len,
             lock_ttl_secs: self.cfg.delayed_lock_ttl_secs,
             holder_id: self.cfg.consumer_id.clone(),
+            // The shared `Arc<EventsWriter>` carries the enable bit and the
+            // stream-len cap already; these fields on `PromoterConfig` are
+            // ignored on the `with_shared_events` path. They're still
+            // forwarded here so the config struct stays well-formed for
+            // anything that might inspect it (Debug, future probes).
             events_enabled: self.cfg.events_enabled,
             events_max_stream_len: self.cfg.events_max_stream_len,
             metrics: self.cfg.metrics.clone(),
         };
-        let promoter = Promoter::new(self.redis_url.clone(), promoter_cfg);
+        // Hand the embedded promoter the same events writer the consumer's
+        // hot-path subsystems use, so a worker process with
+        // `events_enabled + delayed_enabled` opens one events connection
+        // instead of two.
+        let promoter = Promoter::with_shared_events(self.redis_url.clone(), promoter_cfg, events);
         Some(tokio::spawn(promoter.run(shutdown)))
     }
 }
