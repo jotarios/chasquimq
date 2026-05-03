@@ -1,13 +1,7 @@
 import { EventEmitter } from 'node:events'
 import IORedis, { type RedisOptions } from 'ioredis'
 
-export interface ConnectionOptions {
-  host?: string
-  port?: number
-  password?: string
-  username?: string
-  db?: number
-}
+import type { ConnectionOptions } from './types.js'
 
 export interface QueueEventsOptions {
   connection: ConnectionOptions

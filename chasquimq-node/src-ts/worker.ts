@@ -28,47 +28,9 @@ import { EventEmitter } from 'node:events'
 import { decode } from '@msgpack/msgpack'
 
 import { NativeConsumer, type NativeConsumerOpts, type NativeJob } from '../index.js'
-
-// ---------------------------------------------------------------------------
-// Local placeholder Job
-//
-// The companion queue shim PR introduces the canonical Job class at
-// `src-ts/job.ts`. When that PR merges first, this declaration will be
-// replaced by `import { Job } from './job.js'`. Field names and shape
-// are chosen so the merge is mechanical.
-// ---------------------------------------------------------------------------
-
-class JobLite<DataType = unknown, ResultType = unknown, NameType extends string = string> {
-  /** Stream entry id assigned by Redis. */
-  readonly id: string
-  /** Logical job name. The engine doesn't carry a name today; defaults to ''. */
-  readonly name: NameType
-  /** Decoded payload data. */
-  readonly data: DataType
-  /** 1-indexed attempt count carried by the engine (1 = first delivery). */
-  attemptsMade: number
-  /** Set on the JS side after the processor resolves. */
-  returnvalue?: ResultType
-  /** Set on the JS side after the processor rejects. */
-  failedReason?: string
-  /** Unix-ms timestamp the job was added to the stream. */
-  timestamp: number
-
-  constructor(id: string, name: NameType, data: DataType, attempt: number, createdAtMs: number) {
-    this.id = id
-    this.name = name
-    this.data = data
-    this.attemptsMade = attempt
-    this.timestamp = createdAtMs
-  }
-
-  toJSON(): { id: string; name: NameType; data: DataType; attemptsMade: number } {
-    return { id: this.id, name: this.name, data: this.data, attemptsMade: this.attemptsMade }
-  }
-}
-
-export type Job<DataType = unknown, ResultType = unknown, NameType extends string = string> =
-  JobLite<DataType, ResultType, NameType>
+import { Job } from './job.js'
+import type { ConnectionOptions, JobsOptions } from './types.js'
+import { NotSupportedError } from './errors.js'
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -81,20 +43,7 @@ export type Job<DataType = unknown, ResultType = unknown, NameType extends strin
  * (eventually DLQ once `maxAttempts` is exhausted).
  */
 export type Processor<DataType = unknown, ResultType = unknown, NameType extends string = string> =
-  (job: JobLite<DataType, ResultType, NameType>) => Promise<ResultType>
-
-/**
- * Connection options accepted by the high-level shim. Internally
- * normalized to a single `redis://...` URL because that's what the
- * native binding accepts.
- */
-export interface ConnectionOptions {
-  host?: string
-  port?: number
-  password?: string
-  username?: string
-  db?: number
-}
+  (job: Job<DataType, ResultType, NameType>) => Promise<ResultType>
 
 /**
  * Options passed to the high-level `Worker` constructor.
@@ -146,13 +95,6 @@ export interface WorkerOptions {
 
   /** Optional consumer ID for the underlying `XREADGROUP CONSUMER`. */
   name?: string
-}
-
-class NotSupportedError extends Error {
-  constructor(msg: string) {
-    super(msg)
-    this.name = 'NotSupportedError'
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -238,15 +180,19 @@ export class Worker<
 
     const handler = async (nativeJob: NativeJob): Promise<void> => {
       const data = decode(nativeJob.payload) as DataType
-      // The engine doesn't carry job.name today; default to '' until the
-      // queue shim's encoded envelope (with name) lands.
-      const job = new JobLite<DataType, ResultType, NameType>(
-        nativeJob.id,
+      // The engine doesn't carry job.name on the wire today; default to
+      // '' until the producer-side envelope with name lands. Worker-side
+      // jobs also have no producer-supplied JobsOptions on the wire — pass
+      // `{ timestamp }` so the canonical Job class still gets a non-null
+      // opts object and a real timestamp.
+      const opts: JobsOptions = { timestamp: Number(nativeJob.createdAtMs) }
+      const job = new Job<DataType, ResultType, NameType>(
         '' as NameType,
         data,
-        nativeJob.attempt,
-        Number(nativeJob.createdAtMs),
+        opts,
+        nativeJob.id,
       )
+      job.attemptsMade = nativeJob.attempt
       this.emit('active', job, '')
       try {
         const result = await this.processor(job)
