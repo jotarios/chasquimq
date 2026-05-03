@@ -55,6 +55,14 @@ impl HandlerError {
     /// the retry path and route the job directly to the DLQ with
     /// [`crate::metrics::DlqReason::Unrecoverable`] — no matter what
     /// the queue-wide or per-job `max_attempts` budget is.
+    ///
+    /// **When NOT to use**: reach for [`HandlerError::new`] for transient
+    /// failures (network timeouts, rate limits, deadlocks, lock
+    /// contention, stale-data conflicts) — those typically clear up on a
+    /// fresh attempt. Reserve `unrecoverable()` for failures where
+    /// retrying is provably wasteful: validation errors, missing
+    /// dependencies, permission denials, poison-pill payloads, or
+    /// programmer-guaranteed terminal conditions.
     pub fn unrecoverable<E>(err: E) -> Self
     where
         E: std::error::Error + Send + Sync + 'static,
