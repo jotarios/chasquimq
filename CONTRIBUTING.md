@@ -107,7 +107,7 @@ chore: gitignore benchmarks/runs/
 
 Phase 3 lead-in + Phase 2 polish (open scope):
 
-- **Phase 3: Node.js bindings via NAPI-RS.** Slice (a) of the design doc — crate scaffold + `Producer.add` + smoke test + the TSFN call-overhead microbench that gates the API surface — is the natural starting point. See [`docs/phase3-napi-design.md`](docs/phase3-napi-design.md).
+- **Phase 3: Node.js bindings via NAPI-RS.** First slice has shipped — high-level `Queue` / `Worker` / `QueueEvents` API + native NAPI bindings under `chasquimq-node/`. Follow-up work: per-job retry native exposure (engine slice 8 is in; the `addWithOptions` surface needs to flow into `NativeProducer`), IANA timezone names for repeatable jobs (currently only UTC and `+HH:MM` accepted), and a catch-up policy for missed cron windows after scheduler downtime. See [`docs/phase3-napi-design.md`](docs/phase3-napi-design.md).
 - **Latency instrumentation in the bench harness.** Throughput-only today; per-job dispatch-to-ack p50/p95/p99 is the biggest gap in the perf claims. See `TODOS.md` → "Latency histogram for `worker-concurrent`".
 - **Worker CPU measurement *for BullMQ*.** ChasquiMQ's CPU is instrumented; BullMQ's isn't. The PRD's "≥50% less worker CPU" target needs a parallel measurement before we can claim it.
 - **Reclaimed-from-CLAIM integration test.** Slice 5 added the `ReaderBatch.reclaimed` signal; the existing tests cover only `reclaimed == 0`. See `TODOS.md`.
@@ -127,6 +127,30 @@ Smaller wins:
 - **Non-Rust SDKs.** Node bindings come in Phase 3 via NAPI-RS, Python in Phase 4 via PyO3 — not by reimplementing logic. Don't open a JS rewrite.
 - **Older Redis fallbacks.** ChasquiMQ targets Redis 8.6+ and uses modern Streams features (`XACKDEL`, `IDMP`). Don't add `version-detect-and-degrade` paths.
 - **JSON payloads on the hot path.** MessagePack is load-bearing for the perf claim.
+
+## Working on chasquimq-node
+
+The Node.js bindings live in the `chasquimq-node/` crate. It exposes two layers: a high-level Queue/Worker shim (TypeScript, in `src-ts/`) and the raw NAPI bindings (Rust, in `src/`) generated via `napi-rs`. The shim wraps the bindings; the bindings wrap the engine. Either layer is importable from the published package.
+
+Dev setup:
+
+```bash
+cd chasquimq-node
+npm install
+npm run build:debug   # builds the .node addon + dist/
+REDIS_URL=redis://127.0.0.1:6379 npm test
+```
+
+`build:debug` compiles the Rust addon in debug mode (faster turnaround; use `npm run build` for release). The TypeScript shim compiles to `dist/` via `tsc`. Tests run against a real Redis — point `REDIS_URL` at your local 8.6+ instance.
+
+Branch layout for new work: shim PRs typically branch off `feat/chasquimq-node-native` (the NAPI bindings PR) and live alongside it until it merges. Once `feat/chasquimq-node-native` lands on `main`, follow-ups can branch off `main` directly.
+
+What's stubbed vs. what works:
+
+- **Works:** `Queue.add` / `Queue.addBulk` / `Queue.close`, `Worker` with concurrency + `EventEmitter` events (`completed` / `failed`), `Job` reads, cross-process `QueueEvents` subscriber.
+- **Stubbed (`NotSupportedError`):** per-job retry overrides, cron / repeatable jobs (engine slice 10 wired but not yet exposed via NAPI), parent/child flows.
+
+See [`docs/phase3-napi-design.md`](docs/phase3-napi-design.md) for the full surface table and the rationale behind each stub.
 
 ## Reporting bugs
 
