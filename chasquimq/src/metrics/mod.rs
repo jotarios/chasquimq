@@ -181,6 +181,11 @@ pub enum DlqReason {
     Malformed { reason: &'static str },
     /// Payload size exceeded `ConsumerConfig::max_payload_bytes`.
     OversizePayload,
+    /// Handler returned [`crate::error::HandlerError::unrecoverable`],
+    /// signalling the failure is terminal. The consumer skips the retry
+    /// path and routes the job straight to the DLQ regardless of the
+    /// remaining attempt budget.
+    Unrecoverable,
 }
 
 impl DlqReason {
@@ -192,6 +197,7 @@ impl DlqReason {
             DlqReason::DecodeFailed => "decode_failed",
             DlqReason::Malformed { .. } => "malformed",
             DlqReason::OversizePayload => "oversize_payload",
+            DlqReason::Unrecoverable => "unrecoverable",
         }
     }
 

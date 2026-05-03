@@ -125,9 +125,9 @@ async fn job_lifecycle_retry_then_success() {
                     // Job::attempt is 0-indexed pre-run: attempts 0 and 1
                     // fail, attempt 2 (i.e. the third try) succeeds.
                     if job.attempt < 2 {
-                        Err(HandlerError(Box::new(std::io::Error::other(
+                        Err(HandlerError::new(std::io::Error::other(
                             "scheduled failure",
-                        ))))
+                        )))
                     } else {
                         Ok(())
                     }
@@ -204,7 +204,7 @@ async fn job_lifecycle_dlq_after_retries_exhausted() {
         consumer
             .run(
                 move |_job: Job<Sample>| async move {
-                    Err(HandlerError(Box::new(std::io::Error::other("always fail"))))
+                    Err(HandlerError::new(std::io::Error::other("always fail")))
                 },
                 shutdown_h,
             )
