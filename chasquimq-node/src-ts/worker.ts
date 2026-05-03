@@ -27,7 +27,12 @@
 import { EventEmitter } from 'node:events'
 import { decode } from '@msgpack/msgpack'
 
-import { NativeConsumer, type NativeConsumerOpts, type NativeJob } from '../index.js'
+import {
+  NativeConsumer,
+  NativeScheduler,
+  type NativeConsumerOpts,
+  type NativeJob,
+} from '../index.js'
 import { Job } from './job.js'
 import type { ConnectionOptions, JobsOptions } from './types.js'
 import { NotSupportedError } from './errors.js'
@@ -95,6 +100,27 @@ export interface WorkerOptions {
 
   /** Optional consumer ID for the underlying `XREADGROUP CONSUMER`. */
   name?: string
+
+  /**
+   * Auto-spawn an embedded {@link NativeScheduler} alongside the consumer
+   * so repeatable / cron specs upserted via `Queue.add(name, data,
+   * { repeat })` actually fire on this worker process.
+   *
+   * Default `true`. Set to `false` when the deployment runs a separate
+   * scheduler process (or a sidecar) and you want this worker to be a
+   * pure consumer. Multiple workers with `runScheduler: true` cooperate
+   * via leader election (`SET NX EX` on
+   * `{chasqui:<queue>}:scheduler:lock`) — only one fires at a time.
+   */
+  runScheduler?: boolean
+
+  /**
+   * Override scheduler tick interval when `runScheduler !== false`.
+   * Default 1000ms. Lower values reduce per-spec fire jitter at the cost
+   * of more idle Redis CPU; the lower bound on jitter is roughly this
+   * interval.
+   */
+  schedulerTickMs?: number
 }
 
 // ---------------------------------------------------------------------------
@@ -128,6 +154,8 @@ export class Worker<
   readonly opts: WorkerOptions
 
   private native: NativeConsumer
+  private scheduler?: NativeScheduler
+  private schedulerRunPromise?: Promise<void>
   private processor: Processor<DataType, ResultType, NameType>
   private running = false
   private runPromise?: Promise<void>
@@ -158,6 +186,17 @@ export class Worker<
       consumerId: opts.name,
     }
     this.native = new NativeConsumer(url, nativeOpts)
+
+    if (opts.runScheduler !== false) {
+      // Embed a scheduler so repeatable / cron specs upserted via
+      // `Queue.add(name, data, { repeat })` fire on this worker process.
+      // Multiple workers cooperate via Redis SET-NX leader election —
+      // only one ticks at a time, and the lock TTL covers leader churn.
+      this.scheduler = new NativeScheduler(url, {
+        queueName: name,
+        tickIntervalMs: opts.schedulerTickMs ?? 1000,
+      })
+    }
 
     if (opts.autorun !== false) {
       // Defer to the next microtask so subscribers can attach listeners
@@ -216,6 +255,16 @@ export class Worker<
       this.emit('error', e)
       throw e
     })
+    if (this.scheduler) {
+      // Run the scheduler concurrently with the consumer; surface its
+      // errors through the same 'error' event so callers don't have to
+      // attach a second listener.
+      this.schedulerRunPromise = this.scheduler.run().catch((err: unknown) => {
+        const e = err instanceof Error ? err : new Error(String(err))
+        this.emit('error', e)
+        throw e
+      })
+    }
     return this.runPromise
   }
 
@@ -226,9 +275,19 @@ export class Worker<
   async close(_force = false): Promise<void> {
     this.emit('closing', '')
     this.native.shutdown()
+    if (this.scheduler) {
+      this.scheduler.shutdown()
+    }
     if (this.runPromise) {
       try {
         await this.runPromise
+      } catch {
+        /* swallow — already surfaced via 'error' */
+      }
+    }
+    if (this.schedulerRunPromise) {
+      try {
+        await this.schedulerRunPromise
       } catch {
         /* swallow — already surfaced via 'error' */
       }

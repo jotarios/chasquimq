@@ -43,21 +43,80 @@ export interface JobsOptions {
   lifo?: boolean
   /** Submission timestamp in ms; default Date.now(). */
   timestamp?: number
-  /** Throws NotSupportedError until the native binding exposes slice 10. */
+  /**
+   * Schedule a recurring job. Pass either `pattern` (cron) or `every` (ms),
+   * not both. The spec is upserted on the first call; subsequent calls
+   * with the same resolved key overwrite. See {@link RepeatOptions}.
+   */
   repeat?: RepeatOptions
+  /**
+   * Stable key for the repeat spec. If unset, the engine derives one as
+   * `<jobName>::<patternSignature>` (e.g. `cron:0 2 * * *:UTC`).
+   * Re-upserting with the same resolved key is idempotent.
+   */
+  repeatJobKey?: string
   /** Throws NotSupportedError — parent/child flows are not supported. */
   parent?: { id: string; queue: string }
 }
 
 export interface RepeatOptions {
+  /**
+   * Cron expression. Accepts both 5-field (`m h dom mon dow`) and 6-field
+   * (with leading seconds) syntax.
+   */
   pattern?: string
+  /**
+   * Fixed millisecond interval between fires. First fire lands one
+   * interval after upsert (no immediate fire).
+   */
   every?: number
+  /** Maximum number of fires before the spec is removed. */
   limit?: number
+  /**
+   * Accepted; no-op in v1. The engine fires the first occurrence one
+   * cadence after upsert (matching `every` semantics).
+   */
   immediately?: boolean
+  /**
+   * Earliest fire time. Fires before this are skipped. `Date`,
+   * milliseconds since epoch, or an ISO string.
+   */
   startDate?: Date | string | number
+  /**
+   * Latest fire time. Once the next fire would land past this instant,
+   * the engine removes the spec.
+   */
   endDate?: Date | string | number
+  /**
+   * Cron timezone. Accepts `"UTC"` / `"Z"`, fixed offsets (`"+05:30"`),
+   * or any IANA name (`"America/New_York"`). IANA names are DST-aware.
+   * Ignored when `every` is set.
+   */
   tz?: string
+  /** Unused in v1. Reserved for future explicit-id-per-fire wiring. */
   jobId?: string
+}
+
+/**
+ * Wire-compatible projection of {@link RepeatOptions} returned by
+ * {@link Queue.getRepeatableJobs}. Carries no payload — only the schedule
+ * and identity, so listing thousands of specs stays cheap.
+ */
+export interface RepeatableJobMeta {
+  key: string
+  jobName: string
+  /** `'cron'` or `'every'`. */
+  patternKind: 'cron' | 'every'
+  /** Cron expression, when `patternKind === 'cron'`. */
+  pattern?: string
+  /** Cron timezone, when set. */
+  tz?: string
+  /** Interval in ms, when `patternKind === 'every'`. */
+  every?: number
+  nextFireMs: number
+  limit?: number
+  startAfterMs?: number
+  endBeforeMs?: number
 }
 
 export type BulkJobOptions = Omit<JobsOptions, 'repeat'>
