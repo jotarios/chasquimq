@@ -93,7 +93,15 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: bindings-${{ matrix.settings.target }}
-          path: chasquimq-node/${{ env.APP_NAME }}.*.node
+          # Upload the .node binary AND the JS/TS bridge that `napi build`
+          # generates alongside it. The bridge is identical across targets
+          # (a runtime loader that picks the right .node), but uploading
+          # once per target is the simplest path — any one artifact is
+          # complete by itself for downstream test/publish jobs.
+          path: |
+            chasquimq-node/${{ env.APP_NAME }}.*.node
+            chasquimq-node/index.js
+            chasquimq-node/index.d.ts
           if-no-files-found: error
 
   test:

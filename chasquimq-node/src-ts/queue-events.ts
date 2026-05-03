@@ -58,18 +58,22 @@ export class QueueEvents extends EventEmitter {
 
     let lastId = this.opts.lastEventId ?? '$'
     type XReadResponse = Array<[stream: string, entries: Array<[id: string, fields: string[]]>]> | null
+    // ioredis 5.x has a wide XREAD overload set; the variadic
+    // `'BLOCK' | 'COUNT' | 'STREAMS' | ...` form trips its internal
+    // generic resolution under strict tsc, so route the call through
+    // an `any`-typed alias to bypass overload selection. The runtime
+    // shape is well-defined by the Redis protocol — `XReadResponse`
+    // captures the XRANGE-shaped flat key/value pairs we actually
+    // receive on the wire.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const xreadAny = this.client.xread.bind(this.client) as (...args: unknown[]) => Promise<XReadResponse>
     this.runPromise = (async () => {
       while (this.running) {
         try {
-          // ioredis 5.x has a wide XREAD overload set; the variadic
-          // `'BLOCK' | 'COUNT' | 'STREAMS' | ...` form trips its
-          // internal generic resolution. Cast to the concrete shape
-          // we expect from the wire — XRANGE-shaped flat key/value
-          // pairs in `fields`.
-          const res = (await this.client.xread(
+          const res = await xreadAny(
             'BLOCK', this.blockingTimeoutMs, 'COUNT', 100,
             'STREAMS', this.streamKey, lastId,
-          )) as XReadResponse
+          )
           if (!res || !this.running) continue
           for (const [, entries] of res) {
             for (const [id, fields] of entries) {
