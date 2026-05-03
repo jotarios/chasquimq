@@ -1,7 +1,7 @@
 use crate::config::RetryConfig;
 use crate::error::{Error, Result};
 use crate::events::EventsWriter;
-use crate::job::{BackoffSpec, Job};
+use crate::job::{BackoffKind, BackoffSpec, Job};
 use crate::metrics::{self, MetricsSink, RetryScheduled};
 use crate::redis::commands::{
     RETRY_RESCHEDULE_SCRIPT, eval_retry_args, evalsha_retry_args, script_load_args,
@@ -216,16 +216,19 @@ async fn load_script(client: &Client) -> Result<String> {
 
 /// Compute backoff for the upcoming Nth retry. `attempt` is 1-indexed:
 /// 1 = the first retry (after the initial failure), 2 = the second, etc.
+///
+/// Synthesizes a [`BackoffSpec`] from the queue-wide [`RetryConfig`] and
+/// delegates to [`backoff_ms_from_spec`], so the per-job and queue-wide
+/// paths share one implementation of the math.
 pub(crate) fn backoff_ms(attempt: u32, cfg: &RetryConfig) -> u64 {
-    let exp = attempt.saturating_sub(1) as i32;
-    let base = cfg.initial_backoff_ms as f64 * cfg.multiplier.powi(exp);
-    let capped = base.min(cfg.max_backoff_ms as f64).max(0.0) as u64;
-    let jitter = if cfg.jitter_ms == 0 {
-        0
-    } else {
-        fastrand_jitter(cfg.jitter_ms)
+    let spec = BackoffSpec {
+        kind: BackoffKind::Exponential,
+        delay_ms: cfg.initial_backoff_ms,
+        max_delay_ms: Some(cfg.max_backoff_ms),
+        multiplier: Some(cfg.multiplier),
+        jitter_ms: Some(cfg.jitter_ms),
     };
-    capped.saturating_add(jitter)
+    backoff_ms_from_spec(attempt, &spec, cfg)
 }
 
 /// Compute backoff using a per-job [`BackoffSpec`], falling back to fields
@@ -234,12 +237,15 @@ pub(crate) fn backoff_ms(attempt: u32, cfg: &RetryConfig) -> u64 {
 /// `attempt` is 1-indexed exactly like [`backoff_ms`].
 ///
 /// `kind` semantics:
-///  - `"fixed"` returns `delay_ms` plus jitter, capped at `max_delay_ms`.
-///    No multiplier is applied.
-///  - `"exponential"` returns `delay_ms * multiplier^(attempt-1)` plus
-///    jitter, capped at `max_delay_ms`.
-///  - Anything else degrades to `"exponential"` so an unknown future
-///    `kind` doesn't hard-fail the consumer.
+///  - [`BackoffKind::Fixed`] returns `delay_ms` plus jitter, capped at
+///    `max_delay_ms`. No multiplier is applied.
+///  - [`BackoffKind::Exponential`] returns
+///    `delay_ms * multiplier^(attempt-1)` plus jitter, capped at
+///    `max_delay_ms`.
+///  - [`BackoffKind::Unknown`] (variant emitted by a future SDK) is
+///    routed through the same path as `Exponential`, so an unrecognised
+///    `kind` doesn't hard-fail the consumer. Matches the previous
+///    string-typed "unknown → exponential" behavior.
 pub(crate) fn backoff_ms_from_spec(
     attempt: u32,
     spec: &BackoffSpec,
@@ -248,10 +254,10 @@ pub(crate) fn backoff_ms_from_spec(
     let max_delay_ms = spec.max_delay_ms.unwrap_or(fallback.max_backoff_ms);
     let jitter_ms = spec.jitter_ms.unwrap_or(fallback.jitter_ms);
 
-    let base = match spec.kind.as_str() {
-        "fixed" => spec.delay_ms as f64,
-        // "exponential" or unknown → exponential semantics
-        _ => {
+    let base = match spec.kind {
+        BackoffKind::Fixed => spec.delay_ms as f64,
+        // Exponential or Unknown → exponential semantics.
+        BackoffKind::Exponential | BackoffKind::Unknown => {
             let multiplier = spec.multiplier.unwrap_or(fallback.multiplier);
             let exp = attempt.saturating_sub(1) as i32;
             (spec.delay_ms as f64) * multiplier.powi(exp)
@@ -348,7 +354,7 @@ mod tests {
             jitter_ms: 0,
         };
         let spec = BackoffSpec {
-            kind: "exponential".into(),
+            kind: BackoffKind::Exponential,
             delay_ms: 100,
             max_delay_ms: Some(5_000),
             multiplier: Some(3.0),
@@ -372,7 +378,7 @@ mod tests {
             jitter_ms: 0,
         };
         let spec = BackoffSpec {
-            kind: "fixed".into(),
+            kind: BackoffKind::Fixed,
             delay_ms: 50,
             max_delay_ms: None,
             multiplier: Some(99.0),
@@ -392,7 +398,10 @@ mod tests {
             jitter_ms: 0,
         };
         let spec = BackoffSpec {
-            kind: "linear-future-feature".into(),
+            // `Unknown` represents a future-SDK variant the engine doesn't
+            // know about. It must route to the exponential path so the
+            // consumer never hard-fails on an unfamiliar `kind`.
+            kind: BackoffKind::Unknown,
             delay_ms: 100,
             max_delay_ms: None,
             multiplier: None, // pull from fallback (2.0)
@@ -412,7 +421,7 @@ mod tests {
             jitter_ms: 0,
         };
         let spec = BackoffSpec {
-            kind: "exponential".into(),
+            kind: BackoffKind::Exponential,
             delay_ms: 100,
             max_delay_ms: None, // → fallback.max_backoff_ms = 250
             multiplier: None,   // → fallback.multiplier = 2.0
@@ -434,7 +443,7 @@ mod tests {
             jitter_ms: 0,
         };
         let spec = BackoffSpec {
-            kind: "fixed".into(),
+            kind: BackoffKind::Fixed,
             delay_ms: 100,
             max_delay_ms: None,
             multiplier: None,
@@ -443,6 +452,33 @@ mod tests {
         for _ in 0..200 {
             let v = backoff_ms_from_spec(1, &spec, &fallback);
             assert!((100..100 + 25).contains(&v), "out of range: {v}");
+        }
+    }
+
+    /// `RetryConfig::backoff_ms` synthesizes a `BackoffSpec` and
+    /// delegates to `backoff_ms_from_spec`. Pin equivalence so a future
+    /// edit to one path can't silently drift from the other.
+    #[test]
+    fn backoff_ms_delegates_to_spec() {
+        let cfg = RetryConfig {
+            initial_backoff_ms: 100,
+            max_backoff_ms: 1_000,
+            multiplier: 2.0,
+            jitter_ms: 0,
+        };
+        let synthesized = BackoffSpec {
+            kind: BackoffKind::Exponential,
+            delay_ms: cfg.initial_backoff_ms,
+            max_delay_ms: Some(cfg.max_backoff_ms),
+            multiplier: Some(cfg.multiplier),
+            jitter_ms: Some(cfg.jitter_ms),
+        };
+        for attempt in 0u32..=10 {
+            assert_eq!(
+                backoff_ms(attempt, &cfg),
+                backoff_ms_from_spec(attempt, &synthesized, &cfg),
+                "drift between backoff_ms and backoff_ms_from_spec at attempt={attempt}"
+            );
         }
     }
 
