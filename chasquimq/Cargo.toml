@@ -24,6 +24,12 @@ croner = "3.0.1"
 # `chrono` is only used for cron next-fire computation (via `croner`'s
 # `find_next_occurrence`); keep features minimal.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# `chrono-tz` powers IANA timezone resolution (e.g. `America/New_York`) for
+# repeatable cron specs. `default-features = false` drops `serde` and
+# `case-insensitive` lookups — we don't need either; we only call
+# `<str>::parse::<chrono_tz::Tz>()`. Enabled out of the box because every
+# cron user with a city-named tz needs it.
+chrono-tz = { version = "0.10", default-features = false }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

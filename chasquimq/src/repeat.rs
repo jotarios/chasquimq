@@ -29,9 +29,21 @@ use crate::error::{Error, Result};
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RepeatPattern {
     /// Cron expression. Accepts both 5-field (minute hour dom month dow) and
-    /// 6-field (with leading seconds) syntax via the `croner` crate. The
-    /// `tz` field is parsed by `chrono_tz`-style names (e.g. `"America/New_York"`);
-    /// `None` means UTC.
+    /// 6-field (with leading seconds) syntax via the `croner` crate.
+    ///
+    /// The `tz` field accepts:
+    /// - `None` or `"UTC"` / `"Z"` → UTC.
+    /// - Fixed offsets `"+HH:MM"` / `"-HH:MM"` / `"+HHMM"` / `"-HHMM"`.
+    /// - Any IANA timezone name (e.g. `"America/New_York"`, `"Europe/London"`,
+    ///   `"US/Eastern"`) resolved via the `chrono-tz` database.
+    ///
+    /// IANA names are **DST-aware**: `0 2 * * *` in `America/New_York` fires
+    /// at 02:00 local on both sides of spring-forward / fall-back, with the
+    /// underlying UTC instant shifting by one hour. Fixed offsets are not.
+    ///
+    /// On fall-back ambiguous local times (e.g. New York `01:30` on the
+    /// November DST end, which exists twice — once as EDT and once as EST),
+    /// the **earlier** of the two UTC instants is selected.
     Cron {
         expression: String,
         tz: Option<String>,
@@ -44,6 +56,10 @@ impl RepeatPattern {
     /// Stable signature used to derive a default key when the caller doesn't
     /// supply one. Two specs with the same `job_name` and the same signature
     /// are considered the same recurring job — re-upserting overwrites.
+    ///
+    /// IANA aliases (e.g. `US/Eastern` and `America/New_York`) produce
+    /// distinct signatures even though they resolve to the same zone — pass
+    /// an explicit `key` if you need alias-collapse.
     pub fn signature(&self) -> String {
         match self {
             RepeatPattern::Cron { expression, tz } => {
@@ -214,6 +230,17 @@ pub(crate) fn next_fire_after(
     Ok(raw)
 }
 
+/// Resolved timezone for a cron spec. Carries either a fixed UTC offset (so
+/// `"+05:30"` and `"UTC"` keep working with no `chrono-tz` lookup) or a
+/// named IANA zone (so `"America/New_York"` honors DST transitions —
+/// occurrences land at the correct local wall-clock minute on both sides
+/// of spring-forward / fall-back).
+#[derive(Clone, Copy)]
+pub(crate) enum TzKind {
+    Fixed(chrono::FixedOffset),
+    Named(chrono_tz::Tz),
+}
+
 fn next_cron_after(expression: &str, tz: Option<&str>, from_ms: u64) -> Result<Option<u64>> {
     use chrono::{TimeZone, Utc};
     use croner::parser::{CronParser, Seconds};
@@ -230,47 +257,88 @@ fn next_cron_after(expression: &str, tz: Option<&str>, from_ms: u64) -> Result<O
     let from_secs = (from_ms / 1000) as i64;
     let from_nsec = ((from_ms % 1000) * 1_000_000) as u32;
 
-    // Resolve the offset. We accept three forms today:
-    // - `None` or `"UTC"` → UTC offset.
-    // - `"+HH:MM"` / `"-HH:MM"` / `"+HHMM"` → parsed as a fixed offset.
-    // Named IANA zones (`"America/New_York"`) are deliberately not supported
-    // yet because that would pull in `chrono-tz` (~600 KB compiled in). The
-    // BullMQ-compat layer (Phase 3+) can convert IANA names to the spec's
-    // current offset upstream, or this can be added behind a feature flag.
-    let offset = parse_tz_offset(tz)?;
-
     let utc = Utc
         .timestamp_opt(from_secs, from_nsec)
         .single()
         .ok_or_else(|| Error::Config("invalid from-time".into()))?;
-    let from = utc.with_timezone(&offset);
 
-    let next = cron
-        .find_next_occurrence(&from, false)
-        .map_err(|e| Error::Config(format!("cron scheduling failed: {e}")))?;
+    // Dispatch once on the resolved zone kind so each branch instantiates
+    // `find_next_occurrence` with a concrete `TimeZone` impl — no dynamic
+    // dispatch on the hot path. `next_in_zone` does the per-zone work.
+    let next_ms = match parse_tz(tz)? {
+        TzKind::Fixed(off) => next_in_zone(&cron, utc, off)?,
+        TzKind::Named(zone) => next_in_zone(&cron, utc, zone)?,
+    };
 
-    Ok(Some(next.timestamp_millis().max(0) as u64))
+    Ok(Some(next_ms))
 }
 
-fn parse_tz_offset(tz: Option<&str>) -> Result<chrono::FixedOffset> {
+/// Convert a UTC instant into the given zone, ask croner for the next
+/// occurrence, and project back to epoch ms. Generic over `TimeZone` so
+/// both `FixedOffset` and `chrono_tz::Tz` callers monomorphize cleanly.
+///
+/// `chrono` handles DST gaps/overlaps internally — the local time croner
+/// returns is always a real wall-clock moment in `tz`, so the round-trip
+/// back to UTC is total (no `LocalResult::None`/`Ambiguous` handling
+/// required here).
+fn next_in_zone<Tz: chrono::TimeZone>(
+    cron: &croner::Cron,
+    from_utc: chrono::DateTime<chrono::Utc>,
+    tz: Tz,
+) -> Result<u64> {
+    use chrono::Utc;
+    let from_local = from_utc.with_timezone(&tz);
+    let next_local = cron
+        .find_next_occurrence(&from_local, false)
+        .map_err(|e| Error::Config(format!("cron scheduling failed: {e}")))?;
+    Ok(next_local.with_timezone(&Utc).timestamp_millis().max(0) as u64)
+}
+
+/// Resolve a user-supplied tz string to a [`TzKind`]. DST-aware for IANA
+/// names; snapshot for fixed offsets.
+///
+/// Accepted forms:
+/// - `None` or `"UTC"` / `"Z"` → UTC.
+/// - `"+HH:MM"` / `"-HH:MM"` / `"+HHMM"` / `"-HHMM"` → fixed offset.
+/// - Any IANA timezone name parseable by `chrono-tz` (e.g.
+///   `"America/New_York"`, `"Europe/London"`, `"US/Eastern"`).
+fn parse_tz(tz: Option<&str>) -> Result<TzKind> {
     use chrono::FixedOffset;
+
     let raw = match tz {
-        None => return Ok(FixedOffset::east_opt(0).expect("UTC")),
+        None => return Ok(TzKind::Fixed(FixedOffset::east_opt(0).expect("UTC"))),
         Some(s) => s,
     };
     let trimmed = raw.trim();
-    if trimmed.eq_ignore_ascii_case("UTC") || trimmed == "Z" {
-        return Ok(FixedOffset::east_opt(0).expect("UTC"));
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("UTC") || trimmed == "Z" {
+        return Ok(TzKind::Fixed(FixedOffset::east_opt(0).expect("UTC")));
     }
-    // Accept `+HH:MM` / `-HH:MM` / `+HHMM` / `-HHMM`.
+
+    // Fixed-offset forms always start with `+` or `-`. Anything else is
+    // either an IANA name or an outright error.
+    if trimmed.starts_with('+') || trimmed.starts_with('-') {
+        return parse_fixed_offset(trimmed, raw).map(TzKind::Fixed);
+    }
+
+    // IANA lookup. `chrono_tz::Tz: FromStr` returns a static error string
+    // on failure; surface a friendlier message that lists every accepted
+    // form so the operator knows what to try next.
+    trimmed
+        .parse::<chrono_tz::Tz>()
+        .map(TzKind::Named)
+        .map_err(|_| {
+            Error::Config(format!(
+                "unsupported timezone {raw:?}: expected UTC, +HH:MM, or any IANA timezone name (e.g. \"America/New_York\")"
+            ))
+        })
+}
+
+fn parse_fixed_offset(trimmed: &str, raw: &str) -> Result<chrono::FixedOffset> {
+    use chrono::FixedOffset;
     let (sign, rest) = match trimmed.as_bytes().first() {
         Some(b'+') => (1, &trimmed[1..]),
         Some(b'-') => (-1, &trimmed[1..]),
-        _ => {
-            return Err(Error::Config(format!(
-                "unsupported timezone {raw:?}: expected UTC, +HH:MM, or -HH:MM (named IANA zones are not yet supported)"
-            )));
-        }
+        _ => unreachable!("parse_fixed_offset called without leading sign"),
     };
     let (hh, mm) = if let Some((h, m)) = rest.split_once(':') {
         (h, m)
@@ -390,5 +458,169 @@ mod tests {
         };
         let res = next_fire_after(&pat, 0, None);
         assert!(res.is_err(), "got {res:?}");
+    }
+
+    #[test]
+    fn next_fire_after_cron_fixed_offset_still_works() {
+        // Sanity: pre-existing fixed-offset path is unchanged.
+        // Cron `0 2 * * *` in `+05:30`, asked from 2026-01-15 00:00 UTC.
+        // Local time then = 05:30 IST. Next 02:00 IST is 2026-01-16 02:00
+        // IST = 2026-01-15 20:30 UTC.
+        let pat = RepeatPattern::Cron {
+            expression: "0 2 * * *".into(),
+            tz: Some("+05:30".into()),
+        };
+        let from_ms: u64 = 1_768_435_200_000; // 2026-01-15 00:00 UTC
+        let next = next_fire_after(&pat, from_ms, None).unwrap().unwrap();
+        // 2026-01-15 20:30 UTC
+        assert_eq!(next, 1_768_509_000_000_u64);
+    }
+
+    #[test]
+    fn next_fire_after_cron_named_iana_zone() {
+        // `0 2 * * *` in America/New_York. From 2026-01-15 00:00 UTC, NYC
+        // local time is 2026-01-14 19:00 EST (UTC-5, no DST). Next 02:00
+        // local fire = 2026-01-15 02:00 EST = 2026-01-15 07:00 UTC.
+        let pat = RepeatPattern::Cron {
+            expression: "0 2 * * *".into(),
+            tz: Some("America/New_York".into()),
+        };
+        let from_ms: u64 = 1_768_435_200_000; // 2026-01-15 00:00 UTC
+        let next = next_fire_after(&pat, from_ms, None).unwrap().unwrap();
+        assert_eq!(next, 1_768_460_400_000_u64); // 2026-01-15 07:00 UTC
+    }
+
+    #[test]
+    fn next_fire_after_cron_iana_zone_dst_transition() {
+        // The headline test: `0 2 * * *` in America/New_York, asked from
+        // 2026-03-09 00:00 UTC (after the 2026-03-08 spring-forward in
+        // NYC, which jumps 02:00 EST → 03:00 EDT). Local time then is
+        // 2026-03-08 20:00 EDT (UTC-4). The next 02:00 local fire is
+        // 2026-03-09 02:00 EDT = 2026-03-09 06:00 UTC — *not* 07:00 UTC,
+        // which is what a snapshot fixed-offset would give. This proves
+        // the resolver honors live DST rules instead of pinning the
+        // offset at upsert time.
+        let pat = RepeatPattern::Cron {
+            expression: "0 2 * * *".into(),
+            tz: Some("America/New_York".into()),
+        };
+        let from_ms: u64 = 1_773_014_400_000; // 2026-03-09 00:00 UTC
+        let next = next_fire_after(&pat, from_ms, None).unwrap().unwrap();
+        assert_eq!(next, 1_773_036_000_000_u64); // 2026-03-09 06:00 UTC (EDT)
+    }
+
+    #[test]
+    fn next_fire_after_cron_iana_alias() {
+        // chrono-tz exposes pre-1993 POSIX-style aliases like `US/Eastern`.
+        // Should resolve to the same zone as `America/New_York`.
+        let pat = RepeatPattern::Cron {
+            expression: "0 2 * * *".into(),
+            tz: Some("US/Eastern".into()),
+        };
+        let from_ms: u64 = 1_768_435_200_000; // 2026-01-15 00:00 UTC
+        let next = next_fire_after(&pat, from_ms, None).unwrap().unwrap();
+        assert_eq!(next, 1_768_460_400_000_u64); // 2026-01-15 07:00 UTC
+    }
+
+    #[test]
+    fn next_fire_after_cron_invalid_iana_zone_errors() {
+        let pat = RepeatPattern::Cron {
+            expression: "0 2 * * *".into(),
+            tz: Some("Mars/Olympus_Mons".into()),
+        };
+        let res = next_fire_after(&pat, 0, None);
+        assert!(res.is_err(), "got {res:?}");
+        // The error message should help the operator: list the accepted
+        // forms so they don't have to read the source.
+        let msg = format!("{}", res.unwrap_err());
+        assert!(msg.contains("UTC"), "msg={msg}");
+        assert!(msg.contains("IANA"), "msg={msg}");
+    }
+
+    #[test]
+    fn next_fire_after_cron_europe_london_bst() {
+        // `0 9 * * *` in Europe/London during BST (UTC+1). From
+        // 2026-06-15 00:00 UTC, London is at 01:00 BST. Next 09:00 BST
+        // = 2026-06-15 09:00 BST = 2026-06-15 08:00 UTC.
+        let pat = RepeatPattern::Cron {
+            expression: "0 9 * * *".into(),
+            tz: Some("Europe/London".into()),
+        };
+        let from_ms: u64 = 1_781_481_600_000; // 2026-06-15 00:00 UTC
+        let next = next_fire_after(&pat, from_ms, None).unwrap().unwrap();
+        assert_eq!(next, 1_781_510_400_000_u64); // 2026-06-15 08:00 UTC
+    }
+
+    #[test]
+    fn next_fire_after_cron_iana_dst_overlap_picks_consistent_instant() {
+        // Behavior pin: on the NYC fall-back transition, the local time
+        // `01:30` happens twice — once at 01:30 EDT (UTC-4) and again at
+        // 01:30 EST (UTC-5). For 2026, that transition is on
+        // 2026-11-01 02:00 EDT → 01:00 EST.
+        //
+        //   First occurrence:  01:30 EDT = 2026-11-01 05:30 UTC = 1_793_511_000_000 ms
+        //   Second occurrence: 01:30 EST = 2026-11-01 06:30 UTC = 1_793_514_600_000 ms
+        //
+        // Whichever of the two croner picks, we pin it so a future bump
+        // doesn't silently flip the behavior.
+        let pat = RepeatPattern::Cron {
+            expression: "30 1 * * *".into(),
+            tz: Some("America/New_York".into()),
+        };
+        // 2026-11-01 04:00 UTC = 2026-11-01 00:00 EDT (well before any
+        // 01:30 fire on the transition day).
+        let from_ms: u64 = 1_793_505_600_000;
+        let next = next_fire_after(&pat, from_ms, None).unwrap().unwrap();
+
+        let first_edt: u64 = 1_793_511_000_000; // 01:30 EDT (first wall-clock pass)
+        let second_est: u64 = 1_793_514_600_000; // 01:30 EST (second wall-clock pass)
+
+        assert!(
+            next == first_edt || next == second_est,
+            "expected {first_edt} or {second_est}, got {next}",
+        );
+        // Pinned: croner picks the **earlier** of the two ambiguous UTC
+        // instants (01:30 EDT, the first wall-clock occurrence in local
+        // time). If a croner upgrade flips this, this assertion fires
+        // and the doc on `RepeatPattern::Cron` needs updating in lockstep.
+        assert_eq!(next, first_edt);
+    }
+
+    #[test]
+    fn next_fire_after_cron_iana_dst_gap_skips_to_valid_local_time() {
+        // Behavior-pinning: `30 2 * * *` (02:30 every day) in
+        // America/New_York, on a spring-forward day. 2026-03-08 02:30 EST
+        // does not exist (clocks jump 02:00 → 03:00). croner picks the
+        // next *real* match. Whatever it picks, the result must:
+        //   1. Be strictly greater than the from-time.
+        //   2. Be a valid epoch ms (no panic, no overflow).
+        //   3. Decode back to 02:30 local on a date that isn't 2026-03-08.
+        // We're not picky about whether croner jumps to 03:30 EDT same
+        // day or skips to 02:30 EDT the following day — we just need it
+        // to not crash and not return the impossible local time.
+        use chrono::{TimeZone, Timelike};
+        let pat = RepeatPattern::Cron {
+            expression: "30 2 * * *".into(),
+            tz: Some("America/New_York".into()),
+        };
+        // 2026-03-08 06:00 UTC = 2026-03-08 01:00 EST (one hour before
+        // the spring-forward).
+        let from_ms: u64 = 1_772_949_600_000;
+        let next = next_fire_after(&pat, from_ms, None).unwrap().unwrap();
+        assert!(next > from_ms, "next={next} should be after from={from_ms}");
+
+        let zone: chrono_tz::Tz = "America/New_York".parse().unwrap();
+        let local = zone
+            .timestamp_millis_opt(next as i64)
+            .single()
+            .expect("local time exists");
+        // Must not be the nonexistent 02:30 on 2026-03-08.
+        let bad_date = chrono::NaiveDate::from_ymd_opt(2026, 3, 8).unwrap();
+        assert!(
+            !(local.date_naive() == bad_date
+                && local.time().hour() == 2
+                && local.time().minute() == 30),
+            "got nonexistent local time {local}",
+        );
     }
 }
