@@ -13,8 +13,17 @@ use fred::interfaces::ClientLike;
 use fred::types::{ClusterHash, CustomCommand, Value};
 use serde::de::IgnoredAny;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::mpsc;
+
+/// Latches `true` the first time a [`BackoffKind::Unknown`] variant is
+/// observed by [`backoff_ms_from_spec`]. The warning then fires exactly
+/// once per process — per-job logging would be too spammy on a busy
+/// queue with mixed-version producers, but a single breadcrumb is the
+/// right operator-visibility cost when a new producer SDK has rolled
+/// out ahead of consumers.
+static WARNED_UNKNOWN_KIND: AtomicBool = AtomicBool::new(false);
 
 const RETRY_REDIS_ATTEMPTS: usize = 3;
 const RETRY_REDIS_BASE_MS: u64 = 50;
@@ -251,6 +260,22 @@ pub(crate) fn backoff_ms_from_spec(
     spec: &BackoffSpec,
     fallback: &RetryConfig,
 ) -> u64 {
+    // Operator-visibility breadcrumb: a `BackoffKind::Unknown` here means a
+    // producer encoded a `kind` variant this consumer's `BackoffKind` enum
+    // doesn't know about — typically because a newer SDK has been deployed
+    // on the producer side ahead of consumers. The retry math silently
+    // degrades to exponential below; without this log, operators would
+    // see "weird retry timing" with no signal. `swap` returns the previous
+    // value, so the second-and-later calls collapse to a no-op.
+    if matches!(spec.kind, BackoffKind::Unknown)
+        && !WARNED_UNKNOWN_KIND.swap(true, Ordering::Relaxed)
+    {
+        tracing::warn!(
+            "consumer decoded BackoffKind::Unknown — likely a future-SDK variant; \
+             retry math degraded to exponential. Upgrade consumer to silence this warning."
+        );
+    }
+
     let max_delay_ms = spec.max_delay_ms.unwrap_or(fallback.max_backoff_ms);
     let jitter_ms = spec.jitter_ms.unwrap_or(fallback.jitter_ms);
 
@@ -410,6 +435,35 @@ mod tests {
         assert_eq!(backoff_ms_from_spec(1, &spec, &fallback), 100);
         assert_eq!(backoff_ms_from_spec(2, &spec, &fallback), 200);
         assert_eq!(backoff_ms_from_spec(3, &spec, &fallback), 400);
+    }
+
+    /// Repeated calls with `Unknown` must keep returning identical math
+    /// across invocations — the once-per-process operator-visibility
+    /// `tracing::warn` is fire-and-forget and must not alter the return
+    /// value or panic on the second-and-later call (the `AtomicBool::swap`
+    /// has already latched `true`, so the warn is skipped — no observable
+    /// behavior change).
+    #[test]
+    fn backoff_from_spec_unknown_kind_is_idempotent_across_calls() {
+        let fallback = RetryConfig {
+            initial_backoff_ms: 0,
+            max_backoff_ms: 100_000,
+            multiplier: 2.0,
+            jitter_ms: 0,
+        };
+        let spec = BackoffSpec {
+            kind: BackoffKind::Unknown,
+            delay_ms: 100,
+            max_delay_ms: None,
+            multiplier: None,
+            jitter_ms: Some(0),
+        };
+        let first = backoff_ms_from_spec(2, &spec, &fallback);
+        let second = backoff_ms_from_spec(2, &spec, &fallback);
+        let third = backoff_ms_from_spec(2, &spec, &fallback);
+        assert_eq!(first, 200);
+        assert_eq!(second, 200);
+        assert_eq!(third, 200);
     }
 
     #[test]

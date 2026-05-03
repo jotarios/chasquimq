@@ -24,7 +24,7 @@ pub(crate) fn now_ms() -> u64 {
 /// only apply `skip_serializing_if` on the outer `Job::retry` (which is
 /// the *last* field of `Job<T>` — safe to omit), and leave the inner
 /// fields here always present in the encoded form.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct JobRetryOverride {
     /// If set, overrides `ConsumerConfig::max_attempts` for this job.
     pub max_attempts: Option<u32>,
@@ -43,6 +43,7 @@ pub struct JobRetryOverride {
 /// pinned by `legacy_backoff_kind_string_decodes_into_enum` below.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum BackoffKind {
     /// Returns `delay_ms` plus jitter every retry, capped at
     /// `max_delay_ms`. No multiplier applied.
