@@ -103,6 +103,21 @@ docs(benchmarks): clarify single-host caveat in headline table
 chore: gitignore benchmarks/runs/
 ```
 
+## Producer API shape ladder
+
+The producer's `add*` family looks dense; the surface follows a consistent shape. When adding a new entry point, mirror this layout — and when in doubt, prefer composition over a new method.
+
+| Family | Purpose | Returns |
+|---|---|---|
+| `add` / `add_in` / `add_at` | Fire-and-forget. Engine generates a fresh ULID per call. | `JobId` |
+| `add_with_options` / `add_in_with_options` / `add_at_with_options` | Single job with [`AddOptions`] (optional stable id, optional [`JobRetryOverride`]). | `JobId` |
+| `add_with_id` / `add_in_with_id` / `add_at_with_id` | Single job, caller-supplied stable [`JobId`]. Idempotent under producer retry via `SET NX EX` on a dedup marker. | `JobId` |
+| `add_bulk` / `add_in_bulk` | Batches of jobs, generated ULIDs, pipelined `XADD` / `ZADD`. | `Vec<JobId>` |
+| `add_in_bulk_with_ids` | Batches with per-job stable ids — same idempotence model as `add_in_with_id`, applied per entry. | `Vec<JobId>` |
+| `add_bulk_with_options` | Batches sharing one `AddOptions` (retry override applied to every job). `opts.id` is rejected when `payloads.len() > 1` (use `add_in_bulk_with_ids` for per-job ids). | `Vec<JobId>` |
+
+Also: `cancel_delayed` / `cancel_delayed_bulk` for delayed-only entries (see [`Producer::cancel_delayed`]), and `peek_dlq` / `replay_dlq` for the DLQ tooling.
+
 ## What we'd love help with
 
 Phase 3 lead-in + Phase 2 polish (open scope):
