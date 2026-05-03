@@ -240,6 +240,7 @@ dependencies = [
  "napi-build",
  "napi-derive",
  "rmp-serde",
+ "serde",
  "serde_json",
  "thiserror",
  "tokio",

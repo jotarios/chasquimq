@@ -5,6 +5,16 @@
   "main": "index.js",
   "types": "index.d.ts",
   "browser": "browser.js",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./native": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    }
+  },
   "license": "MIT",
   "author": "Jorge Rios <j29.rios@gmail.com>",
   "repository": {
@@ -57,7 +67,7 @@
     "lint": "prettier --check \"**/*.{ts,tsx,js,json,md}\" && tsc --noEmit"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^3",
+    "@napi-rs/cli": "^2.18.4",
     "@types/node": "^20",
     "prettier": "^3",
     "typescript": "^5",
