@@ -157,6 +157,35 @@ Adapter metric names follow Prometheus base-unit convention: durations are expos
 - **`cancel_delayed` only works for jobs scheduled via the `_with_id` API surface.** Cancel looks up the exact ZSET member through a side-index (`{chasqui:<queue>}:didx:<job_id>`) that is written only by `SCHEDULE_DELAYED_IDEMPOTENT_SCRIPT` — i.e. by `add_in_with_id` / `add_at_with_id` / `add_in_bulk_with_ids`. Jobs scheduled via the plain `add_in` / `add_at` / `add_in_bulk` go through a direct `ZADD` that doesn't populate the index, so cancel by id is a no-op (returns `false`) for those. Use the `_with_id` variants when cancellation is in scope.
 - **Key format uses Redis Cluster hash tags** — every chasqui key looks like `{chasqui:<queue>}:<suffix>`. This is a pre-1.0 breaking change from earlier preview builds; redeploying against a Redis instance that holds old-format keys requires draining or manually renaming. New deployments are unaffected.
 
+## Node.js
+
+Use the Rust engine from Node.js with a high-level Queue/Worker API or direct NAPI bindings. Single npm package, prebuilt binaries for `darwin` / `linux` / `win32` (arm64 + x64).
+
+```bash
+npm install chasquimq    # coming soon — package not yet published
+```
+
+```ts
+import { Queue, Worker } from "chasquimq"
+
+const queue = new Queue("emails", { connection: { host: "127.0.0.1", port: 6379 } })
+await queue.add("welcome", { to: "alice@example.com" })
+
+const worker = new Worker("emails", async (job) => {
+    await sendEmail(job.data)
+}, { connection: { host: "127.0.0.1", port: 6379 } })
+
+worker.on("completed", (job) => console.log(`sent ${job.id}`))
+```
+
+The high-level surface — `Queue`, `Worker`, `Job`, `QueueEvents` — uses MessagePack on the wire and dispatches handler invocations across a tokio thread pool inside the addon, so JS event-loop pressure stays low.
+
+**Native API.** Power users wanting the unwrapped engine can `import { Producer, Consumer, Promoter } from "chasquimq/native"` for direct access. Bytes pass through as opaque MessagePack — you control encoding and the `Job<T>` shape end-to-end.
+
+**Status.** v1 of the Node.js bindings is feature-complete for `Queue.add` / `Worker` / `QueueEvents`. Some surfaces (per-job retries, cron-scheduled jobs, parent/child flows) are pending native exposure and throw `NotSupportedError` for now — call `import { NotSupportedError, UnrecoverableError } from "chasquimq"` to handle them.
+
+See [`docs/phase3-napi-design.md`](docs/phase3-napi-design.md) for the design doc and [`chasquimq-node/README.md`](chasquimq-node/README.md) for package-specific docs.
+
 ## Feature comparison
 
 ChasquiMQ is perf-first and Phase 2 complete; the table is honest about what isn't there yet. See the [Roadmap](#roadmap) for what's coming.
