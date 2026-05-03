@@ -2,13 +2,13 @@
   "name": "chasquimq",
   "version": "0.1.0",
   "description": "The fastest open-source message broker for Redis.",
-  "main": "index.js",
-  "types": "index.d.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "browser": "browser.js",
   "exports": {
     ".": {
-      "types": "./index.d.ts",
-      "default": "./index.js"
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
     },
     "./native": {
       "types": "./index.d.ts",
@@ -57,8 +57,9 @@
   },
   "scripts": {
     "artifacts": "napi artifacts",
-    "build": "napi build --platform --release --js index.js --dts index.d.ts",
-    "build:debug": "napi build --platform --js index.js --dts index.d.ts",
+    "build": "napi build --platform --release --js index.js --dts index.d.ts && tsc",
+    "build:debug": "napi build --platform --js index.js --dts index.d.ts && tsc",
+    "build:ts": "tsc",
     "prepublishOnly": "napi prepublish -t npm",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -74,6 +75,7 @@
     "vitest": "^2"
   },
   "dependencies": {
-    "@msgpack/msgpack": "^3"
+    "@msgpack/msgpack": "^3",
+    "ioredis": "^5"
   }
 }
