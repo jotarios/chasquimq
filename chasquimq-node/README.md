@@ -2,7 +2,7 @@
 
 Node.js bindings for [ChasquiMQ](https://github.com/jotarios/chasquimq) — the fastest open-source message broker for Redis. The Rust engine pulls jobs; JavaScript handlers process them.
 
-> **Status:** Phase 3 scaffolding. Native bindings, the high-level shim, and tests are forthcoming. Today this package builds, exposes `engineVersion()`, and nothing else.
+> **Status:** Phase 3 complete. The high-level shim ships `Queue` / `Worker` / `Job` / `QueueEvents` (with per-job retries, repeatable / cron jobs, DLQ peek/replay, delayed cancel, and `UnrecoverableError` short-circuit to DLQ); the unwrapped engine bindings live under `chasquimq/native`. Public API is pre-1.0 and may change.
 
 ## Install
 
