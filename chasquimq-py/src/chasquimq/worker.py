@@ -12,11 +12,15 @@ only one worker fires at a time.
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any, Awaitable, Callable, Optional
 
 from . import _native
 from ._encoding import decode_payload
 from .job import Job
+
+
+logger = logging.getLogger(__name__)
 
 
 Handler = Callable[[Job], Awaitable[Any]]
@@ -28,6 +32,11 @@ class Worker:
     Construction does not start the engine loop — call :meth:`run`. To
     stop, call :meth:`close`; the engine drains its in-flight handlers
     up to its configured shutdown deadline and then resolves.
+
+    ``concurrency`` defaults to ``100`` to match the Node shim and the
+    headline throughput target. Pass ``concurrency=1`` explicitly when
+    serial processing is required (e.g. handlers that mutate shared
+    state without their own synchronization).
     """
 
     def __init__(
@@ -36,7 +45,7 @@ class Worker:
         handler: Handler,
         *,
         redis_url: str = "redis://127.0.0.1:6379",
-        concurrency: int = 1,
+        concurrency: int = 100,
         max_attempts: int = 25,
         group: str = "default",
         consumer_id: Optional[str] = None,
@@ -90,6 +99,7 @@ class Worker:
         self._consumer_task: Optional[asyncio.Task[None]] = None
         self._scheduler_task: Optional[asyncio.Task[None]] = None
         self._running = False
+        self._closed = False
 
     @property
     def name(self) -> str:
@@ -99,7 +109,12 @@ class Worker:
         """Start the engine loop and resolve once it drains.
 
         Idempotent — calling :meth:`run` more than once awaits the
-        in-flight loop instead of starting a second one.
+        in-flight loop instead of starting a second one. Returns when
+        the consumer task completes (handler exit, exception, or
+        :meth:`close`); the scheduler task is awaited exactly once
+        inside this method's ``finally`` block, so :meth:`close` is
+        free to be called from any coroutine without racing the
+        awaits.
         """
         if self._running:
             assert self._consumer_task is not None
@@ -123,35 +138,51 @@ class Worker:
             self._consumer.run(native_handler)
         )
         if self._scheduler is not None:
-            self._scheduler_task = asyncio.ensure_future(self._scheduler.run())
+            self._scheduler_task = asyncio.ensure_future(
+                self._run_scheduler_logged()
+            )
 
         try:
             await self._consumer_task
         finally:
+            if self._scheduler is not None:
+                self._scheduler.shutdown()
             if self._scheduler_task is not None:
-                self._scheduler.shutdown()  # type: ignore[union-attr]
                 try:
                     await self._scheduler_task
                 except Exception:
                     pass
             self._running = False
 
+    async def _run_scheduler_logged(self) -> None:
+        assert self._scheduler is not None
+        try:
+            await self._scheduler.run()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "chasquimq scheduler stopped with error on queue %r: %s",
+                self._queue_name,
+                exc,
+            )
+
     async def close(self) -> None:
-        """Signal shutdown and await the engine drain."""
+        """Signal shutdown. Safe to call from any coroutine, any number
+        of times.
+
+        Trips the consumer's and scheduler's shutdown tokens; the
+        in-flight :meth:`run` returns promptly and joins the scheduler
+        task in its own ``finally`` block. ``close`` does not await the
+        engine tasks itself — that avoids the double-await race when a
+        caller invokes ``close`` while ``run`` is still in flight.
+        """
+        if self._closed:
+            return
+        self._closed = True
         self._consumer.shutdown()
         if self._scheduler is not None:
             self._scheduler.shutdown()
-        if self._consumer_task is not None:
-            try:
-                await self._consumer_task
-            except Exception:
-                pass
-        if self._scheduler_task is not None:
-            try:
-                await self._scheduler_task
-            except Exception:
-                pass
-        self._running = False
 
     @property
     def is_running(self) -> bool:
