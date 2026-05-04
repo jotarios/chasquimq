@@ -6,7 +6,7 @@ ChasquiMQ is a Rust-native job queue / message broker built on **Redis**, Messag
 
 Named after the *chasquis* — the relay runners of the Inca road system who carried messages across the Andes.
 
-> **Status:** Phases 1, 2, and 3 complete; Phase 4 (Python bindings + CLI dashboard) is the next milestone. Phase 1 (MVP) shipped: producer, consumer pool, batched acks, DLQ, graceful shutdown. Phase 2 added delayed jobs (`add_in` / `add_at` / `add_in_bulk` backed by Redis Sorted Sets + a leader-elected promoter), exponential-backoff retries via delayed-ZSET re-scheduling, DLQ inspect/replay tooling, full observability covering both the promoter and the consumer hot path (`MetricsSink` trait with `ReaderBatch` / `JobOutcome` / `RetryScheduled` / `DlqRouted` events; per-handler latency in microseconds; `chasquimq-metrics` adapter for Prometheus/OTel/StatsD with a `QueueLabeled<S>` wrapper for per-queue labels), idempotent delayed scheduling, and `cancel_delayed` / `cancel_delayed_bulk`. Phase 3 ships the Node.js bindings via NAPI-RS — high-level shim (`Queue` / `Worker` / `Job` / `QueueEvents`), per-job retries, repeatable / cron jobs (DST-aware via `chrono-tz`), and `UnrecoverableError` short-circuit to DLQ. CI runs rustfmt + clippy `-D warnings` + the full test suite against a `redis:8.6.2` service container on every PR. Public API is still pre-1.0 and will change.
+> **Status:** Phases 1–4 complete; the project is approaching v1.0. Phase 1 (MVP) shipped: producer, consumer pool, batched acks, DLQ, graceful shutdown. Phase 2 added delayed jobs (`add_in` / `add_at` / `add_in_bulk` backed by Redis Sorted Sets + a leader-elected promoter), exponential-backoff retries via delayed-ZSET re-scheduling, DLQ inspect/replay tooling, full observability covering both the promoter and the consumer hot path (`MetricsSink` trait with `ReaderBatch` / `JobOutcome` / `RetryScheduled` / `DlqRouted` events; per-handler latency in microseconds; `chasquimq-metrics` adapter for Prometheus/OTel/StatsD with a `QueueLabeled<S>` wrapper for per-queue labels), idempotent delayed scheduling, and `cancel_delayed` / `cancel_delayed_bulk`. Phase 3 ships the Node.js bindings via NAPI-RS — high-level shim (`Queue` / `Worker` / `Job` / `QueueEvents`), per-job retries, repeatable / cron jobs (DST-aware via `chrono-tz`), and `UnrecoverableError` short-circuit to DLQ. Phase 4 ships the Python bindings via PyO3 + the `chasqui` CLI for queue inspection: `pip install chasquimq` gets you `Queue` / `Worker` / `Job` / `QueueEvents` with asyncio-first ergonomics; `cargo install chasquimq-cli` (or grab a prebuilt binary) gets you `chasqui inspect / dlq peek / dlq replay / repeatable list / repeatable remove / watch / events`. CI runs rustfmt + clippy `-D warnings` + the full test suite against a `redis:8.6.2` service container on every PR; abi3 wheels build for 5 platforms (linux x86_64 / aarch64, macOS x86_64 / aarch64, windows x86_64) and publish to PyPI on `chore(release):` commits. Public API is still pre-1.0 and will change.
 
 ## Headline numbers
 
@@ -188,7 +188,7 @@ See [`docs/phase3-napi-design.md`](docs/phase3-napi-design.md) for the design do
 
 ## Feature comparison
 
-ChasquiMQ is perf-first and Phase 3 complete; the table is honest about what isn't there yet. See the [Roadmap](#roadmap) for what's coming.
+ChasquiMQ is perf-first and Phase 4 complete; the table is honest about what isn't there yet. See the [Roadmap](#roadmap) for what's coming.
 
 | Feature                                | ChasquiMQ        | BullMQ | Bull   | Bee     |
 | :------------------------------------- | :--------------: | :----: | :----: | :-----: |
@@ -214,12 +214,13 @@ ChasquiMQ is perf-first and Phase 3 complete; the table is honest about what isn
 | Parent/child dependencies              | Future           | ✓      | —      | —       |
 | Fair queues (noisy-neighbor mitigation)<sup>1</sup> | Future           | —      | —      | —       |
 | Sandboxed worker                       | n/a (Rust)       | ✓      | ✓      | —       |
-| UI                                     | Phase 4          | ✓      | ✓      | —       |
-| Node SDK                               | Phase 3          | ✓      | ✓      | ✓       |
-| Python SDK                             | Phase 4          | ✓      | —      | —       |
+| CLI dashboard                          | ✓ (`chasqui`)    | 3rd-party | 3rd-party | — |
+| Web UI                                 | Future           | ✓      | ✓      | —       |
+| Node SDK                               | ✓                | ✓      | ✓      | ✓       |
+| Python SDK                             | ✓                | ✓      | —      | —       |
 | Optimized for                          | Throughput       | Jobs   | Jobs   | Messages |
 
-"Future" rows aren't on the current roadmap (Phase 4 ships Python + a CLI dashboard). If one is blocking for you, please [open an issue](https://github.com/jotarios/chasquimq/issues) — it helps prioritize a v1.x.
+"Future" rows aren't on the current roadmap. If one is blocking for you, please [open an issue](https://github.com/jotarios/chasquimq/issues) — it helps prioritize a v1.x.
 
 <sup>1</sup> Producers tag messages with a tenant identifier (e.g. customer id, request type); when one tenant creates a backlog the broker prioritizes delivery for the others so a single noisy tenant can't elevate dwell time across the queue. AWS calls this [SQS fair queues](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-fair-queues.html). Same multi-tenant queue, no per-tenant rate limit, no thread-pool partitioning — the engine just rebalances which group gets the next reservation when one group dominates the in-flight set.
 
@@ -241,7 +242,7 @@ spike/                      exploratory throwaway code (not part of the engine)
 - **Phase 1:** Producer, consumer pool, batched pipelined acks, DLQ, graceful shutdown. ✅
 - **Phase 2:** ✅ Delayed jobs via sorted sets + Lua promoter; exponential retry backoff via delayed-ZSET re-scheduling; DLQ inspect/replay tooling + bounded growth; promoter observability hooks (`MetricsSink` trait + `chasquimq-metrics` adapter + Prometheus/OTel/StatsD examples); consumer / retry / DLQ observability hooks (`ReaderBatch`, `JobOutcome`, `RetryScheduled`, `DlqRouted` events; per-handler microsecond latency; `QueueLabeled<S>` adapter wrapper for per-queue labels); idempotent delayed scheduling (`add_in_with_id` / `add_at_with_id` / `add_in_bulk_with_ids` with Lua-gated dedup marker); cancellation (`cancel_delayed` / `cancel_delayed_bulk`); GitHub Actions CI.
 - **Phase 3:** ✅ Node.js bindings via NAPI-RS — JS handlers driven by the Rust engine; high-level shim (`Queue` / `Worker` / `Job` / `QueueEvents`) plus per-job retries, repeatable / cron jobs, DLQ peek/replay, delayed cancel, and `UnrecoverableError` short-circuit to DLQ. [Design doc.](docs/phase3-napi-design.md)
-- **Phase 4:** Python bindings via PyO3, CLI monitoring dashboard.
+- **Phase 4:** ✅ Python bindings via PyO3 — Python handlers driven by the Rust engine; high-level asyncio-first shim (`Queue` / `Worker` / `Job` / `QueueEvents`) parallel to the Node surface; abi3 wheels for 5 platforms; `UnrecoverableError` short-circuit. Plus `chasqui` CLI for queue inspection (`inspect` / `dlq peek/replay` / `repeatable list/remove` / `watch` / `events`). [Design doc.](docs/phase4-pyo3-design.md)
 
 API is still pre-1.0; breaking changes are flagged with `!` in the commit and a `BREAKING CHANGE:` footer.
 
