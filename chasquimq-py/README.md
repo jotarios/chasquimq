@@ -2,12 +2,12 @@
 
 Python bindings for [ChasquiMQ](https://github.com/jotarios/chasquimq) — the fastest open-source message broker for Redis. The Rust engine pulls jobs; Python `asyncio` handlers process them.
 
-> **Status:** Phase 4, slice A1 (scaffold). Only `chasquimq.version()` is exposed today; `Queue` / `Worker` / `Job` / `QueueEvents` ship in subsequent slices. Public API is pre-1.0 and may change.
+> **Status:** Phase 4, slice A4 (high-level shim). Public API is pre-1.0 and may change.
 
 ## Layout
 
 - `src-rs/` — PyO3 Rust bindings, compiled as the `chasquimq._native` extension module.
-- `src/chasquimq/` — Python shim (the `src layout`); re-exports the native module.
+- `src/chasquimq/` — Python shim (the `src layout`); re-exports the native module behind `Queue` / `Worker` / `Job` / `QueueEvents`.
 - `tests/` — pytest harness.
 
 ## Build
@@ -15,8 +15,44 @@ Python bindings for [ChasquiMQ](https://github.com/jotarios/chasquimq) — the f
 ```bash
 cd chasquimq-py
 maturin develop          # editable install into the active venv
-pytest tests/            # smoke tests
+pytest tests/            # smoke + integration tests (needs Redis 8.6+)
 maturin build --release  # wheels under target/wheels/
+```
+
+## Quickstart
+
+```python
+import asyncio
+
+from chasquimq import Queue, Worker, Job, RepeatPattern
+
+
+async def send_email(job: Job) -> None:
+    print(f"sending {job.data}")
+
+
+async def main() -> None:
+    queue = Queue("emails")
+
+    # Enqueue a one-shot job.
+    await queue.add("send-email", {"to": "ada@example.com"})
+
+    # Enqueue a recurring job (fires every 60s on this worker process).
+    await queue.add(
+        "daily-digest",
+        {"who": "all"},
+        repeat=RepeatPattern.every(60_000),
+    )
+
+    worker = Worker("emails", send_email, concurrency=10)
+    try:
+        await worker.run()
+    finally:
+        await worker.close()
+        await queue.close()
+
+
+asyncio.run(main())
 ```
 
 ## See also
