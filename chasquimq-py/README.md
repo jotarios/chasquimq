@@ -44,7 +44,8 @@ async def main() -> None:
         repeat=RepeatPattern.every(60_000),
     )
 
-    worker = Worker("emails", send_email, concurrency=10)
+    # `concurrency` defaults to 100; tune it to your handler's I/O profile.
+    worker = Worker("emails", send_email)
     try:
         await worker.run()
     finally:

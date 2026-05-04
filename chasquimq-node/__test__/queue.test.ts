@@ -135,6 +135,32 @@ skipIfNoRedis('Queue integration', () => {
   // changes, which are out of scope for this PR.
   it.skip('addInBulkWithIds schedules N delayed jobs with stable IDs (blocked: not exposed in NAPI binding)', () => {})
 
+  it('add() rejects negative / non-finite delay with RangeError', async () => {
+    await expect(
+      queue.add('x', { hello: 'x' }, { delay: -1 }),
+    ).rejects.toBeInstanceOf(RangeError)
+    await expect(
+      queue.add('x', { hello: 'x' }, { delay: Number.NaN }),
+    ).rejects.toBeInstanceOf(RangeError)
+    await expect(
+      queue.add('x', { hello: 'x' }, { delay: Number.POSITIVE_INFINITY }),
+    ).rejects.toBeInstanceOf(RangeError)
+  })
+
+  it('addBulk() rejects negative / non-finite delay on any entry', async () => {
+    await expect(
+      queue.addBulk([
+        { name: 'a', data: { hello: 'a' } },
+        { name: 'b', data: { hello: 'b' }, opts: { delay: -1 } },
+      ]),
+    ).rejects.toBeInstanceOf(RangeError)
+    await expect(
+      queue.addBulk([
+        { name: 'a', data: { hello: 'a' }, opts: { delay: Number.NaN } },
+      ]),
+    ).rejects.toBeInstanceOf(RangeError)
+  })
+
   it('remove() of a delayed job by id cancels it', async () => {
     const job = await queue.add(
       'cancellable',
