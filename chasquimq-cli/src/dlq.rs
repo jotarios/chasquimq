@@ -63,6 +63,7 @@ fn render_entries_table(queue: &str, entries: &[DlqEntry]) -> String {
         .set_header(vec![
             Cell::new(format!("dlq peek: {queue}")),
             Cell::new("source_id"),
+            Cell::new("name"),
             Cell::new("reason"),
             Cell::new("detail"),
             Cell::new("payload bytes"),
@@ -74,6 +75,7 @@ fn render_entries_table(queue: &str, entries: &[DlqEntry]) -> String {
             Cell::new("-"),
             Cell::new("-"),
             Cell::new("-"),
+            Cell::new("-"),
         ]);
         return table.to_string();
     }
@@ -81,6 +83,7 @@ fn render_entries_table(queue: &str, entries: &[DlqEntry]) -> String {
         table.add_row(vec![
             Cell::new(&e.dlq_id),
             Cell::new(&e.source_id),
+            Cell::new(if e.name.is_empty() { "-" } else { &e.name }),
             Cell::new(if e.reason.is_empty() { "-" } else { &e.reason }),
             Cell::new(format_detail(e.detail.as_deref())),
             Cell::new(e.payload.len()),
@@ -140,6 +143,7 @@ mod tests {
             reason: reason.to_string(),
             detail: detail.map(|s| s.to_string()),
             payload: Bytes::from(vec![0u8; payload_len]),
+            name: String::new(),
         }
     }
 

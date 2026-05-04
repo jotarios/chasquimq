@@ -1,5 +1,10 @@
 pub(crate) const PAYLOAD_FIELD: &str = "d";
 
+/// Stream entry field carrying the optional UTF-8 job `name` alongside the
+/// msgpack-encoded payload in `d`. Producer omits the field entirely for
+/// unnamed jobs; consumer treats absent and empty as equivalent.
+pub(crate) const NAME_FIELD: &str = "n";
+
 pub fn stream_key(queue_name: &str) -> String {
     format!("{{chasqui:{queue_name}}}:stream")
 }

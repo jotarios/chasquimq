@@ -3,6 +3,7 @@ use crate::job::Job;
 use crate::redis::commands::{
     REPLAY_DLQ_SCRIPT, eval_replay_args, evalsha_replay_args, script_load_args, xrange_args,
 };
+use crate::redis::keys::NAME_FIELD;
 use crate::redis::parse::{XrangeEntry, parse_xrange_response};
 use bytes::Bytes;
 use fred::clients::Pool;
@@ -32,6 +33,7 @@ pub(super) fn parse_dlq_entry(entry: XrangeEntry) -> DlqEntry {
     let mut reason = String::new();
     let mut detail: Option<String> = None;
     let mut payload = Bytes::new();
+    let mut name = String::new();
     for (k, v) in &entry.fields {
         match k.as_str() {
             "source_id" => {
@@ -50,6 +52,13 @@ pub(super) fn parse_dlq_entry(entry: XrangeEntry) -> DlqEntry {
             "d" => {
                 payload = v.as_bytes();
             }
+            // Match the `n` field via the canonical constant so a future rename
+            // of `NAME_FIELD` reaches this site automatically.
+            k if k == NAME_FIELD => {
+                if let Some(s) = v.as_string() {
+                    name = s;
+                }
+            }
             _ => {}
         }
     }
@@ -59,6 +68,7 @@ pub(super) fn parse_dlq_entry(entry: XrangeEntry) -> DlqEntry {
         reason,
         detail,
         payload,
+        name,
     }
 }
 
@@ -80,8 +90,8 @@ where
         return Ok(0);
     }
 
-    let pairs = reset_attempts::<T>(entries)?;
-    if pairs.is_empty() {
+    let triples = reset_attempts::<T>(entries)?;
+    if triples.is_empty() {
         return Ok(0);
     }
 
@@ -104,7 +114,7 @@ where
     };
 
     let evalsha_cmd = CustomCommand::new_static("EVALSHA", ClusterHash::FirstKey, false);
-    let args = evalsha_replay_args(&sha, dlq_key, stream_key, max_stream_len, &pairs);
+    let args = evalsha_replay_args(&sha, dlq_key, stream_key, max_stream_len, &triples);
     let res: std::result::Result<Value, _> = client.custom(evalsha_cmd, args).await;
     let count_value = match res {
         Ok(v) => v,
@@ -115,7 +125,7 @@ where
                 dlq_key,
                 stream_key,
                 max_stream_len,
-                &pairs,
+                &triples,
             );
             client.custom(cmd, args).await.map_err(Error::Redis)?
         }
@@ -123,15 +133,15 @@ where
     };
     match count_value {
         Value::Integer(n) => Ok(n.max(0) as usize),
-        _ => Ok(pairs.len()),
+        _ => Ok(triples.len()),
     }
 }
 
-fn reset_attempts<T>(entries: Vec<XrangeEntry>) -> Result<Vec<(String, Bytes)>>
+fn reset_attempts<T>(entries: Vec<XrangeEntry>) -> Result<Vec<(String, Bytes, String)>>
 where
     T: Serialize + DeserializeOwned,
 {
-    let mut pairs: Vec<(String, Bytes)> = Vec::with_capacity(entries.len());
+    let mut triples: Vec<(String, Bytes, String)> = Vec::with_capacity(entries.len());
     for entry in entries {
         let dlq_id = entry.id.clone();
         let parsed = parse_dlq_entry(entry);
@@ -153,7 +163,7 @@ where
         // the producer attached, not silently revert to queue-wide config.
         job.attempt = 0;
         let bytes = Bytes::from(rmp_serde::to_vec(&job)?);
-        pairs.push((dlq_id, bytes));
+        triples.push((dlq_id, bytes, parsed.name));
     }
-    Ok(pairs)
+    Ok(triples)
 }

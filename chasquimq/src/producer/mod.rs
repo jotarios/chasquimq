@@ -35,6 +35,15 @@ pub struct DlqEntry {
     pub reason: String,
     pub detail: Option<String>,
     pub payload: Bytes,
+    /// Dispatch name preserved verbatim from the source stream entry's
+    /// `n` field at DLQ-route time. Empty when the original entry had no
+    /// `n` (pre-name-on-wire producers, or the `add` / `add_bulk` legacy
+    /// path), and empty for reader-side DLQ routes (malformed / oversize /
+    /// decode-fail) where the entry was never decoded in the first place.
+    /// `Producer::replay_dlq` re-emits this back onto the main stream's
+    /// `n` field, so a replayed job lands on the consumer with `Job::name`
+    /// intact.
+    pub name: String,
 }
 
 /// Per-job options for the `*_with_options` family of producer methods.
@@ -51,10 +60,27 @@ pub struct DlqEntry {
 /// and [`crate::config::ConsumerConfig::retry`]. Carried in the encoded
 /// `Job<T>` payload and honored by the consumer's retry / DLQ gates. `None`
 /// → consumer falls back to its queue-wide retry config.
+///
+/// `name`: optional dispatch name carried as a separate `n` field on the
+/// stream entry (UTF-8, validated `<= 256` bytes at the producer boundary).
+/// Empty string is the default and means "no name supplied" — equivalent
+/// on the wire to omitting the field entirely.
+///
+/// **Slice-4 gap**: `name` is honored by [`Producer::add_with_options`] /
+/// [`Producer::add_bulk_with_options`] (immediate XADD path) and survives
+/// DLQ peek + DLQ replay. It is **not** yet supported on the delayed path —
+/// [`Producer::add_in_with_options`] and [`Producer::add_at_with_options`]
+/// reject a non-empty `name` with [`Error::Config`] until slice 4 plumbs
+/// it through the delayed-ZSET encoder. Automatic retry-via-delayed-ZSET
+/// (the consumer's retry path) and repeatable-spec fires also drop the
+/// name on re-emit; the consumer sees `Job::name = ""` after a handler
+/// error reschedules the job. See [`Job::name`] for the canonical list of
+/// preserve / drop sites.
 #[derive(Default, Clone, Debug)]
 pub struct AddOptions {
     pub id: Option<JobId>,
     pub retry: Option<JobRetryOverride>,
+    pub name: String,
 }
 
 impl AddOptions {
@@ -71,6 +97,52 @@ impl AddOptions {
         self.retry = Some(retry);
         self
     }
+
+    /// Set the dispatch [`Self::name`] on these options. See [`AddOptions`]
+    /// for the slice-4 gap on delayed / retry-reschedule / repeatable-fire
+    /// paths — a name set here survives the immediate-XADD path and DLQ
+    /// peek / replay, but **not** the delayed path (rejected up-front),
+    /// automatic retry-via-delayed-ZSET, or scheduler-fire.
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
+    }
+}
+
+/// Maximum byte length of a job name on the wire. UTF-8 string, `<= 256` bytes.
+/// Pragmatic upper bound: handler-dispatch keys, queue topic strings, and
+/// BullMQ-style job names empirically fit in well under 100 bytes; the cap
+/// keeps the per-entry stream framing small (one-byte length prefix in
+/// Redis Streams' RESP frame) and gives operators a hard ceiling on a
+/// field that's tagged onto every event-stream emit and metric label.
+pub(crate) const MAX_NAME_LEN: usize = 256;
+
+fn validate_name(name: &str) -> Result<()> {
+    if name.len() > MAX_NAME_LEN {
+        return Err(Error::Config(format!(
+            "job name exceeds {MAX_NAME_LEN}-byte cap (got {} bytes)",
+            name.len()
+        )));
+    }
+    Ok(())
+}
+
+/// Reject `AddOptions::name` on producer entry points whose downstream path
+/// re-encodes the job onto the delayed ZSET (or otherwise re-XADDs without
+/// re-attaching the source entry's `n` field). Slice 1 only wired `name`
+/// through the immediate `XADD`; the delayed-ZSET encoder, the promoter's
+/// `ZRANGEBYSCORE → XADD`, and the scheduler-fire path will all silently
+/// drop a producer-supplied name today. Until slice 4 closes that, an
+/// explicit error is loudly preferable to a silent drop — callers find out
+/// at compile-test time, not in production where the worker sees `name = ""`.
+fn reject_name_on_delayed_path(name: &str, method: &str) -> Result<()> {
+    if !name.is_empty() {
+        return Err(Error::Config(format!(
+            "{method}: delayed scheduling does not yet preserve `name` (slice 4); \
+             got name={name:?}"
+        )));
+    }
+    Ok(())
 }
 
 pub struct Producer<T> {
@@ -432,22 +504,37 @@ impl<T: Serialize> Producer<T> {
         let job = Job::new(payload);
         let id = job.id.clone();
         let bytes = Bytes::from(rmp_serde::to_vec(&job)?);
-        self.xadd(&id, bytes).await?;
+        self.xadd(&id, bytes, "").await?;
         Ok(id)
     }
 
     pub async fn add_with_id(&self, id: JobId, payload: T) -> Result<JobId> {
         let job = Job::with_id(id.clone(), payload);
         let bytes = Bytes::from(rmp_serde::to_vec(&job)?);
-        self.xadd(&id, bytes).await?;
+        self.xadd(&id, bytes, "").await?;
         Ok(id)
     }
 
     /// Like [`Producer::add`], but accepts an [`AddOptions`] carrying an
-    /// optional stable [`JobId`] and optional per-job [`JobRetryOverride`].
-    /// Per-job overrides ride along inside the encoded `Job<T>` and are
-    /// honored by the consumer's retry / DLQ gates.
+    /// optional stable [`JobId`], optional per-job [`JobRetryOverride`],
+    /// and an optional dispatch `name`. The retry override rides inside the
+    /// encoded `Job<T>` payload; the name rides as a separate `n` field on
+    /// the stream entry, capped at 256 bytes (rejected with [`Error::Config`]
+    /// when oversize).
+    ///
+    /// **`name` survives** this immediate `XADD` path end-to-end — the
+    /// consumer reads it back as [`Job::name`]. It also survives a DLQ
+    /// route + replay round trip (see [`Producer::peek_dlq`] /
+    /// [`Producer::replay_dlq`]).
+    ///
+    /// **`name` does NOT survive** an automatic retry-via-delayed-ZSET
+    /// reschedule (consumer-side retry path re-encodes `Job<T>` and
+    /// `ZADD`s it without the `n` field — the promoter's later XADD has no
+    /// name to attach). After the first handler error, the consumer sees
+    /// `Job::name = ""` on the retry attempt. Slice 4 closes this gap.
+    /// See [`Job::name`] for the canonical list of preserve / drop sites.
     pub async fn add_with_options(&self, payload: T, opts: AddOptions) -> Result<JobId> {
+        validate_name(&opts.name)?;
         let mut job = match opts.id {
             Some(id) => Job::with_id(id, payload),
             None => Job::new(payload),
@@ -457,13 +544,14 @@ impl<T: Serialize> Producer<T> {
         }
         let id = job.id.clone();
         let bytes = Bytes::from(rmp_serde::to_vec(&job)?);
-        self.xadd(&id, bytes).await?;
+        self.xadd(&id, bytes, &opts.name).await?;
         Ok(id)
     }
 
     /// Bulk variant of [`Producer::add_with_options`]. All entries share
-    /// one [`AddOptions`] instance — the same retry override is applied to
-    /// every job in the batch.
+    /// one [`AddOptions`] instance — the same retry override **and** the
+    /// same `name` are applied to every job in the batch. Use
+    /// [`Producer::add_bulk_named`] when you need per-job names.
     ///
     /// Setting `opts.id` with multiple payloads is rejected with
     /// `Error::Config`; a single id can't be reused across `n` jobs and
@@ -471,6 +559,12 @@ impl<T: Serialize> Producer<T> {
     /// [`Producer::add_in_bulk_with_ids`] when you need per-job stable IDs.
     /// `opts.id` set with exactly one payload is fine — it's the same as
     /// [`Producer::add_with_options`] one call deep.
+    ///
+    /// **`name`** has the same preserve / drop profile as
+    /// [`Producer::add_with_options`]: survives the immediate XADD →
+    /// consumer path and DLQ peek / replay; dropped on automatic
+    /// retry-via-delayed-ZSET and repeatable-spec scheduler-fire until
+    /// slice 4. See [`Job::name`] for the canonical list.
     pub async fn add_bulk_with_options(
         &self,
         payloads: Vec<T>,
@@ -479,6 +573,7 @@ impl<T: Serialize> Producer<T> {
         if payloads.is_empty() {
             return Ok(Vec::new());
         }
+        validate_name(&opts.name)?;
         if opts.id.is_some() && payloads.len() > 1 {
             return Err(Error::Config(
                 "add_bulk_with_options: opts.id can only be set when payloads.len() == 1; \
@@ -511,6 +606,7 @@ impl<T: Serialize> Producer<T> {
                 iid,
                 self.max_stream_len,
                 bytes.clone(),
+                &opts.name,
             );
             let _: () = pipeline
                 .custom(cmd.clone(), args)
@@ -543,6 +639,7 @@ impl<T: Serialize> Producer<T> {
                 iid,
                 self.max_stream_len,
                 bytes.clone(),
+                "",
             );
             let _: () = pipeline
                 .custom(cmd.clone(), args)
@@ -551,6 +648,54 @@ impl<T: Serialize> Producer<T> {
         }
         let _: Vec<Value> = pipeline.all().await.map_err(Error::Redis)?;
         Ok(encoded.into_iter().map(|(id, _)| id).collect())
+    }
+
+    /// Bulk variant that accepts a per-job `(name, payload)` pair so each
+    /// entry can carry its own dispatch name. Each name is validated against
+    /// the 256-byte cap before any XADD is issued; an oversize name in the
+    /// batch fails the whole call atomically (no partial writes to Redis,
+    /// matching `add_bulk`'s atomic-encode posture).
+    ///
+    /// **Preserve / drop profile** matches [`Producer::add_with_options`]:
+    /// each per-entry `name` survives the immediate XADD → consumer path
+    /// and DLQ peek / replay. It does **not** survive automatic retry-via-
+    /// delayed-ZSET re-encode or repeatable-spec scheduler-fire (slice 4
+    /// closes this). See [`Job::name`] for the canonical list of preserve /
+    /// drop sites.
+    pub async fn add_bulk_named(&self, items: Vec<(String, T)>) -> Result<Vec<JobId>> {
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+        for (name, _) in &items {
+            validate_name(name)?;
+        }
+        let mut encoded: Vec<(JobId, Bytes, String)> = Vec::with_capacity(items.len());
+        for (name, payload) in items {
+            let job = Job::new(payload);
+            let id = job.id.clone();
+            let bytes = Bytes::from(rmp_serde::to_vec(&job)?);
+            encoded.push((id, bytes, name));
+        }
+
+        let client = self.pool.next_connected();
+        let pipeline = client.pipeline();
+        let cmd = CustomCommand::new_static("XADD", ClusterHash::FirstKey, false);
+        for (iid, bytes, name) in &encoded {
+            let args = xadd_args(
+                self.stream_key.as_ref(),
+                self.producer_id.as_ref(),
+                iid,
+                self.max_stream_len,
+                bytes.clone(),
+                name,
+            );
+            let _: () = pipeline
+                .custom(cmd.clone(), args)
+                .await
+                .map_err(Error::Redis)?;
+        }
+        let _: Vec<Value> = pipeline.all().await.map_err(Error::Redis)?;
+        Ok(encoded.into_iter().map(|(id, _, _)| id).collect())
     }
 
     /// Schedule a job to run after `delay`.
@@ -615,12 +760,20 @@ impl<T: Serialize> Producer<T> {
     /// as [`Producer::add_in_with_id`]). When `opts.id` is `None`, this
     /// uses the at-least-once `ZADD` path. Either way, the per-job retry
     /// override rides inside the encoded `Job<T>`.
+    ///
+    /// **`opts.name` is currently rejected with [`Error::Config`] when set
+    /// on the delayed path** (slice 1 only plumbed `n` through the immediate
+    /// `XADD`). Slice 4 will close this gap by carrying the name through the
+    /// delayed-ZSET re-encode and the promoter's `ZRANGEBYSCORE → XADD` path.
+    /// Until then, naming a delayed job would silently drop the name on
+    /// promotion — an explicit error is loudly preferable.
     pub async fn add_in_with_options(
         &self,
         delay: Duration,
         payload: T,
         opts: AddOptions,
     ) -> Result<JobId> {
+        reject_name_on_delayed_path(&opts.name, "add_in_with_options")?;
         self.check_delay_secs(delay.as_secs())?;
         if delay.is_zero() {
             return self.add_with_options(payload, opts).await;
@@ -646,13 +799,15 @@ impl<T: Serialize> Producer<T> {
     }
 
     /// Like [`Producer::add_at`], but accepts an [`AddOptions`]. See
-    /// [`Producer::add_in_with_options`] for the dedup / retry-carry model.
+    /// [`Producer::add_in_with_options`] for the dedup / retry-carry model
+    /// and the slice-4 `opts.name` rejection.
     pub async fn add_at_with_options(
         &self,
         run_at: SystemTime,
         payload: T,
         opts: AddOptions,
     ) -> Result<JobId> {
+        reject_name_on_delayed_path(&opts.name, "add_at_with_options")?;
         let run_at_ms = match run_at.duration_since(UNIX_EPOCH) {
             Ok(d) => u128_to_u64_or_err(d.as_millis())?,
             Err(_) => 0,
@@ -771,6 +926,7 @@ impl<T: Serialize> Producer<T> {
                 iid,
                 self.max_stream_len,
                 bytes.clone(),
+                "",
             );
             let _: () = pipeline
                 .custom(cmd.clone(), args)
@@ -959,7 +1115,7 @@ impl<T: Serialize> Producer<T> {
         Ok(encoded.into_iter().map(|(id, _)| id).collect())
     }
 
-    async fn xadd(&self, iid: &str, bytes: Bytes) -> Result<()> {
+    async fn xadd(&self, iid: &str, bytes: Bytes, name: &str) -> Result<()> {
         let client = self.pool.next_connected();
         let args = xadd_args(
             self.stream_key.as_ref(),
@@ -967,6 +1123,7 @@ impl<T: Serialize> Producer<T> {
             iid,
             self.max_stream_len,
             bytes,
+            name,
         );
         let cmd = CustomCommand::new_static("XADD", ClusterHash::FirstKey, false);
         let _: Value = client.custom(cmd, args).await.map_err(Error::Redis)?;
@@ -1201,5 +1358,46 @@ mod parse_lua_int_tests {
             0
         );
         assert_eq!(parse_lua_int(&Value::Null), 0);
+    }
+}
+
+#[cfg(test)]
+mod name_validation_tests {
+    use super::{MAX_NAME_LEN, validate_name};
+    use crate::error::Error;
+
+    #[test]
+    fn empty_name_is_valid() {
+        validate_name("").expect("empty name accepted");
+    }
+
+    #[test]
+    fn short_name_is_valid() {
+        validate_name("send-email").expect("short name accepted");
+    }
+
+    #[test]
+    fn name_at_cap_is_valid() {
+        let s = "x".repeat(MAX_NAME_LEN);
+        validate_name(&s).expect("name at cap accepted");
+    }
+
+    #[test]
+    fn oversize_name_is_rejected_with_config_error() {
+        let s = "x".repeat(MAX_NAME_LEN + 1);
+        let err = validate_name(&s).expect_err("oversize name rejected");
+        match err {
+            Error::Config(msg) => {
+                assert!(
+                    msg.contains("256") || msg.contains(&format!("{MAX_NAME_LEN}")),
+                    "error message must mention the cap: {msg}"
+                );
+                assert!(
+                    msg.contains(&format!("{}", MAX_NAME_LEN + 1)),
+                    "error message must mention the actual byte length: {msg}"
+                );
+            }
+            other => panic!("expected Error::Config, got {other:?}"),
+        }
     }
 }

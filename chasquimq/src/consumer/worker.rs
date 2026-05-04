@@ -174,6 +174,7 @@ async fn on_handler_failure<T: Serialize + Send + 'static>(
             encoded,
             DlqReason::Unrecoverable,
             just_ran,
+            job.name.clone(),
         )
         .await;
         return;
@@ -195,6 +196,7 @@ async fn on_handler_failure<T: Serialize + Send + 'static>(
             encoded,
             DlqReason::RetriesExhausted,
             just_ran,
+            job.name.clone(),
         )
         .await;
         return;

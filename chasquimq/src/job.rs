@@ -114,6 +114,45 @@ pub struct Job<T> {
     /// will route those jobs to the DLQ (decode failure on read).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<JobRetryOverride>,
+    /// Optional handler-dispatch name carried as a separate `n` field on the
+    /// Redis Stream entry, NOT inside the msgpack-encoded `Job<T>` envelope.
+    ///
+    /// `#[serde(skip)]` on this field is load-bearing: putting `name` inside
+    /// the positional msgpack array alongside the trailing-optional `retry`
+    /// would create wire-format ambiguity (slot N could be a `retry`-shaped
+    /// struct or a `name` string depending on which trailing-skip fired).
+    /// Keeping it out of the envelope means the rmp-serde decode path stays
+    /// the existing 4-or-5-element shape pinned by slice 8, and `name`
+    /// travels via the `n` stream-entry field — readable into a metric label
+    /// or events-stream field without msgpack-decoding the payload bytes.
+    ///
+    /// Set on the read path by the consumer's reader (from the entry's `n`
+    /// field). `String::new()` for unnamed jobs.
+    ///
+    /// **Where `name` is preserved (slice 1 + PR #56 fixups):**
+    /// - Producer→consumer hot path (`Producer::add_with_options` /
+    ///   `add_bulk_with_options` / `add_bulk_named` → `XADD` with `n` →
+    ///   `XREADGROUP` parser populates `Job::name`).
+    /// - DLQ relocate (`xadd_dlq_args` carries `n` verbatim from the source
+    ///   entry).
+    /// - DLQ peek (`Producer::peek_dlq` returns `DlqEntry::name`).
+    /// - DLQ replay (`Producer::replay_dlq` re-emits `n` on the new XADD).
+    ///
+    /// **Where `name` is dropped today (slice 4 will close):**
+    /// - Automatic retry-via-delayed-ZSET re-encode. The consumer's retry
+    ///   path re-encodes `Job<T>` with `attempt + 1` and `ZADD`s onto the
+    ///   delayed sorted set; the encoded bytes are the only thing the
+    ///   promoter has, and it `XADD`s without an `n` field. Replay the
+    ///   resulting consumer event and `Job::name == ""` even if the
+    ///   original arrived with a name.
+    /// - Repeatable-spec scheduler-fire. `RepeatableSpec` carries
+    ///   `job_name`, but the scheduler's `XADD` / `ZADD` path doesn't
+    ///   thread it onto the stream entry's `n` field yet.
+    ///
+    /// In both drop cases, the original arrival sees `name`; only re-emits
+    /// after a handler error or a repeatable fire lose it.
+    #[serde(default, skip)]
+    pub name: String,
 }
 
 impl<T> Job<T> {
@@ -128,12 +167,21 @@ impl<T> Job<T> {
             created_at_ms: now_ms(),
             attempt: 0,
             retry: None,
+            name: String::new(),
         }
     }
 
     /// Builder-style setter for the per-job retry override.
     pub fn with_retry(mut self, retry: JobRetryOverride) -> Self {
         self.retry = Some(retry);
+        self
+    }
+
+    /// Builder-style setter for the dispatch name. Same parser-populated
+    /// field set on the read path; this is just a convenience for tests and
+    /// for consumers that want to construct a `Job<T>` by hand.
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
         self
     }
 }
@@ -183,6 +231,29 @@ mod tests {
         assert_eq!(job.payload, decoded.payload);
         assert_eq!(job.created_at_ms, decoded.created_at_ms);
         assert_eq!(decoded.retry, None);
+        assert_eq!(decoded.name, "");
+    }
+
+    /// `Job::name` is `#[serde(skip)]` — encoding a job with a non-empty name
+    /// must not grow the msgpack envelope; decoding always defaults to `""`.
+    /// This is what keeps the wire shape identical to the pre-slice-1 form
+    /// and makes the `n` stream-entry field the single source of truth on
+    /// the read path.
+    #[test]
+    fn name_field_is_not_serialized() {
+        let job_named: Job<u32> = Job::with_id("test".into(), 42).with_name("send-email");
+        let job_unnamed: Job<u32> = Job::with_id("test".into(), 42);
+        let bytes_named = rmp_serde::to_vec(&job_named).expect("encode named");
+        let bytes_unnamed = rmp_serde::to_vec(&job_unnamed).expect("encode unnamed");
+        assert_eq!(
+            bytes_named, bytes_unnamed,
+            "name must be #[serde(skip)] — encoded bytes must match the unnamed shape"
+        );
+        let decoded: Job<u32> = rmp_serde::from_slice(&bytes_named).expect("decode");
+        assert_eq!(
+            decoded.name, "",
+            "decoded name defaults to empty; the n stream-entry field is the source of truth"
+        );
     }
 
     #[test]

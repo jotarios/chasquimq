@@ -1,4 +1,4 @@
-use crate::redis::keys::PAYLOAD_FIELD;
+use crate::redis::keys::{NAME_FIELD, PAYLOAD_FIELD};
 use bytes::Bytes;
 use fred::types::Value;
 
@@ -68,18 +68,23 @@ return 0
 
 /// Replays up to ARGV[1] entries from the DLQ stream (KEYS[1]) back into the
 /// main stream (KEYS[2]). For each entry, the caller has already decoded the
-/// DLQ payload, reset Job::attempt to 0, and re-encoded — the script just does
-/// the move atomically.
+/// DLQ payload, reset Job::attempt to 0, re-encoded, and read the source
+/// entry's `n` field — the script just does the move atomically.
 ///
 /// ARGV[1] = max_stream_len (for XADD MAXLEN ~)
-/// ARGV[2..] = pairs of (dlq_entry_id, replay_payload_bytes)
+/// ARGV[2..] = triples of (dlq_entry_id, replay_payload_bytes, name)
+///   where `name` is the source DLQ entry's `n` field, or the empty string
+///   if the source had no `n` (pre-name-on-wire producers, or reader-side
+///   DLQ routes for malformed entries). An empty `name` is omitted from the
+///   re-emitted XADD entirely so the replay shape matches an unnamed
+///   producer's path byte-for-byte.
 ///
 /// **Concurrent-replay safety**: XDEL is checked first; XADD only happens if
 /// XDEL returned 1 (the entry actually existed and was removed). If a second
 /// concurrent replay reaches the same dlq_id, its XDEL returns 0 and that
-/// pair is skipped — no duplicate XADD to the main stream. The atomic ordering
-/// (XDEL gate, then XADD inside the same script invocation) is what makes
-/// concurrent replays correct without an external lock.
+/// triple is skipped — no duplicate XADD to the main stream. The atomic
+/// ordering (XDEL gate, then XADD inside the same script invocation) is what
+/// makes concurrent replays correct without an external lock.
 pub(crate) const REPLAY_DLQ_SCRIPT: &str = r#"
 local dlq = KEYS[1]
 local stream = KEYS[2]
@@ -89,12 +94,17 @@ local i = 2
 while i <= #ARGV do
   local dlq_id = ARGV[i]
   local payload = ARGV[i + 1]
+  local name = ARGV[i + 2]
   local deleted = redis.call('XDEL', dlq, dlq_id)
   if deleted == 1 then
-    redis.call('XADD', stream, 'MAXLEN', '~', max_stream_len, '*', 'd', payload)
+    if name ~= nil and name ~= '' then
+      redis.call('XADD', stream, 'MAXLEN', '~', max_stream_len, '*', 'd', payload, 'n', name)
+    else
+      redis.call('XADD', stream, 'MAXLEN', '~', max_stream_len, '*', 'd', payload)
+    end
     replayed = replayed + 1
   end
-  i = i + 2
+  i = i + 3
 end
 return replayed
 "#;
@@ -333,19 +343,24 @@ pub(crate) fn xadd_args(
     iid: &str,
     max_stream_len: u64,
     bytes: Bytes,
+    name: &str,
 ) -> Vec<Value> {
-    vec![
-        Value::from(stream_key),
-        Value::from("IDMP"),
-        Value::from(producer_id),
-        Value::from(iid),
-        Value::from("MAXLEN"),
-        Value::from("~"),
-        Value::from(max_stream_len as i64),
-        Value::from("*"),
-        Value::from(PAYLOAD_FIELD),
-        Value::Bytes(bytes),
-    ]
+    let mut args: Vec<Value> = Vec::with_capacity(10 + (!name.is_empty() as usize) * 2);
+    args.push(Value::from(stream_key));
+    args.push(Value::from("IDMP"));
+    args.push(Value::from(producer_id));
+    args.push(Value::from(iid));
+    args.push(Value::from("MAXLEN"));
+    args.push(Value::from("~"));
+    args.push(Value::from(max_stream_len as i64));
+    args.push(Value::from("*"));
+    args.push(Value::from(PAYLOAD_FIELD));
+    args.push(Value::Bytes(bytes));
+    if !name.is_empty() {
+        args.push(Value::from(NAME_FIELD));
+        args.push(Value::from(name));
+    }
+    args
 }
 
 pub(crate) fn xreadgroup_args(
@@ -385,7 +400,10 @@ pub(crate) fn xackdel_args(stream_key: &str, group: &str, ids: &[impl AsRef<str>
 }
 
 /// XADD args for relocating a stream entry into the DLQ.
-/// Carries the original payload plus source_id/reason/optional detail metadata.
+/// Carries the original payload plus source_id/reason/optional detail metadata,
+/// and the optional `n` field if the source entry had one — preserved verbatim
+/// so DLQ inspectors and the future replay path can route by name.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn xadd_dlq_args(
     dlq_key: &str,
     producer_id: &str,
@@ -394,8 +412,10 @@ pub(crate) fn xadd_dlq_args(
     reason: &str,
     detail: Option<&str>,
     max_stream_len: u64,
+    name: &str,
 ) -> Vec<Value> {
-    let mut args: Vec<Value> = Vec::with_capacity(16 + detail.is_some() as usize * 2);
+    let mut args: Vec<Value> =
+        Vec::with_capacity(16 + (detail.is_some() as usize + !name.is_empty() as usize) * 2);
     args.push(Value::from(dlq_key));
     args.push(Value::from("IDMP"));
     args.push(Value::from(producer_id));
@@ -406,6 +426,10 @@ pub(crate) fn xadd_dlq_args(
     args.push(Value::from("*"));
     args.push(Value::from(PAYLOAD_FIELD));
     args.push(Value::Bytes(payload));
+    if !name.is_empty() {
+        args.push(Value::from(NAME_FIELD));
+        args.push(Value::from(name));
+    }
     args.push(Value::from("source_id"));
     args.push(Value::from(source_id));
     args.push(Value::from("reason"));
@@ -478,17 +502,18 @@ pub(crate) fn evalsha_replay_args(
     dlq_key: &str,
     stream_key: &str,
     max_stream_len: u64,
-    pairs: &[(String, Bytes)],
+    triples: &[(String, Bytes, String)],
 ) -> Vec<Value> {
-    let mut args: Vec<Value> = Vec::with_capacity(5 + pairs.len() * 2);
+    let mut args: Vec<Value> = Vec::with_capacity(5 + triples.len() * 3);
     args.push(Value::from(sha));
     args.push(Value::from(2_i64));
     args.push(Value::from(dlq_key));
     args.push(Value::from(stream_key));
     args.push(Value::from(max_stream_len as i64));
-    for (id, bytes) in pairs {
+    for (id, bytes, name) in triples {
         args.push(Value::from(id.as_str()));
         args.push(Value::Bytes(bytes.clone()));
+        args.push(Value::from(name.as_str()));
     }
     args
 }
@@ -498,17 +523,18 @@ pub(crate) fn eval_replay_args(
     dlq_key: &str,
     stream_key: &str,
     max_stream_len: u64,
-    pairs: &[(String, Bytes)],
+    triples: &[(String, Bytes, String)],
 ) -> Vec<Value> {
-    let mut args: Vec<Value> = Vec::with_capacity(5 + pairs.len() * 2);
+    let mut args: Vec<Value> = Vec::with_capacity(5 + triples.len() * 3);
     args.push(Value::from(script));
     args.push(Value::from(2_i64));
     args.push(Value::from(dlq_key));
     args.push(Value::from(stream_key));
     args.push(Value::from(max_stream_len as i64));
-    for (id, bytes) in pairs {
+    for (id, bytes, name) in triples {
         args.push(Value::from(id.as_str()));
         args.push(Value::Bytes(bytes.clone()));
+        args.push(Value::from(name.as_str()));
     }
     args
 }

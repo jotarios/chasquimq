@@ -152,7 +152,8 @@ where
             // Reader-side DLQ: handler never ran, so attempt is 0. No
             // recoverable job id (the entry never decoded into a `Job<T>`),
             // so plumb the empty string — the event-emit contract treats
-            // `""` as "decode-side reject".
+            // `""` as "decode-side reject". Same for the name: a malformed
+            // entry has no recoverable `n` field, plumb empty.
             dlq::enqueue(
                 dlq_tx,
                 String::new(),
@@ -160,6 +161,7 @@ where
                 Bytes::new(),
                 DlqReason::Malformed { reason },
                 0,
+                String::new(),
             )
             .await;
             return DispatchFlow::Continue;
@@ -177,7 +179,10 @@ where
         // Oversize: the payload was never decoded into a `Job<T>`
         // (we'd be doing the work the size cap exists to prevent), so
         // plumb the empty job id — the event-emit contract treats `""`
-        // as "decode-side reject".
+        // as "decode-side reject". The `n` field is plumbed verbatim
+        // since it lives outside the payload bytes; preserving it on
+        // the DLQ entry keeps "route by name" tooling correct even
+        // for oversize-rejected jobs.
         dlq::enqueue(
             dlq_tx,
             String::new(),
@@ -185,12 +190,13 @@ where
             entry.payload,
             DlqReason::OversizePayload,
             0,
+            entry.name,
         )
         .await;
         return DispatchFlow::Continue;
     }
 
-    let job: Job<T> = match rmp_serde::from_slice(&entry.payload) {
+    let mut job: Job<T> = match rmp_serde::from_slice(&entry.payload) {
         Ok(j) => j,
         Err(decode_err) => {
             tracing::warn!(entry_id = %entry.id, error = %decode_err, "decode failed; routing to DLQ");
@@ -202,11 +208,18 @@ where
                 entry.payload,
                 DlqReason::DecodeFailed,
                 0,
+                String::new(),
             )
             .await;
             return DispatchFlow::Continue;
         }
     };
+    // The `n` stream-entry field is the source of truth for `Job::name` in
+    // slice 1 — the field is `#[serde(skip)]` on `Job<T>` so msgpack-decode
+    // hands us `name = ""` regardless of what was on the wire. Forward-compat
+    // with old producers (no `n` field) is automatic: the parser returns
+    // `String::new()` for missing fields.
+    job.name = entry.name.clone();
 
     // Pick the larger of the in-payload attempt counter and the CLAIM-derived
     // delivery_count. The retry-relocator path increments job.attempt explicitly;
@@ -235,6 +248,7 @@ where
             entry.payload,
             DlqReason::RetriesExhausted,
             prior_attempts,
+            job.name.clone(),
         )
         .await;
         return DispatchFlow::Continue;

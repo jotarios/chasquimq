@@ -261,6 +261,7 @@ impl NativeProducer {
                     d.set_item("reason", e.reason)?;
                     d.set_item("detail", e.detail)?;
                     d.set_item("payload", PyBytes::new(py, e.payload.as_ref()))?;
+                    d.set_item("name", e.name)?;
                     out.append(d)?;
                 }
                 Ok::<_, PyErr>(out.unbind())
