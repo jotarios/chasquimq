@@ -7,8 +7,9 @@
 
 use chasquimq::config::{ConsumerConfig, ProducerConfig};
 use chasquimq::consumer::Consumer;
+use chasquimq::error::{Error, HandlerError};
 use chasquimq::job::Job;
-use chasquimq::producer::{AddOptions, Producer, stream_key};
+use chasquimq::producer::{AddOptions, Producer, dlq_key, stream_key};
 use fred::clients::Client;
 use fred::interfaces::ClientLike;
 use fred::prelude::Config;
@@ -16,6 +17,7 @@ use fred::types::{ClusterHash, CustomCommand, Value};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
@@ -36,7 +38,7 @@ async fn admin() -> Client {
 }
 
 async fn flush_all(admin: &Client, queue: &str) {
-    for suffix in ["stream", "dlq", "delayed", "promoter:lock"] {
+    for suffix in ["stream", "dlq", "delayed", "promoter:lock", "events"] {
         let key = format!("{{chasqui:{queue}}}:{suffix}");
         let _: Value = admin
             .custom(
@@ -252,6 +254,298 @@ async fn add_bulk_named_round_trips_per_entry_names() {
             ("post-webhook".to_string(), 3),
         ]
     );
+
+    let _: () = admin.quit().await.unwrap();
+}
+
+// -- Fix 1 (PR #56 review): delayed paths must reject `name` until slice 4 --
+
+/// `add_in_with_options` with a non-empty `name` is rejected up-front with
+/// `Error::Config`. Until slice 4 plumbs `name` through the delayed-ZSET
+/// encoder, accepting it would silently drop the name on promotion. Loud
+/// is better than silent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn add_in_with_options_rejects_non_empty_name() {
+    // No REDIS_URL needed: the guard fires before any network call. Use a
+    // dummy URL the producer never actually contacts because we don't even
+    // try to connect — call the producer indirectly via a fresh connect to
+    // a real Redis only if available; otherwise short-circuit.
+    let url = match std::env::var("REDIS_URL") {
+        Ok(u) => u,
+        Err(_) => return, // skip silently in offline runs
+    };
+    let queue = "name_reject_in";
+    let admin = admin().await;
+    flush_all(&admin, queue).await;
+
+    let producer: Producer<Sample> = Producer::connect(&url, producer_cfg(queue))
+        .await
+        .expect("connect producer");
+    let res = producer
+        .add_in_with_options(
+            Duration::from_secs(60),
+            Sample { n: 1 },
+            AddOptions::new().with_name("send-email"),
+        )
+        .await;
+    match res {
+        Err(Error::Config(msg)) => {
+            assert!(
+                msg.contains("delayed scheduling does not yet preserve")
+                    && msg.contains("send-email"),
+                "guard message must explain why and echo the name: {msg}"
+            );
+            assert!(
+                msg.contains("add_in_with_options"),
+                "guard message must name the offending method: {msg}"
+            );
+        }
+        other => panic!("expected Error::Config, got {other:?}"),
+    }
+
+    let _: () = admin.quit().await.unwrap();
+}
+
+/// Same guard for `add_at_with_options`: a non-empty `name` is rejected.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn add_at_with_options_rejects_non_empty_name() {
+    let url = match std::env::var("REDIS_URL") {
+        Ok(u) => u,
+        Err(_) => return,
+    };
+    let queue = "name_reject_at";
+    let admin = admin().await;
+    flush_all(&admin, queue).await;
+
+    let producer: Producer<Sample> = Producer::connect(&url, producer_cfg(queue))
+        .await
+        .expect("connect producer");
+    let when = std::time::SystemTime::now() + Duration::from_secs(60);
+    let res = producer
+        .add_at_with_options(
+            when,
+            Sample { n: 1 },
+            AddOptions::new().with_name("resize-image"),
+        )
+        .await;
+    match res {
+        Err(Error::Config(msg)) => {
+            assert!(
+                msg.contains("delayed scheduling does not yet preserve")
+                    && msg.contains("resize-image"),
+                "guard message must explain why and echo the name: {msg}"
+            );
+            assert!(
+                msg.contains("add_at_with_options"),
+                "guard message must name the offending method: {msg}"
+            );
+        }
+        other => panic!("expected Error::Config, got {other:?}"),
+    }
+
+    let _: () = admin.quit().await.unwrap();
+}
+
+/// Positive control: empty `name` (or unset) on the delayed path still works,
+/// matching the legacy `add_in` shape. The guard only fires when the user
+/// asks for a feature the engine doesn't yet honor.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REDIS_URL"]
+async fn add_in_with_options_accepts_empty_name() {
+    let admin = admin().await;
+    let queue = "name_reject_in_ok";
+    flush_all(&admin, queue).await;
+
+    let producer: Producer<Sample> = Producer::connect(&redis_url(), producer_cfg(queue))
+        .await
+        .expect("connect producer");
+    // Default-built `AddOptions` carries `name == ""` — must be accepted.
+    producer
+        .add_in_with_options(Duration::from_secs(0), Sample { n: 5 }, AddOptions::new())
+        .await
+        .expect("empty-name AddOptions on delayed path must be accepted");
+
+    let _: () = admin.quit().await.unwrap();
+}
+
+// -- Fix 2 + Fix 3 (PR #56 review): peek_dlq surfaces name; replay preserves it --
+
+fn dlq_round_trip_consumer_cfg(queue: &str, consumer_id: &str) -> ConsumerConfig {
+    ConsumerConfig {
+        queue_name: queue.to_string(),
+        group: "default".to_string(),
+        consumer_id: consumer_id.to_string(),
+        batch: 64,
+        block_ms: 50,
+        // max_attempts=1 → one handler invocation, then DLQ. Keeps the test
+        // bounded; the retry-via-delayed-ZSET drop is also covered by the
+        // doc warning so no need to time out a real backoff here.
+        max_attempts: 1,
+        ack_batch: 64,
+        ack_idle_ms: 5,
+        shutdown_deadline_secs: 5,
+        max_payload_bytes: 1_048_576,
+        dlq_inflight: 32,
+        delayed_enabled: false,
+        retry: chasquimq::RetryConfig {
+            initial_backoff_ms: 1,
+            max_backoff_ms: 5,
+            multiplier: 2.0,
+            jitter_ms: 0,
+        },
+        ..Default::default()
+    }
+}
+
+/// Drive a consumer that fails every job with a recoverable handler error,
+/// returning after `expected` failures land. With `max_attempts=1`, each
+/// failure routes straight to the DLQ.
+async fn drive_failing_consumer(queue: &str, consumer_id: &str, expected: usize) {
+    let count = Arc::new(AtomicUsize::new(0));
+    let count_h = count.clone();
+    let consumer: Consumer<Sample> =
+        Consumer::new(redis_url(), dlq_round_trip_consumer_cfg(queue, consumer_id));
+    let shutdown = CancellationToken::new();
+    let shutdown_clone = shutdown.clone();
+    let join = tokio::spawn(async move {
+        consumer
+            .run(
+                move |_job: Job<Sample>| {
+                    let count = count_h.clone();
+                    async move {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        Err::<(), _>(HandlerError::new(std::io::Error::other("fail-on-purpose")))
+                    }
+                },
+                shutdown_clone,
+            )
+            .await
+    });
+
+    let count_check = count.clone();
+    wait_until(Duration::from_secs(15), move || {
+        let count = count_check.clone();
+        async move { count.load(Ordering::SeqCst) >= expected }
+    })
+    .await;
+
+    // Give the DLQ relocator a beat to flush before shutdown.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(10), join).await;
+}
+
+/// Fix 2 + Fix 3 round trip: producer adds a named job → consumer fails it →
+/// `peek_dlq` returns `name` populated → `replay_dlq` re-emits with `n` →
+/// a second consumer drain sees the original `Job::name`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires REDIS_URL"]
+async fn dlq_peek_and_replay_preserve_name() {
+    let admin = admin().await;
+    let queue = "name_dlq_round_trip";
+    flush_all(&admin, queue).await;
+
+    let producer: Producer<Sample> = Producer::connect(&redis_url(), producer_cfg(queue))
+        .await
+        .expect("connect producer");
+    producer
+        .add_with_options(Sample { n: 7 }, AddOptions::new().with_name("send-email"))
+        .await
+        .expect("named add");
+
+    // Drive one failing handler invocation → DLQ.
+    drive_failing_consumer(queue, "name_dlq_c1", 1).await;
+
+    // Wait for the DLQ entry to land — the relocator is async wrt the handler
+    // return.
+    let dlq = dlq_key(queue);
+    let admin_h = admin.clone();
+    wait_until(Duration::from_secs(10), move || {
+        let admin_h = admin_h.clone();
+        let dlq = dlq.clone();
+        async move {
+            let res: Value = admin_h
+                .custom(
+                    CustomCommand::new_static("XLEN", ClusterHash::FirstKey, false),
+                    vec![Value::from(dlq.as_str())],
+                )
+                .await
+                .expect("XLEN dlq");
+            matches!(res, Value::Integer(n) if n >= 1)
+        }
+    })
+    .await;
+
+    // Fix 2: peek_dlq surfaces name.
+    let entries = producer.peek_dlq(10).await.expect("peek_dlq");
+    assert_eq!(entries.len(), 1, "expected exactly one DLQ entry");
+    assert_eq!(
+        entries[0].name, "send-email",
+        "DlqEntry::name must carry the source entry's `n` field verbatim"
+    );
+
+    // Fix 3: replay_dlq preserves the name on re-emit. The replayed XADD must
+    // include `n` so a second consumer drain reads `Job::name == "send-email"`.
+    let replayed = producer.replay_dlq(10).await.expect("replay_dlq");
+    assert_eq!(replayed, 1);
+
+    // Drive a second consumer that succeeds, just observing the name.
+    let observed = drive_consumer(queue, "name_dlq_c2", 1).await;
+    assert_eq!(
+        observed,
+        vec![("send-email".to_string(), 7)],
+        "replayed job must arrive on consumer side with Job::name preserved"
+    );
+
+    let _: () = admin.quit().await.unwrap();
+}
+
+/// Forward-compat: a DLQ entry that had no `n` field at the source (legacy
+/// producer or reader-side malformed route) replays cleanly with no `n` on
+/// the new XADD. The replay path's `if name ~= ''` branch is what makes
+/// this work — without it, every replay would emit `'n' ''`, polluting the
+/// downstream `Job::name`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires REDIS_URL"]
+async fn dlq_replay_omits_name_when_source_had_none() {
+    let admin = admin().await;
+    let queue = "name_dlq_no_n";
+    flush_all(&admin, queue).await;
+
+    // Hand-build a DLQ entry without an `n` field. Mimics a pre-slice-1
+    // producer's job that landed in the DLQ.
+    let dlq = dlq_key(queue);
+    let job = Job::with_id("legacy-job".to_string(), Sample { n: 99 });
+    let bytes = bytes::Bytes::from(rmp_serde::to_vec(&job).expect("encode"));
+    let _: Value = admin
+        .custom(
+            CustomCommand::new_static("XADD", ClusterHash::FirstKey, false),
+            vec![
+                Value::from(dlq.as_str()),
+                Value::from("*"),
+                Value::from("d"),
+                Value::Bytes(bytes),
+                Value::from("source_id"),
+                Value::from("legacy-source"),
+                Value::from("reason"),
+                Value::from("retries_exhausted"),
+            ],
+        )
+        .await
+        .expect("XADD legacy dlq");
+
+    let producer: Producer<Sample> = Producer::connect(&redis_url(), producer_cfg(queue))
+        .await
+        .expect("connect producer");
+    let entries = producer.peek_dlq(10).await.expect("peek_dlq");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].name, "", "no `n` at source → empty name");
+
+    let replayed = producer.replay_dlq(10).await.expect("replay_dlq");
+    assert_eq!(replayed, 1);
+
+    let observed = drive_consumer(queue, "name_dlq_legacy_c", 1).await;
+    assert_eq!(observed, vec![(String::new(), 99)]);
 
     let _: () = admin.quit().await.unwrap();
 }

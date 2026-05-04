@@ -39,6 +39,10 @@ pub struct NativeDlqEntry {
     pub reason: String,
     pub detail: Option<String>,
     pub payload: Buffer,
+    /// Dispatch name preserved from the source stream entry's `n` field at
+    /// DLQ-route time. Empty when the entry had no `n` (legacy producers,
+    /// or reader-side malformed routes). Replayed verbatim by `replayDlq`.
+    pub name: String,
 }
 
 /// Per-job backoff override carried in [`NativeJobRetryOverride::backoff`].
@@ -305,6 +309,7 @@ impl NativeProducer {
                 // The engine hands us `Bytes` from XRANGE; one copy at the
                 // FFI boundary into a Node-managed Buffer is unavoidable.
                 payload: Buffer::from(e.payload.to_vec()),
+                name: e.name,
             })
             .collect())
     }
