@@ -1,6 +1,6 @@
 # Contributing to ChasquiMQ
 
-Thanks for the interest. ChasquiMQ is **Phase 2 complete** — the API surface is small and intentionally pre-1.0. Phase 1 (producer, consumer pool, batched acks, DLQ, graceful shutdown) shipped, and Phase 2 has landed delayed jobs, exponential retry backoff, DLQ inspect/replay tooling, full observability across the promoter and the consumer hot path, idempotent delayed scheduling (`add_in_with_id` / `add_at_with_id` / `add_in_bulk_with_ids`), and cancellation (`cancel_delayed` / `cancel_delayed_bulk`). Phase 3 (Node.js bindings via NAPI-RS) is next; the design doc lives at [`docs/phase3-napi-design.md`](docs/phase3-napi-design.md). Expect breaking changes through 1.0; flag them with `!` + a `BREAKING CHANGE:` footer.
+Thanks for the interest. ChasquiMQ is **Phase 3 complete** — the API surface is small and intentionally pre-1.0. Phase 1 (producer, consumer pool, batched acks, DLQ, graceful shutdown) shipped; Phase 2 added delayed jobs, exponential retry backoff, DLQ inspect/replay tooling, full observability across the promoter and the consumer hot path, idempotent delayed scheduling (`add_in_with_id` / `add_at_with_id` / `add_in_bulk_with_ids`), and cancellation (`cancel_delayed` / `cancel_delayed_bulk`); Phase 3 ships Node.js bindings via NAPI-RS — high-level shim (`Queue` / `Worker` / `Job` / `QueueEvents`), per-job retries, repeatable / cron jobs (DST-aware via `chrono-tz`), and `UnrecoverableError` short-circuit to DLQ. Phase 4 (Python via PyO3 + CLI dashboard) is next. Design doc for the Node bindings lives at [`docs/phase3-napi-design.md`](docs/phase3-napi-design.md). Expect breaking changes through 1.0; flag them with `!` + a `BREAKING CHANGE:` footer.
 
 ## Before you start
 
@@ -120,9 +120,11 @@ Also: `cancel_delayed` / `cancel_delayed_bulk` for delayed-only entries (see [`P
 
 ## What we'd love help with
 
-Phase 3 lead-in + Phase 2 polish (open scope):
+Phase 3 polish + Phase 4 lead-in (open scope):
 
-- **Phase 3: Node.js bindings via NAPI-RS.** First slice has shipped — high-level `Queue` / `Worker` / `QueueEvents` API + native NAPI bindings under `chasquimq-node/`. Follow-up work: per-job retry native exposure (engine slice 8 is in; the `addWithOptions` surface needs to flow into `NativeProducer`), IANA timezone names for repeatable jobs (currently only UTC and `+HH:MM` accepted), and a catch-up policy for missed cron windows after scheduler downtime. See [`docs/phase3-napi-design.md`](docs/phase3-napi-design.md).
+- **Native NAPI test coverage gaps.** The `chasquimq-node` Vitest suite covers happy paths for `Queue.add` / `Worker` / `QueueEvents` / repeatable / per-job retries / DLQ, but the bench-gate tests around the FFI buffer-copy (`Bytes::to_vec()` → JS `Buffer`) at sustained throughput aren't wired yet.
+- **Engine `Consumer` ↔ `Scheduler` symmetry.** The Node `Worker` auto-spawns `NativeScheduler` alongside the consumer, but the engine `Consumer` only auto-embeds `Promoter`. Decide whether the engine should mirror the Node side (or document the asymmetry as intentional).
+- **`MissedFiresPolicy` JS exposure.** Engine supports `Skip` / `FireOnce` / `FireAll { max_catchup }`; the Node shim only ever sends the default `Skip`. v2 follow-up.
 - **Latency instrumentation in the bench harness.** Throughput-only today; per-job dispatch-to-ack p50/p95/p99 is the biggest gap in the perf claims. See `TODOS.md` → "Latency histogram for `worker-concurrent`".
 - **Worker CPU measurement *for BullMQ*.** ChasquiMQ's CPU is instrumented; BullMQ's isn't. The PRD's "≥50% less worker CPU" target needs a parallel measurement before we can claim it.
 - **Reclaimed-from-CLAIM integration test.** Slice 5 added the `ReaderBatch.reclaimed` signal; the existing tests cover only `reclaimed == 0`. See `TODOS.md`.
@@ -162,8 +164,8 @@ Branch layout for new work: shim PRs typically branch off `feat/chasquimq-node-n
 
 What's stubbed vs. what works:
 
-- **Works:** `Queue.add` / `Queue.addBulk` / `Queue.close`, `Worker` with concurrency + `EventEmitter` events (`completed` / `failed`), `Job` reads, cross-process `QueueEvents` subscriber.
-- **Stubbed (`NotSupportedError`):** per-job retry overrides, cron / repeatable jobs (engine slice 10 wired but not yet exposed via NAPI), parent/child flows.
+- **Works:** `Queue.add` (with `{ delay, attempts, backoff, repeat, jobId }` all honored end-to-end), `Queue.addBulk`, `Queue.getRepeatableJobs` / `removeRepeatableByKey`, `Queue.close`; `Worker` with concurrency + `EventEmitter` events (`completed` / `failed`) + auto-spawned `Scheduler` (opt-out via `runScheduler: false`); `Job` reads, cross-process `QueueEvents` subscriber; DLQ peek/replay via the native producer; delayed cancel; `UnrecoverableError` short-circuit to DLQ.
+- **Stubbed (`NotSupportedError`):** parent/child flows. (Outside the PRD's Phase 3 scope; tracked as a possible v1.x feature if user demand surfaces.)
 
 See [`docs/phase3-napi-design.md`](docs/phase3-napi-design.md) for the full surface table and the rationale behind each stub.
 
