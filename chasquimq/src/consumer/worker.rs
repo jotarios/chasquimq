@@ -105,12 +105,13 @@ where
                     }
                     Ok(Err(e)) => {
                         let reason = format!("{e}");
-                        tracing::warn!(job_id = %job_id, error = %e, attempt = attempt_index, "handler returned Err");
+                        let unrecoverable = e.is_unrecoverable();
+                        tracing::warn!(job_id = %job_id, error = %e, attempt = attempt_index, unrecoverable, "handler returned Err");
                         wiring
                             .events
                             .emit_failed(&job_id, attempt_index, &reason, Some(duration_us))
                             .await;
-                        on_handler_failure(&wiring, entry_id, job_for_retry).await;
+                        on_handler_failure(&wiring, entry_id, job_for_retry, unrecoverable).await;
                     }
                     Err(_panic) => {
                         tracing::warn!(job_id = %job_id, attempt = attempt_index, "handler panicked");
@@ -123,7 +124,11 @@ where
                                 Some(duration_us),
                             )
                             .await;
-                        on_handler_failure(&wiring, entry_id, job_for_retry).await;
+                        // Panics are treated as recoverable: the handler may have
+                        // panicked on transient state (e.g. a poisoned RwLock that
+                        // recovers on retry). Unrecoverable is a deliberate signal
+                        // from the handler; a panic isn't deliberate.
+                        on_handler_failure(&wiring, entry_id, job_for_retry, false).await;
                     }
                 }
             }
@@ -136,6 +141,7 @@ async fn on_handler_failure<T: Serialize + Send + 'static>(
     wiring: &WorkerWiring,
     entry_id: StreamEntryId,
     mut job: Job<T>,
+    unrecoverable: bool,
 ) {
     let next_attempt = job.attempt.saturating_add(1);
     let encoded = match rmp_serde::to_vec(&job) {
@@ -154,6 +160,24 @@ async fn on_handler_failure<T: Serialize + Send + 'static>(
     // run-counts explicitly so the meaning is unambiguous at the call site.
     let just_ran = job.attempt.saturating_add(1);
     let will_run_next = just_ran.saturating_add(1);
+
+    // Unrecoverable short-circuits the retry budget entirely: the handler
+    // signalled "this failure is terminal — do not retry." Route straight
+    // to the DLQ with `Unrecoverable` so the reason label is preserved
+    // through the metrics + events pipeline. Carry the attempt that just
+    // gave up exactly like the `RetriesExhausted` path does.
+    if unrecoverable {
+        dlq::enqueue(
+            &wiring.dlq_tx,
+            job.id.clone(),
+            entry_id,
+            encoded,
+            DlqReason::Unrecoverable,
+            just_ran,
+        )
+        .await;
+        return;
+    }
 
     // Per-job override: `Job::retry.max_attempts` wins over the queue-wide
     // `WorkerWiring::max_attempts` when set. None → fall back.

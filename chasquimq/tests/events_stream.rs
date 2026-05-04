@@ -266,7 +266,7 @@ async fn retry_then_success_emits_failed_retry_and_active2() {
             .run(
                 move |job: Job<Sample>| async move {
                     if job.attempt < 1 {
-                        Err(HandlerError(Box::new(std::io::Error::other("retry me"))))
+                        Err(HandlerError::new(std::io::Error::other("retry me")))
                     } else {
                         Ok(())
                     }
@@ -353,7 +353,7 @@ async fn always_failing_handler_emits_dlq() {
         consumer
             .run(
                 move |_job: Job<Sample>| async move {
-                    Err(HandlerError(Box::new(std::io::Error::other("nope"))))
+                    Err(HandlerError::new(std::io::Error::other("nope")))
                 },
                 shutdown_h,
             )
