@@ -169,6 +169,37 @@ What's stubbed vs. what works:
 
 See [`docs/phase3-napi-design.md`](docs/phase3-napi-design.md) for the full surface table and the rationale behind each stub.
 
+## Working on chasquimq-py
+
+The Python bindings live in the `chasquimq-py/` crate. Same two-layer split as the Node bindings: a high-level Python shim (in `src/chasquimq/`) wraps the raw PyO3 bindings (Rust, in `src-rs/`). Build orchestration is via `maturin`. Design doc: [`docs/phase4-pyo3-design.md`](docs/phase4-pyo3-design.md).
+
+Dev setup:
+
+```bash
+cd chasquimq-py
+python3 -m venv .venv && source .venv/bin/activate
+pip install --upgrade pip
+pip install maturin pytest pytest-asyncio redis msgpack
+maturin develop   # builds the cdylib in-place into the active venv
+REDIS_URL=redis://127.0.0.1:6379 pytest tests/ -v
+```
+
+`maturin develop` is the iteration loop (rebuilds `_native` and reinstalls into the venv). For a release-mode build of the wheel itself, `maturin build --release` produces a `.whl` under `target/wheels/`.
+
+The package is `abi3-py39`, so a single platform wheel covers Python 3.9+. Wheels are published per platform (linux x86_64 + aarch64, macOS x86_64 + aarch64, windows x86_64) — see [`.github/workflows/py-ci.yml`](.github/workflows/py-ci.yml) for the build matrix and the gated PyPI publish.
+
+## CI workflows
+
+This repo has three CI workflows, one per build target:
+
+| Workflow | Triggers on | What it gates |
+|---|---|---|
+| [`ci.yml`](.github/workflows/ci.yml) | All pushes to `main` + every PR | Engine: rustfmt, clippy `-D warnings`, full `cargo test` against Redis 8.6.2 |
+| [`node-ci.yml`](.github/workflows/node-ci.yml) | Pushes / PRs touching `chasquimq-node/`, `chasquimq/`, or the workflow itself | Multi-platform NAPI build matrix, vitest against Redis 8.6.2, gated npm publish on `chore(release):` |
+| [`py-ci.yml`](.github/workflows/py-ci.yml) | Pushes / PRs touching `chasquimq-py/`, `chasquimq/`, or the workflow itself | Multi-platform `abi3` wheel build (maturin-action), pytest against Redis 8.6.2, gated PyPI publish (Trusted Publishing) on `chore(release):` |
+
+Releases: tag a commit with `chore(release): <crate>@<version>` to trigger the matching publish job. The publish gate fires only on `main`.
+
 ## Reporting bugs
 
 Open an issue with:

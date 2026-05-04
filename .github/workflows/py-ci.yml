@@ -1,0 +1,176 @@
+name: Python CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'chasquimq-py/**'
+      - 'chasquimq/**'
+      - '.github/workflows/py-ci.yml'
+  pull_request:
+    paths:
+      - 'chasquimq-py/**'
+      - 'chasquimq/**'
+      - '.github/workflows/py-ci.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Engine CI sets `RUSTFLAGS: -D warnings` globally; we deliberately *don't*
+  # mirror that here. maturin-action drives `cargo build` for the cdylib, and
+  # `-D warnings` would promote any lint in a transitive build script (or in
+  # PyO3's own generated glue) into a hard wheel-build failure on platforms
+  # we can't reproduce locally. Lint hygiene is enforced by the Rust `ci.yml`
+  # workflow on the engine + workspace; this workflow's job is to ship wheels.
+
+jobs:
+  build:
+    name: build / ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Two macOS wheels (x86_64 + aarch64) instead of a single universal2
+          # wheel — mirrors `node-ci.yml`, keeps per-target build times small,
+          # and matches what `maturin-action` produces by default.
+          - { os: macos-latest,   target: x86_64-apple-darwin,       manylinux: auto }
+          - { os: macos-latest,   target: aarch64-apple-darwin,      manylinux: auto }
+          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu,  manylinux: auto }
+          # `manylinux: auto` lets maturin-action pick a current manylinux tag
+          # for aarch64 (presently `manylinux_2_17` / `manylinux2014`). We let
+          # the action drive QEMU emulation for the cross-build so we don't
+          # have to vendor an aarch64 toolchain here (the Node CI cross-builds
+          # in-process because napi has no equivalent of maturin-action's
+          # manylinux container).
+          - { os: ubuntu-latest,  target: aarch64-unknown-linux-gnu, manylinux: auto }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc,    manylinux: auto }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> target'
+          key: py-${{ matrix.target }}
+
+      # `--features pyo3/extension-module` matches what `[tool.maturin]
+      # features = ["pyo3/extension-module"]` already configures for local
+      # `maturin develop` builds — making it explicit on the CI command line
+      # is redundant but harmless, and keeps the invocation greppable.
+      #
+      # We don't pass `--zig` for linux-aarch64: maturin-action's manylinux
+      # container handles the cross-build via QEMU emulation, which is
+      # slower than zig but more reproducible across runner image updates.
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: chasquimq-py
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          args: --release --out dist --features pyo3/extension-module
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.target }}
+          path: chasquimq-py/dist/*.whl
+          if-no-files-found: error
+
+  test:
+    name: test (linux x86_64)
+    needs: build
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:8.6.2
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      REDIS_URL: redis://127.0.0.1:6379
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download linux x86_64 wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: wheel-x86_64-unknown-linux-gnu
+          path: chasquimq-py/dist
+
+      # Install the wheel that the build matrix produced (rather than rebuilding
+      # via `maturin develop`) so the test exercises the exact artifact we'd
+      # publish. `pytest-asyncio` powers the asyncio-first test suite; `redis`
+      # and `msgpack` are also pulled in via the package's own deps but listed
+      # explicitly here so a future restructure of the install chain doesn't
+      # silently lose them.
+      - name: Install wheel + test deps
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install chasquimq-py/dist/*.whl
+          pip install pytest pytest-asyncio redis msgpack
+
+      - name: Run pytest
+        working-directory: chasquimq-py
+        run: pytest tests/ -v
+
+  publish:
+    name: publish to PyPI
+    needs: [build, test]
+    runs-on: ubuntu-latest
+    # Same gate as `node-ci.yml`: only publish when a `chore(release):` commit
+    # lands on `main`. PR builds and ordinary feature commits do not publish.
+    if: startsWith(github.event.head_commit.message, 'chore(release):') && github.ref == 'refs/heads/main'
+    environment: pypi
+    permissions:
+      # OIDC token for PyPI Trusted Publishing. Requires the project to have
+      # a Trusted Publisher configured at https://pypi.org/manage/account/publishing/
+      # for the `chasquimq` PyPI project pointing at this workflow + the `pypi`
+      # GitHub Environment. See docs/phase4-pyo3-design.md §9.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Pull every wheel artifact (one per build-matrix target) into a single
+      # `dist/` directory. `merge-multiple: true` flattens the per-artifact
+      # subdirectories so `pypa/gh-action-pypi-publish` sees a flat layout.
+      - name: Download all wheels
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # Requires Trusted Publishing on PyPI for project "chasquimq" — see
+      # docs/phase4-pyo3-design.md §9. If Trusted Publishing has not been
+      # configured yet, fall back to a token-based publish by removing the
+      # `id-token: write` permission above and uncommenting `password:` below:
+      #
+      #   password: ${{ secrets.PYPI_API_TOKEN }}
+      #
+      # (Trusted Publishing is the modern recommendation — no long-lived
+      # secret in repo settings, scoped per-workflow at PyPI's end.)
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
