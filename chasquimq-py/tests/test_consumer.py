@@ -321,6 +321,73 @@ async def test_handler_raises_unrecoverable_subclass_routes_to_dlq(
 
 
 @pytest.mark.asyncio
+async def test_handler_raises_unrelated_unrecoverable_named_class_retries(
+    redis_client, queue_name
+):
+    """Pins the regression: pre-MRO-walk code matched on class name string,
+    so an unrelated user class named UnrecoverableError would short-circuit
+    incorrectly. Post-MRO-walk, the unrelated class must take the recoverable
+    retry path."""
+    await _flush_queue(redis_client, queue_name)
+    consumer = NativeConsumer(
+        REDIS_URL,
+        queue_name,
+        concurrency=1,
+        max_attempts=2,
+        read_block_ms=200,
+        delayed_enabled=True,
+    )
+
+    # Note the shadowing: this is *not* `chasquimq.errors.UnrecoverableError`.
+    class UnrecoverableError(Exception):  # noqa: F811
+        pass
+
+    invocations: List[int] = []
+    seen_two = asyncio.Event()
+
+    async def handler(job: NativeJob) -> None:
+        invocations.append(job.attempt)
+        if len(invocations) >= 2:
+            seen_two.set()
+        raise UnrecoverableError("name shadow but unrelated to chasquimq.errors")
+
+    await _xadd_job(redis_client, queue_name, b"unrelated-name-shadow")
+
+    run_task = asyncio.ensure_future(consumer.run(handler))
+    try:
+        # The job must take the standard retry path: first attempt fails →
+        # rescheduled into delayed ZSET → promoter promotes → second attempt
+        # fails → max_attempts exhausted → DLQ.
+        await asyncio.wait_for(seen_two.wait(), timeout=15.0)
+
+        async def in_dlq() -> bool:
+            return await _xlen(redis_client, _dlq_key(queue_name)) >= 1
+
+        await _wait_for(in_dlq, timeout=15.0)
+    finally:
+        consumer.shutdown()
+        await asyncio.wait_for(run_task, timeout=15.0)
+
+    assert len(invocations) == 2, (
+        f"unrelated class named UnrecoverableError must retry; saw {invocations}"
+    )
+    assert invocations[0] == 0, f"first run should be attempt 0, got {invocations}"
+    assert invocations[1] >= 1, f"second run attempt must increase, got {invocations}"
+
+    dlq_len = await _xlen(redis_client, _dlq_key(queue_name))
+    assert dlq_len == 1, f"DLQ should hold 1 entry, got {dlq_len}"
+
+    entries = await redis_client.xrange(_dlq_key(queue_name), count=1)
+    assert entries
+    _, fields = entries[0]
+    reason = fields.get(b"reason")
+    assert reason == b"retries_exhausted", (
+        f"unexpected DLQ reason: {reason!r} (must be retries_exhausted, "
+        "not unrecoverable — the user class shadows by name only)"
+    )
+
+
+@pytest.mark.asyncio
 async def test_shutdown_from_another_task_ends_run_promptly(redis_client, queue_name):
     await _flush_queue(redis_client, queue_name)
     consumer = NativeConsumer(

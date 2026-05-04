@@ -92,7 +92,7 @@ jobs:
         working-directory: .github/cross-shim-tests
         run: npm install
 
-      - name: Phase 1 — Python producer -> Node worker
+      - name: Phase 1 — Python producer -> Node worker (immediate)
         working-directory: .github/cross-shim-tests
         env:
           QUEUE: cross-shim-phase1-${{ github.run_id }}-${{ github.run_attempt }}
@@ -100,6 +100,7 @@ jobs:
           TAG: py
           JOB_NAME: cross-shim
           EXPECT_TAG: py
+          MODE: immediate
           TIMEOUT_SECS: '30'
         shell: bash
         run: |
@@ -107,12 +108,29 @@ jobs:
           python producer.py 2>&1 | tee /tmp/phase1-producer.log
           npx tsx worker.ts 2>&1 | tee /tmp/phase1-worker.log
 
-      - name: Flush Redis between phases
+      - name: Dump Redis state on Phase 1 failure
+        if: failure()
+        env:
+          QUEUE: cross-shim-phase1-${{ github.run_id }}-${{ github.run_attempt }}
+        shell: bash
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq redis-tools >/dev/null
-          redis-cli -h 127.0.0.1 -p 6379 FLUSHDB
+          REDIS_CID=$(docker ps -qf 'ancestor=redis:8.6.2')
+          echo "=== XINFO STREAM ==="
+          docker exec "$REDIS_CID" redis-cli XINFO STREAM "{chasqui:${QUEUE}}:stream" || true
+          echo "=== XLEN main ==="
+          docker exec "$REDIS_CID" redis-cli XLEN "{chasqui:${QUEUE}}:stream" || true
+          echo "=== XLEN DLQ ==="
+          docker exec "$REDIS_CID" redis-cli XLEN "{chasqui:${QUEUE}}:dlq" || true
+          echo "=== ZCARD delayed ==="
+          docker exec "$REDIS_CID" redis-cli ZCARD "{chasqui:${QUEUE}}:delayed" || true
 
-      - name: Phase 2 — Node producer -> Python worker
+      - name: Flush Redis between phases (immediate)
+        shell: bash
+        run: |
+          REDIS_CID=$(docker ps -qf 'ancestor=redis:8.6.2')
+          docker exec "$REDIS_CID" redis-cli FLUSHDB
+
+      - name: Phase 2 — Node producer -> Python worker (immediate)
         working-directory: .github/cross-shim-tests
         env:
           QUEUE: cross-shim-phase2-${{ github.run_id }}-${{ github.run_attempt }}
@@ -120,12 +138,105 @@ jobs:
           TAG: node
           JOB_NAME: cross-shim
           EXPECT_TAG: node
+          MODE: immediate
           TIMEOUT_SECS: '30'
         shell: bash
         run: |
           set -euo pipefail
           npx tsx producer.ts 2>&1 | tee /tmp/phase2-producer.log
           python worker.py 2>&1 | tee /tmp/phase2-worker.log
+
+      - name: Dump Redis state on Phase 2 failure
+        if: failure()
+        env:
+          QUEUE: cross-shim-phase2-${{ github.run_id }}-${{ github.run_attempt }}
+        shell: bash
+        run: |
+          REDIS_CID=$(docker ps -qf 'ancestor=redis:8.6.2')
+          echo "=== XINFO STREAM ==="
+          docker exec "$REDIS_CID" redis-cli XINFO STREAM "{chasqui:${QUEUE}}:stream" || true
+          echo "=== XLEN main ==="
+          docker exec "$REDIS_CID" redis-cli XLEN "{chasqui:${QUEUE}}:stream" || true
+          echo "=== XLEN DLQ ==="
+          docker exec "$REDIS_CID" redis-cli XLEN "{chasqui:${QUEUE}}:dlq" || true
+          echo "=== ZCARD delayed ==="
+          docker exec "$REDIS_CID" redis-cli ZCARD "{chasqui:${QUEUE}}:delayed" || true
+
+      - name: Flush Redis between phases (delayed)
+        shell: bash
+        run: |
+          REDIS_CID=$(docker ps -qf 'ancestor=redis:8.6.2')
+          docker exec "$REDIS_CID" redis-cli FLUSHDB
+
+      - name: Phase 3 — Python delayed producer -> Node worker
+        working-directory: .github/cross-shim-tests
+        env:
+          QUEUE: cross-shim-phase3-${{ github.run_id }}-${{ github.run_attempt }}
+          COUNT: '50'
+          TAG: py
+          JOB_NAME: cross-shim
+          EXPECT_TAG: py
+          MODE: delayed
+          TIMEOUT_SECS: '60'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python producer.py 2>&1 | tee /tmp/phase3-producer.log
+          npx tsx worker.ts 2>&1 | tee /tmp/phase3-worker.log
+
+      - name: Dump Redis state on Phase 3 failure
+        if: failure()
+        env:
+          QUEUE: cross-shim-phase3-${{ github.run_id }}-${{ github.run_attempt }}
+        shell: bash
+        run: |
+          REDIS_CID=$(docker ps -qf 'ancestor=redis:8.6.2')
+          echo "=== XINFO STREAM ==="
+          docker exec "$REDIS_CID" redis-cli XINFO STREAM "{chasqui:${QUEUE}}:stream" || true
+          echo "=== XLEN main ==="
+          docker exec "$REDIS_CID" redis-cli XLEN "{chasqui:${QUEUE}}:stream" || true
+          echo "=== XLEN DLQ ==="
+          docker exec "$REDIS_CID" redis-cli XLEN "{chasqui:${QUEUE}}:dlq" || true
+          echo "=== ZCARD delayed ==="
+          docker exec "$REDIS_CID" redis-cli ZCARD "{chasqui:${QUEUE}}:delayed" || true
+
+      - name: Flush Redis between phases (phase4)
+        shell: bash
+        run: |
+          REDIS_CID=$(docker ps -qf 'ancestor=redis:8.6.2')
+          docker exec "$REDIS_CID" redis-cli FLUSHDB
+
+      - name: Phase 4 — Node delayed producer -> Python worker
+        working-directory: .github/cross-shim-tests
+        env:
+          QUEUE: cross-shim-phase4-${{ github.run_id }}-${{ github.run_attempt }}
+          COUNT: '50'
+          TAG: node
+          JOB_NAME: cross-shim
+          EXPECT_TAG: node
+          MODE: delayed
+          TIMEOUT_SECS: '60'
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx tsx producer.ts 2>&1 | tee /tmp/phase4-producer.log
+          python worker.py 2>&1 | tee /tmp/phase4-worker.log
+
+      - name: Dump Redis state on Phase 4 failure
+        if: failure()
+        env:
+          QUEUE: cross-shim-phase4-${{ github.run_id }}-${{ github.run_attempt }}
+        shell: bash
+        run: |
+          REDIS_CID=$(docker ps -qf 'ancestor=redis:8.6.2')
+          echo "=== XINFO STREAM ==="
+          docker exec "$REDIS_CID" redis-cli XINFO STREAM "{chasqui:${QUEUE}}:stream" || true
+          echo "=== XLEN main ==="
+          docker exec "$REDIS_CID" redis-cli XLEN "{chasqui:${QUEUE}}:stream" || true
+          echo "=== XLEN DLQ ==="
+          docker exec "$REDIS_CID" redis-cli XLEN "{chasqui:${QUEUE}}:dlq" || true
+          echo "=== ZCARD delayed ==="
+          docker exec "$REDIS_CID" redis-cli ZCARD "{chasqui:${QUEUE}}:delayed" || true
 
       - name: Upload phase logs
         if: always()
@@ -137,4 +248,8 @@ jobs:
             /tmp/phase1-worker.log
             /tmp/phase2-producer.log
             /tmp/phase2-worker.log
+            /tmp/phase3-producer.log
+            /tmp/phase3-worker.log
+            /tmp/phase4-producer.log
+            /tmp/phase4-worker.log
           if-no-files-found: warn
