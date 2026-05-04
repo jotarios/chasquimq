@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import uuid
+from datetime import timedelta
 
 import pytest
 
@@ -398,3 +400,93 @@ async def test_invalid_backoff_type_raises(
             "x", {"k": 1}, backoff="not-a-thing"  # type: ignore[arg-type]
         )
     await queue.close()
+
+
+@pytest.mark.asyncio
+async def test_negative_delay_raises(
+    redis_url: str, queue_name: str
+) -> None:
+    queue = Queue(queue_name, redis_url=redis_url)
+    with pytest.raises(ValueError, match="non-negative"):
+        await queue.add("x", {"k": 1}, delay=-1)
+    with pytest.raises(ValueError, match="non-negative"):
+        await queue.add("x", {"k": 1}, delay=-0.5)
+    with pytest.raises(ValueError, match="non-negative"):
+        await queue.add(
+            "x", {"k": 1}, delay=timedelta(milliseconds=-100)
+        )
+    await queue.close()
+
+
+@pytest.mark.asyncio
+async def test_worker_close_is_idempotent_and_safe_during_run(
+    redis_url: str, queue_name: str
+) -> None:
+    async def handler(job: Job) -> None:
+        return None
+
+    worker = Worker(
+        queue_name,
+        handler,
+        redis_url=redis_url,
+        concurrency=1,
+        read_block_ms=100,
+        delayed_enabled=False,
+        run_scheduler=False,
+    )
+
+    run_task = asyncio.create_task(worker.run())
+    await asyncio.sleep(0.1)
+
+    await worker.close()
+    await worker.close()
+    await worker.close()
+
+    await asyncio.wait_for(run_task, timeout=5.0)
+    assert worker.is_running is False
+
+
+@pytest.mark.asyncio
+async def test_worker_scheduler_error_is_logged(
+    redis_url: str,
+    queue_name: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def handler(job: Job) -> None:
+        return None
+
+    worker = Worker(
+        queue_name,
+        handler,
+        redis_url=redis_url,
+        concurrency=1,
+        read_block_ms=100,
+        delayed_enabled=False,
+        run_scheduler=False,
+    )
+
+    class _BoomScheduler:
+        async def run(self) -> None:
+            raise RuntimeError("redis unreachable on startup")
+
+        def shutdown(self) -> None:
+            pass
+
+    worker._scheduler = _BoomScheduler()  # type: ignore[assignment]
+
+    caplog.set_level(logging.WARNING, logger="chasquimq.worker")
+
+    run_task = asyncio.create_task(worker.run())
+    await asyncio.sleep(0.2)
+    await worker.close()
+    await asyncio.wait_for(run_task, timeout=5.0)
+
+    matching = [
+        r
+        for r in caplog.records
+        if "scheduler stopped with error" in r.getMessage()
+        and "redis unreachable on startup" in r.getMessage()
+    ]
+    assert matching, (
+        f"expected scheduler-error warning; saw: {[r.getMessage() for r in caplog.records]}"
+    )

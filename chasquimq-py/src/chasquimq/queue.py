@@ -308,12 +308,21 @@ def _coerce_delay_ms(delay: Optional[DelayLike]) -> Optional[int]:
     if isinstance(delay, datetime):
         return None
     if isinstance(delay, timedelta):
-        return int(delay.total_seconds() * 1000)
+        secs = delay.total_seconds()
+        if secs < 0:
+            raise ValueError(
+                f"delay must be non-negative, got {delay!r}"
+            )
+        return int(secs * 1000)
     if isinstance(delay, bool):
         raise TypeError("delay must be int/float/datetime/timedelta; got bool")
     if isinstance(delay, int):
+        if delay < 0:
+            raise ValueError(f"delay must be non-negative, got {delay}")
         return delay
     if isinstance(delay, float):
+        if delay < 0:
+            raise ValueError(f"delay must be non-negative, got {delay}")
         return int(delay * 1000)
     raise TypeError(
         f"delay must be int (ms) / float (s) / datetime / timedelta; "
