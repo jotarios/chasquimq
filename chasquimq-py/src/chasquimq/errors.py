@@ -17,8 +17,9 @@ class UnrecoverableError(RuntimeError):
     """Raise from a handler to skip retries and route the job straight to
     the DLQ with ``DlqReason::Unrecoverable``.
 
-    The native consumer detects this class by name (``__class__.__name__
-    == "UnrecoverableError"``) so user code can subclass it without losing
-    the short-circuit behavior, as long as the subclass keeps the same
-    name.
+    The native consumer detects this class via an MRO-aware
+    ``issubclass`` check against this exact class object, so user code
+    can freely subclass ``UnrecoverableError`` (e.g. ``class
+    PoisonPill(UnrecoverableError): ...``) and still get the
+    short-circuit behavior.
     """

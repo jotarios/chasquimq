@@ -20,7 +20,7 @@ use chasquimq::consumer::Consumer;
 use chasquimq::{HandlerError, Job};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use pyo3::types::PyAny;
+use pyo3::types::{PyAny, PyType};
 use pyo3_async_runtimes::TaskLocals;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -30,6 +30,7 @@ pub struct NativeConsumer {
     redis_url: String,
     cfg: ConsumerConfig,
     shutdown: Arc<CancellationToken>,
+    unrecoverable_cls: Py<PyType>,
 }
 
 #[pymethods]
@@ -53,6 +54,7 @@ impl NativeConsumer {
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
+        py: Python<'_>,
         redis_url: String,
         queue_name: String,
         concurrency: u32,
@@ -110,10 +112,18 @@ impl NativeConsumer {
             cfg.dlq_max_stream_len = v as u64;
         }
 
+        let unrecoverable_cls = py
+            .import("chasquimq.errors")?
+            .getattr("UnrecoverableError")?
+            .cast_into::<PyType>()
+            .map_err(|e| PyRuntimeError::new_err(format!("{e}")))?
+            .unbind();
+
         Ok(Self {
             redis_url,
             cfg,
             shutdown: Arc::new(CancellationToken::new()),
+            unrecoverable_cls,
         })
     }
 
@@ -124,16 +134,18 @@ impl NativeConsumer {
     /// → `HandlerError` (engine retries with backoff up to `max_attempts`,
     /// then DLQ).
     ///
-    /// **Unrecoverable errors:** if the raised exception's class name is
-    /// `'UnrecoverableError'`, the binding maps it to
+    /// **Unrecoverable errors:** if the raised exception is an instance of
+    /// `chasquimq.errors.UnrecoverableError` (or a subclass — the check
+    /// walks the MRO), the binding maps it to
     /// `HandlerError::unrecoverable(...)` instead of `HandlerError::new(...)`,
     /// short-circuiting the retry budget and routing the job straight to
-    /// the DLQ with `DlqReason::Unrecoverable`. Mirrors the Node binding.
+    /// the DLQ with `DlqReason::Unrecoverable`.
     fn run<'py>(&self, py: Python<'py>, handler: Py<PyAny>) -> PyResult<Bound<'py, PyAny>> {
         let redis_url = self.redis_url.clone();
         let cfg = self.cfg.clone();
         let shutdown = (*self.shutdown).clone();
         let handler = Arc::new(handler);
+        let unrecoverable_cls = Arc::new(self.unrecoverable_cls.clone_ref(py));
         // Capture the user's running asyncio loop + contextvars at `run()`
         // entry. The engine-side handler closure runs on tokio worker
         // threads which have no associated asyncio loop, so we must hand
@@ -147,6 +159,7 @@ impl NativeConsumer {
             let engine_handler = move |job: Job<RawBytes>| {
                 let h = handler.clone();
                 let locals = task_locals.clone();
+                let unrecoverable_cls = unrecoverable_cls.clone();
                 async move {
                     let coro_result = Python::attach(|py| -> PyResult<_> {
                         let native_job = NativeJob::from_engine(job);
@@ -155,11 +168,11 @@ impl NativeConsumer {
                     });
                     let coro_fut = match coro_result {
                         Ok(fut) => fut,
-                        Err(e) => return Err(map_py_err(&e)),
+                        Err(e) => return Err(map_py_err(&e, &unrecoverable_cls)),
                     };
                     match coro_fut.await {
                         Ok(_) => Ok(()),
-                        Err(e) => Err(map_py_err(&e)),
+                        Err(e) => Err(map_py_err(&e, &unrecoverable_cls)),
                     }
                 }
             };
@@ -186,28 +199,27 @@ struct PyHandlerError(String);
 
 /// Translate a `PyErr` raised by the user handler (either at call time —
 /// e.g. wrong arity — or from the awaited coroutine) into the engine's
-/// `HandlerError`. When the exception's class name is
-/// `"UnrecoverableError"`, return `HandlerError::unrecoverable(...)` so
-/// the consumer routes the job straight to the DLQ. Every other
-/// exception follows the standard retry-then-DLQ path via
-/// `HandlerError::new(...)`. Mirrors the Node binding's name-based map.
-fn map_py_err(e: &PyErr) -> HandlerError {
-    let (class_name, repr) = Python::attach(|py| {
-        let cls_name = e
-            .get_type(py)
-            .name()
-            .map(|s| s.to_string())
-            .unwrap_or_default();
+/// `HandlerError`. When the exception is an instance of
+/// `chasquimq.errors.UnrecoverableError` (or a subclass — the check walks
+/// the MRO), return `HandlerError::unrecoverable(...)` so the consumer
+/// routes the job straight to the DLQ. Every other exception follows the
+/// standard retry-then-DLQ path via `HandlerError::new(...)`.
+fn map_py_err(e: &PyErr, unrecoverable_cls: &Py<PyType>) -> HandlerError {
+    let (is_unrecoverable, repr) = Python::attach(|py| {
+        let exc_type = e.get_type(py);
+        let is_unrecoverable = exc_type
+            .is_subclass(unrecoverable_cls.bind(py).as_any())
+            .unwrap_or(false);
         let value = e.value(py);
         let detail = match value.repr() {
             Ok(r) => r.to_string(),
             Err(_) => format!("{e}"),
         };
-        (cls_name, detail)
+        (is_unrecoverable, detail)
     });
 
     let payload = PyHandlerError(format!("Python handler raised: {repr}"));
-    if class_name == "UnrecoverableError" {
+    if is_unrecoverable {
         HandlerError::unrecoverable(payload)
     } else {
         HandlerError::new(payload)
