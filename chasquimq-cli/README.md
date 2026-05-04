@@ -19,6 +19,25 @@ Slice B3 complete. Today the CLI ships:
 
 ## Install
 
+### Prebuilt binary (Linux, macOS, Windows)
+
+Each `chasquimq-cli-v*` git tag publishes a [GitHub Release](https://github.com/jotarios/chasquimq/releases) with prebuilt `chasqui` binaries for x86_64 and aarch64 Linux, x86_64 and aarch64 macOS, and x86_64 Windows. The release also ships shell and PowerShell installers that pick the right tarball for the host:
+
+```bash
+# macOS / Linux — picks the host's tarball, extracts to $CARGO_HOME/bin
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/jotarios/chasquimq/releases/latest/download/chasquimq-cli-installer.sh | sh
+
+# Windows PowerShell
+powershell -c "irm https://github.com/jotarios/chasquimq/releases/latest/download/chasquimq-cli-installer.ps1 | iex"
+```
+
+For a specific version, replace `latest` with the tag (e.g., `download/chasquimq-cli-v0.1.0/`).
+
+The release pipeline is driven by [`cargo dist`](https://opensource.axo.dev/cargo-dist/) — see the [`CLI Release` workflow](../.github/workflows/release.yml) and the [Releasing chasquimq-cli](../CONTRIBUTING.md#releasing-chasquimq-cli) section of `CONTRIBUTING.md` for the release flow.
+
+### From source
+
 From the workspace root:
 
 ```bash
