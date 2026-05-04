@@ -419,6 +419,20 @@ async def test_negative_delay_raises(
 
 
 @pytest.mark.asyncio
+async def test_non_finite_float_delay_raises(
+    redis_url: str, queue_name: str
+) -> None:
+    queue = Queue(queue_name, redis_url=redis_url)
+    with pytest.raises(ValueError, match="finite non-negative"):
+        await queue.add("x", {"k": 1}, delay=float("inf"))
+    with pytest.raises(ValueError, match="finite non-negative"):
+        await queue.add("x", {"k": 1}, delay=float("-inf"))
+    with pytest.raises(ValueError, match="finite non-negative"):
+        await queue.add("x", {"k": 1}, delay=float("nan"))
+    await queue.close()
+
+
+@pytest.mark.asyncio
 async def test_worker_close_is_idempotent_and_safe_during_run(
     redis_url: str, queue_name: str
 ) -> None:
@@ -438,12 +452,23 @@ async def test_worker_close_is_idempotent_and_safe_during_run(
     run_task = asyncio.create_task(worker.run())
     await asyncio.sleep(0.1)
 
-    await worker.close()
-    await worker.close()
-    await worker.close()
+    results = await asyncio.gather(
+        worker.close(),
+        worker.close(),
+        worker.close(),
+        return_exceptions=True,
+    )
+    assert all(not isinstance(r, BaseException) for r in results)
 
     await asyncio.wait_for(run_task, timeout=5.0)
     assert worker.is_running is False
+
+
+def test_worker_default_concurrency_is_100() -> None:
+    import inspect
+
+    sig = inspect.signature(Worker.__init__)
+    assert sig.parameters["concurrency"].default == 100
 
 
 @pytest.mark.asyncio

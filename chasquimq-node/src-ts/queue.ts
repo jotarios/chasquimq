@@ -88,6 +88,15 @@ export class Queue<
       warnedNamePersist = true
     }
 
+    if (merged.delay !== undefined) {
+      if (!Number.isFinite(merged.delay)) {
+        throw new RangeError(`delay must be a finite number, got ${merged.delay}`)
+      }
+      if (merged.delay < 0) {
+        throw new RangeError(`delay must be non-negative, got ${merged.delay}`)
+      }
+    }
+
     const retryOverride = buildRetryOverride(merged)
     const nativeOpts = buildNativeAddOptions(merged.jobId, retryOverride)
 
@@ -114,6 +123,17 @@ export class Queue<
     if (jobs.length === 0) return []
     if (jobs.some((j) => j.opts?.parent)) {
       throw new NotSupportedError('Parent options not supported in addBulk')
+    }
+    for (const j of jobs) {
+      const d = j.opts?.delay
+      if (d !== undefined) {
+        if (!Number.isFinite(d)) {
+          throw new RangeError(`delay must be a finite number, got ${d}`)
+        }
+        if (d < 0) {
+          throw new RangeError(`delay must be non-negative, got ${d}`)
+        }
+      }
     }
     // For v1: route through native add_bulk only when no per-job
     // delay / jobId / attempts / backoff. Anything else falls back to the

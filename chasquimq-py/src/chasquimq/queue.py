@@ -9,6 +9,7 @@ vice versa) drain the same Redis stream without translation.
 
 from __future__ import annotations
 
+import math
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional, Sequence, Union
@@ -321,8 +322,10 @@ def _coerce_delay_ms(delay: Optional[DelayLike]) -> Optional[int]:
             raise ValueError(f"delay must be non-negative, got {delay}")
         return delay
     if isinstance(delay, float):
-        if delay < 0:
-            raise ValueError(f"delay must be non-negative, got {delay}")
+        if not math.isfinite(delay) or delay < 0:
+            raise ValueError(
+                f"delay must be a finite non-negative number, got {delay!r}"
+            )
         return int(delay * 1000)
     raise TypeError(
         f"delay must be int (ms) / float (s) / datetime / timedelta; "

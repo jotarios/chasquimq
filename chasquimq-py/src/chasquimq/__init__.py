@@ -7,6 +7,10 @@ PyO3 layer (``chasquimq._native``) is reachable for power users who
 want the raw engine handles.
 """
 
+import logging as _logging
+
+_logging.getLogger("chasquimq").addHandler(_logging.NullHandler())
+
 from ._native import (
     NativeConsumer,
     NativeJob,
