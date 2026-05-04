@@ -1,0 +1,140 @@
+name: Cross-Shim Wire Contract
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'chasquimq/**'
+      - 'chasquimq-py/**'
+      - 'chasquimq-node/**'
+      - '.github/workflows/cross-shim.yml'
+      - '.github/cross-shim-tests/**'
+  pull_request:
+    paths:
+      - 'chasquimq/**'
+      - 'chasquimq-py/**'
+      - 'chasquimq-node/**'
+      - '.github/workflows/cross-shim.yml'
+      - '.github/cross-shim-tests/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  cross-shim:
+    name: Python <-> Node wire-format parity (linux x64)
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:8.6.2
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      REDIS_URL: redis://127.0.0.1:6379
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> target'
+          key: cross-shim-linux-x64
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: chasquimq-py/pyproject.toml
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            chasquimq-node/package-lock.json
+            .github/cross-shim-tests/package-lock.json
+
+      - name: Build Python wheel (release)
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: chasquimq-py
+          target: x86_64-unknown-linux-gnu
+          manylinux: auto
+          args: --release --out dist --features pyo3/extension-module
+
+      - name: Install Python wheel + runtime deps
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install chasquimq-py/dist/*.whl
+          pip install 'redis>=5.0,<7' msgpack
+
+      - name: Build Node native binding + TS shim
+        working-directory: chasquimq-node
+        run: |
+          npm ci
+          npm run build:debug
+          npm run build:ts
+
+      - name: Install cross-shim test fixtures
+        working-directory: .github/cross-shim-tests
+        run: npm install
+
+      - name: Phase 1 — Python producer -> Node worker
+        working-directory: .github/cross-shim-tests
+        env:
+          QUEUE: cross-shim-phase1-${{ github.run_id }}-${{ github.run_attempt }}
+          COUNT: '50'
+          TAG: py
+          JOB_NAME: cross-shim
+          EXPECT_TAG: py
+          TIMEOUT_SECS: '30'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python producer.py 2>&1 | tee /tmp/phase1-producer.log
+          npx tsx worker.ts 2>&1 | tee /tmp/phase1-worker.log
+
+      - name: Flush Redis between phases
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq redis-tools >/dev/null
+          redis-cli -h 127.0.0.1 -p 6379 FLUSHDB
+
+      - name: Phase 2 — Node producer -> Python worker
+        working-directory: .github/cross-shim-tests
+        env:
+          QUEUE: cross-shim-phase2-${{ github.run_id }}-${{ github.run_attempt }}
+          COUNT: '50'
+          TAG: node
+          JOB_NAME: cross-shim
+          EXPECT_TAG: node
+          TIMEOUT_SECS: '30'
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx tsx producer.ts 2>&1 | tee /tmp/phase2-producer.log
+          python worker.py 2>&1 | tee /tmp/phase2-worker.log
+
+      - name: Upload phase logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cross-shim-logs
+          path: |
+            /tmp/phase1-producer.log
+            /tmp/phase1-worker.log
+            /tmp/phase2-producer.log
+            /tmp/phase2-worker.log
+          if-no-files-found: warn

@@ -1,0 +1,15 @@
+{
+  "name": "chasquimq-cross-shim-tests",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Cross-shim wire-format contract test fixtures (CI only).",
+  "scripts": {
+    "producer": "tsx producer.ts",
+    "worker": "tsx worker.ts"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5"
+  }
+}
