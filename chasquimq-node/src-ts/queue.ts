@@ -14,6 +14,8 @@ import type {
   QueueOptions,
   JobState,
   JobType,
+  RepeatOptions,
+  RepeatableJobMeta,
 } from './types.js'
 import { NotSupportedError } from './errors.js'
 import { Job } from './job.js'
@@ -57,9 +59,7 @@ export class Queue<
     }
 
     if (merged.repeat) {
-      throw new NotSupportedError(
-        'Repeatable jobs are not yet wired through the native binding; the engine supports them but the JS surface is pending',
-      )
+      return await this.upsertRepeatableJob(name, data, merged)
     }
     if (merged.parent) {
       throw new NotSupportedError('Parent/child flows are not supported')
@@ -135,6 +135,81 @@ export class Queue<
       out.push(await this.add(j.name, j.data, j.opts as JobsOptions))
     }
     return out
+  }
+
+  private async upsertRepeatableJob(
+    name: NameType,
+    data: DataType,
+    merged: JobsOptions,
+  ): Promise<Job<DataType, ResultType, NameType>> {
+    const repeat = merged.repeat as RepeatOptions
+    const pattern = translateRepeatPattern(repeat)
+    const buf = encodePayload(data)
+    const startAfterMs = coerceDateLike(repeat.startDate)
+    const endBeforeMs = coerceDateLike(repeat.endDate)
+    const producer = await this.producer()
+    const resolvedKey = await producer.upsertRepeatable({
+      key: merged.repeatJobKey ?? '',
+      jobName: name,
+      pattern,
+      payload: buf,
+      limit: repeat.limit,
+      startAfterMs,
+      endBeforeMs,
+    })
+    // The repeatable upsert is a *spec*, not a job invocation; the engine
+    // mints a fresh ULID for each fire. Returning a Job here gives callers
+    // a stable handle (the resolved spec key as `id`) to pair with
+    // `Queue.removeRepeatableByKey(job.id)` for symmetry with the
+    // single-add API. The `id` shape is therefore intentionally **not** a
+    // ULID for repeatable upserts.
+    return new Job(name, data, merged, resolvedKey)
+  }
+
+  // --- Repeatable / cron jobs (engine slice 10) ---
+
+  /**
+   * List repeatable specs ordered by next fire time, ascending.
+   *
+   * Returns up to `limit` entries (default 100). The wire size is small —
+   * payloads are intentionally not included; call `Queue.add(name, data,
+   * { repeat })` to inspect or modify a spec's payload.
+   */
+  async getRepeatableJobs(limit: number = 100): Promise<RepeatableJobMeta[]> {
+    const producer = await this.producer()
+    const metas = await producer.listRepeatable(limit)
+    return metas.map((m): RepeatableJobMeta => {
+      const base: RepeatableJobMeta = {
+        key: m.key,
+        jobName: m.jobName,
+        patternKind: m.pattern.kind === 'cron' ? 'cron' : 'every',
+        nextFireMs: m.nextFireMs,
+        limit: m.limit,
+        startAfterMs: m.startAfterMs,
+        endBeforeMs: m.endBeforeMs,
+      }
+      if (m.pattern.kind === 'cron') {
+        base.pattern = m.pattern.expression ?? undefined
+        base.tz = m.pattern.tz ?? undefined
+      } else {
+        base.every = m.pattern.intervalMs ?? undefined
+      }
+      return base
+    })
+  }
+
+  /**
+   * Remove a repeatable spec by its resolved key. Returns `true` if a spec
+   * was removed, `false` if no spec with that key existed.
+   *
+   * The resolved key is what {@link Queue.add} returns (via the upsert path)
+   * and what {@link Queue.getRepeatableJobs} entries carry as `meta.key`.
+   * If the caller did not supply an explicit `repeatJobKey`, the engine
+   * derives one as `<jobName>::<patternSignature>`.
+   */
+  async removeRepeatableByKey(key: string): Promise<boolean> {
+    const producer = await this.producer()
+    return producer.removeRepeatable(key)
   }
 
   // --- Stubs (NotSupportedError) ---
@@ -236,4 +311,55 @@ function buildRedisUrl(c: ConnectionOptions): string {
     : ''
   const db = c.db != null ? `/${c.db}` : ''
   return `redis://${auth}${host}:${port}${db}`
+}
+
+/**
+ * Translate a {@link RepeatOptions} (the JS-shaped spec users pass to
+ * `Queue.add`) into the NAPI-shaped pattern object the producer wants.
+ *
+ * Validates that exactly one of `pattern` / `every` is set: passing both
+ * would silently take one and ignore the other, which is a footgun. The
+ * thrown `Error` is plain (not `NotSupportedError`) — this is a config
+ * mistake the caller can fix in their own code, not a missing feature.
+ */
+function translateRepeatPattern(repeat: RepeatOptions): {
+  kind: 'cron' | 'every'
+  expression?: string
+  tz?: string
+  intervalMs?: number
+} {
+  const hasPattern = typeof repeat.pattern === 'string' && repeat.pattern.length > 0
+  const hasEvery = typeof repeat.every === 'number' && repeat.every >= 0
+  if (hasPattern && hasEvery) {
+    throw new Error(
+      'RepeatOptions: pass either `pattern` (cron) or `every` (ms), not both',
+    )
+  }
+  if (!hasPattern && !hasEvery) {
+    throw new Error(
+      'RepeatOptions: one of `pattern` (cron) or `every` (ms) is required',
+    )
+  }
+  if (hasPattern) {
+    return {
+      kind: 'cron',
+      expression: repeat.pattern,
+      tz: repeat.tz,
+    }
+  }
+  return {
+    kind: 'every',
+    intervalMs: repeat.every,
+  }
+}
+
+function coerceDateLike(d: Date | string | number | undefined): number | undefined {
+  if (d == null) return undefined
+  if (d instanceof Date) return d.getTime()
+  if (typeof d === 'number') return d
+  const parsed = Date.parse(d)
+  if (Number.isNaN(parsed)) {
+    throw new Error(`RepeatOptions: invalid date string ${JSON.stringify(d)}`)
+  }
+  return parsed
 }

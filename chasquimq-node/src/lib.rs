@@ -13,11 +13,17 @@ mod consumer;
 mod payload;
 mod producer;
 mod promoter;
+mod repeat;
+mod scheduler;
 
 pub use consumer::{NativeConsumer, NativeConsumerOpts, NativeJob, NativeRetryOpts};
 pub use payload::RawBytes;
 pub use producer::{NativeDlqEntry, NativeProducer, NativeProducerOpts};
 pub use promoter::{NativePromoter, NativePromoterOpts};
+pub use repeat::{
+    NativeMissedFiresPolicy, NativeRepeatPattern, NativeRepeatableMeta, NativeRepeatableSpec,
+};
+pub use scheduler::{NativeScheduler, NativeSchedulerOpts};
 
 use napi_derive::napi;
 

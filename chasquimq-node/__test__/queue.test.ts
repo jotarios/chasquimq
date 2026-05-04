@@ -59,10 +59,19 @@ skipIfNoRedis('Queue integration', () => {
     expect(jobs).toHaveLength(2)
   })
 
-  it('add() with repeat option throws NotSupportedError', async () => {
-    await expect(
-      queue.add('repeating', { hello: 'r' }, { repeat: { every: 1000 } }),
-    ).rejects.toBeInstanceOf(NotSupportedError)
+  it('add() with repeat option upserts a spec instead of throwing', async () => {
+    // Engine slice 10 is now wired through the NAPI binding — the previous
+    // assertion that this throws `NotSupportedError` no longer holds.
+    // End-to-end fire / list / remove behavior is covered in
+    // `repeatable.test.ts`; this case just pins that the code path resolves.
+    const job = await queue.add(
+      'repeating',
+      { hello: 'r' },
+      { repeat: { every: 60_000 } },
+    )
+    expect(job.id).toContain('repeating::every:60000')
+    // Clean up so the spec doesn't leak across tests.
+    await queue.removeRepeatableByKey(job.id)
   })
 
   it('add() with parent option throws NotSupportedError', async () => {
