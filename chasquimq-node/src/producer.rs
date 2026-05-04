@@ -326,13 +326,17 @@ fn native_pattern_into_engine(p: NativeRepeatPattern) -> napi::Result<RepeatPatt
             let interval_ms = p
                 .interval_ms
                 .ok_or_else(|| napi::Error::from_reason("every pattern requires `intervalMs`"))?;
-            if !interval_ms.is_finite() || interval_ms < 0.0 {
+            // `intervalMs <= 0` would hot-loop the scheduler (every tick the
+            // computed next-fire is already in the past, so the spec
+            // re-schedules immediately). Reject up-front. NaN / non-finite
+            // is rejected by the same guard.
+            if !interval_ms.is_finite() || interval_ms <= 0.0 {
                 return Err(napi::Error::from_reason(format!(
-                    "intervalMs must be a non-negative finite number; got {interval_ms}"
+                    "intervalMs must be > 0; got {interval_ms}"
                 )));
             }
             Ok(RepeatPattern::Every {
-                interval_ms: interval_ms as u64,
+                interval_ms: f64_to_u64(interval_ms, "intervalMs")?,
             })
         }
         other => Err(napi::Error::from_reason(format!(
@@ -365,6 +369,7 @@ fn native_missed_fires_into_engine(p: NativeMissedFiresPolicy) -> napi::Result<M
         "fire-all" => Ok(MissedFiresPolicy::FireAll {
             // Default cap matches the engine's typical-cron-catch-up budget;
             // callers wanting unbounded replay must pass `maxCatchup` explicitly.
+            // `u32` field — already bounded by the NAPI value type.
             max_catchup: p.max_catchup.unwrap_or(100),
         }),
         other => Err(napi::Error::from_reason(format!(
@@ -406,9 +411,25 @@ fn engine_meta_into_native(m: chasquimq::RepeatableMeta) -> NativeRepeatableMeta
 fn f64_opt_to_u64_opt(v: Option<f64>, name: &str) -> napi::Result<Option<u64>> {
     match v {
         None => Ok(None),
-        Some(n) if !n.is_finite() || n < 0.0 => Err(napi::Error::from_reason(format!(
-            "{name} must be a non-negative finite number; got {n}"
-        ))),
-        Some(n) => Ok(Some(n as u64)),
+        Some(n) => Ok(Some(f64_to_u64(n, name)?)),
     }
+}
+
+/// Convert an `f64` (incoming JS `number`) into a `u64` while rejecting
+/// non-finite, negative, or out-of-range values. Without this guard, a
+/// silent `as u64` cast would saturate on `+Infinity`, alias huge floats
+/// (since `f64` has only 53 bits of mantissa), and produce surprising
+/// `0` on negatives via `as` truncation — all bug-shaped behavior at the
+/// FFI boundary. Cap chosen as `u64::MAX as f64` (exact representation,
+/// covers the entire engine-side `u64` range); the caller code paths
+/// using this helper (`intervalMs`, `limit`, `startAfterMs`,
+/// `endBeforeMs`, `maxCatchup` would-be inputs) all sit comfortably
+/// below `2^53` in practice, so the bound never bites real callers.
+fn f64_to_u64(n: f64, field: &str) -> napi::Result<u64> {
+    if !n.is_finite() || n < 0.0 || n > (u64::MAX as f64) {
+        return Err(napi::Error::from_reason(format!(
+            "{field} out of range: {n}"
+        )));
+    }
+    Ok(n as u64)
 }

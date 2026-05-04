@@ -62,12 +62,13 @@ export interface JobsOptions {
 export interface RepeatOptions {
   /**
    * Cron expression. Accepts both 5-field (`m h dom mon dow`) and 6-field
-   * (with leading seconds) syntax.
+   * (with leading seconds) syntax. Cannot be combined with `every`.
    */
   pattern?: string
   /**
    * Fixed millisecond interval between fires. First fire lands one
-   * interval after upsert (no immediate fire).
+   * interval after upsert (no immediate fire). Cannot be combined with
+   * `pattern`.
    */
   every?: number
   /** Maximum number of fires before the spec is removed. */
@@ -89,8 +90,11 @@ export interface RepeatOptions {
   endDate?: Date | string | number
   /**
    * Cron timezone. Accepts `"UTC"` / `"Z"`, fixed offsets (`"+05:30"`),
-   * or any IANA name (`"America/New_York"`). IANA names are DST-aware.
-   * Ignored when `every` is set.
+   * or any IANA name (`"America/New_York"`). IANA names like
+   * `'America/New_York'` are DST-aware: `0 2 * * *` fires at the local
+   * 02:00 wall-clock on both sides of spring-forward / fall-back (the
+   * underlying UTC instant shifts by one hour). Ignored when `every`
+   * is set.
    */
   tz?: string
   /** Unused in v1. Reserved for future explicit-id-per-fire wiring. */

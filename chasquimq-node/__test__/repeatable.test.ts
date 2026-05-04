@@ -40,6 +40,9 @@ skipIfNoRedis('Queue repeatable / cron jobs (engine slice 10)', () => {
       tz: 'UTC',
     })
     expect(list[0]!.nextFireMs).toBeGreaterThan(Date.now())
+
+    // Clean up so left-over Redis specs don't accumulate across runs.
+    await queue.removeRepeatableByKey(job.id)
   })
 
   it('upserts an every spec and the worker fires it', async () => {
@@ -157,6 +160,41 @@ skipIfNoRedis('Queue repeatable / cron jobs (engine slice 10)', () => {
     expect(job.id).toBe(explicitKey)
     await queue.removeRepeatableByKey(explicitKey)
   })
+
+  it('Worker.runScheduler === false disables cron fires', async () => {
+    // Architectural contract for this PR: Worker auto-spawns an embedded
+    // Scheduler by default; opt-out via `runScheduler: false`. This test
+    // pins the opt-out path — no scheduler should mean no fires, even
+    // with a tight 200ms cadence and a 1.5s observation window.
+    let fires = 0
+    worker = new Worker<{ idx: number }, void>(
+      queueName,
+      async () => {
+        fires++
+      },
+      {
+        connection: parseConn(REDIS_URL!),
+        concurrency: 4,
+        autorun: false,
+        runScheduler: false,
+      },
+    )
+    void worker.run()
+
+    const job = await queue.add(
+      'no-scheduler-job',
+      { idx: 0 },
+      { repeat: { every: 200 } },
+    )
+
+    // Wait 1.5s — long enough for ~7 fires if a scheduler were running.
+    await new Promise((r) => setTimeout(r, 1_500))
+    // Deterministic: with no scheduler attached and no other fires source,
+    // the worker handler MUST never have been invoked. No tolerance.
+    expect(fires).toBe(0)
+
+    await queue.removeRepeatableByKey(job.id)
+  }, 10_000)
 })
 
 async function waitFor(
