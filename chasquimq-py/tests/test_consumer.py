@@ -273,6 +273,54 @@ async def test_handler_raises_unrecoverable_routes_to_dlq(redis_client, queue_na
 
 
 @pytest.mark.asyncio
+async def test_handler_raises_unrecoverable_subclass_routes_to_dlq(
+    redis_client, queue_name
+):
+    await _flush_queue(redis_client, queue_name)
+    consumer = NativeConsumer(
+        REDIS_URL,
+        queue_name,
+        concurrency=1,
+        max_attempts=99,
+        read_block_ms=200,
+        delayed_enabled=True,
+    )
+
+    class PoisonPill(UnrecoverableError):
+        pass
+
+    invocations: List[int] = []
+
+    async def handler(job: NativeJob) -> None:
+        invocations.append(job.attempt)
+        raise PoisonPill("subclass poison pill")
+
+    await _xadd_job(redis_client, queue_name, b"unrecoverable-subclass")
+
+    run_task = asyncio.ensure_future(consumer.run(handler))
+    try:
+        async def in_dlq() -> bool:
+            return await _xlen(redis_client, _dlq_key(queue_name)) >= 1
+
+        await _wait_for(in_dlq, timeout=15.0)
+    finally:
+        consumer.shutdown()
+        await asyncio.wait_for(run_task, timeout=15.0)
+
+    dlq_len = await _xlen(redis_client, _dlq_key(queue_name))
+    assert dlq_len == 1, f"DLQ should hold 1 entry, got {dlq_len}"
+    assert len(invocations) == 1, (
+        f"unrecoverable subclass must not retry; saw {invocations}"
+    )
+
+    entries = await redis_client.xrange(_dlq_key(queue_name), count=1)
+    assert entries
+    _, fields = entries[0]
+    reason = fields.get(b"reason")
+    assert reason == b"unrecoverable", f"unexpected DLQ reason: {reason!r}"
+
+
+@pytest.mark.asyncio
 async def test_shutdown_from_another_task_ends_run_promptly(redis_client, queue_name):
     await _flush_queue(redis_client, queue_name)
     consumer = NativeConsumer(
