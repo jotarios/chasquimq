@@ -1,6 +1,16 @@
-from typing import Any, Awaitable, Optional, Sequence
+from typing import Any, Awaitable, Callable, Optional, Sequence
 
 def version() -> str: ...
+
+class NativeJob:
+    @property
+    def id(self) -> str: ...
+    @property
+    def payload(self) -> bytes: ...
+    @property
+    def created_at_ms(self) -> int: ...
+    @property
+    def attempt(self) -> int: ...
 
 class NativeProducer:
     def __init__(
@@ -46,3 +56,26 @@ class NativeProducer:
         self, limit: int
     ) -> Awaitable[list[dict[str, Any]]]: ...
     def remove_repeatable_by_key(self, key: str) -> Awaitable[bool]: ...
+
+class NativeConsumer:
+    def __init__(
+        self,
+        redis_url: str,
+        queue_name: str,
+        *,
+        concurrency: int = 1,
+        max_attempts: int = 25,
+        group: str = "default",
+        consumer_id: Optional[str] = None,
+        read_block_ms: Optional[int] = None,
+        read_count: Optional[int] = None,
+        claim_min_idle_ms: Optional[int] = None,
+        max_payload_bytes: Optional[int] = None,
+        dlq_max_stream_len: Optional[int] = None,
+        events_enabled: bool = True,
+        delayed_enabled: bool = True,
+    ) -> None: ...
+    def run(
+        self, handler: Callable[[NativeJob], Awaitable[Any]]
+    ) -> Awaitable[None]: ...
+    def shutdown(self) -> None: ...

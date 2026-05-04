@@ -25,5 +25,6 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 chasquimq-py/dist/
-chasquimq-py/src/chasquimq/_native*.so
-chasquimq-py/src/chasquimq/_native*.pyd
+chasquimq-py/src/chasquimq/*.so
+chasquimq-py/src/chasquimq/*.dylib
+chasquimq-py/src/chasquimq/*.pyd
