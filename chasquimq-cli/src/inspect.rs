@@ -32,6 +32,8 @@ pub(crate) struct Snapshot {
 }
 
 pub(crate) async fn collect(client: &Client, queue: &str, group: &str) -> Result<Snapshot> {
+    const PIPELINE_RESULT_COUNT: usize = 6;
+
     let stream_key = format!("{{chasqui:{queue}}}:stream");
     let dlq_key = format!("{{chasqui:{queue}}}:dlq");
     let delayed_key = format!("{{chasqui:{queue}}}:delayed");
@@ -48,6 +50,13 @@ pub(crate) async fn collect(client: &Client, queue: &str, group: &str) -> Result
     let _: () = pipeline.zcard(&repeat_key).await?;
 
     let results = pipeline.try_all::<Value>().await;
+
+    if results.len() < PIPELINE_RESULT_COUNT {
+        return Err(anyhow::anyhow!(
+            "expected {PIPELINE_RESULT_COUNT} pipeline results, got {}",
+            results.len()
+        ));
+    }
 
     let stream_depth = results[0]
         .as_ref()

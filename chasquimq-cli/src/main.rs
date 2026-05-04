@@ -47,7 +47,7 @@ enum Command {
     /// Exits cleanly on Ctrl+C.
     Watch {
         queue: String,
-        #[arg(long, default_value_t = 1000)]
+        #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u64).range(1..))]
         interval_ms: u64,
         #[arg(long, default_value = DEFAULT_REDIS_URL)]
         redis_url: String,
