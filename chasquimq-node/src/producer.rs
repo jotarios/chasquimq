@@ -13,8 +13,9 @@ use crate::repeat::{
 };
 use bytes::Bytes;
 use chasquimq::config::ProducerConfig;
-use chasquimq::producer::Producer;
+use chasquimq::producer::{AddOptions, Producer};
 use chasquimq::repeat::{MissedFiresPolicy, RepeatPattern, RepeatableSpec};
+use chasquimq::{BackoffKind, BackoffSpec, JobRetryOverride};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use std::sync::Arc;
@@ -38,6 +39,47 @@ pub struct NativeDlqEntry {
     pub reason: String,
     pub detail: Option<String>,
     pub payload: Buffer,
+}
+
+/// Per-job backoff override carried in [`NativeJobRetryOverride::backoff`].
+///
+/// Mirrors `chasquimq::BackoffSpec` 1:1. `kind` is the backoff strategy
+/// — `"fixed"` or `"exponential"` — anything else is rejected with an
+/// `Error` at the FFI boundary so a typo in JS doesn't silently route
+/// through the engine's `BackoffKind::Unknown` forward-compat sink.
+#[napi(object)]
+pub struct NativeBackoffSpec {
+    /// `"fixed"` | `"exponential"`. Mirrors `BackoffKind` lowercase tags.
+    pub kind: String,
+    /// Base delay in milliseconds (`f64` so JS can pass plain `number`s
+    /// without BigInt; non-negative integer values up to 2^53-1 round-trip
+    /// safely).
+    pub delay_ms: f64,
+    pub max_delay_ms: Option<f64>,
+    pub multiplier: Option<f64>,
+    pub jitter_ms: Option<f64>,
+}
+
+/// Per-job retry override carried in [`NativeAddOptions::retry`].
+///
+/// Mirrors `chasquimq::JobRetryOverride`. When `max_attempts` and / or
+/// `backoff` are set, they override the queue-wide `ConsumerConfig`
+/// values for this specific job.
+#[napi(object)]
+pub struct NativeJobRetryOverride {
+    pub max_attempts: Option<u32>,
+    pub backoff: Option<NativeBackoffSpec>,
+}
+
+/// Options for the `*_with_options` family of producer methods.
+///
+/// Mirrors `chasquimq::producer::AddOptions`. `id` is the stable
+/// [`chasquimq::JobId`] for at-most-once / idempotent scheduling;
+/// `retry` carries per-job retry overrides.
+#[napi(object)]
+pub struct NativeAddOptions {
+    pub id: Option<String>,
+    pub retry: Option<NativeJobRetryOverride>,
 }
 
 #[napi]
@@ -153,6 +195,82 @@ impl NativeProducer {
         let when = ms_to_systemtime(run_at_ms)?;
         self.inner
             .add_at_with_id(id, when, RawBytes(bytes))
+            .await
+            .map_err(map_engine_err)
+    }
+
+    /// Like `add`, but accepts a [`NativeAddOptions`] carrying an optional
+    /// stable id and / or per-job retry override. Maps to
+    /// `Producer::add_with_options` on the engine.
+    #[napi]
+    pub async fn add_with_options(
+        &self,
+        payload: Buffer,
+        opts: NativeAddOptions,
+    ) -> napi::Result<String> {
+        let bytes = buffer_to_bytes(&payload);
+        let engine_opts = to_engine_add_options(opts)?;
+        self.inner
+            .add_with_options(RawBytes(bytes), engine_opts)
+            .await
+            .map_err(map_engine_err)
+    }
+
+    /// Like `addIn`, but accepts a [`NativeAddOptions`]. When `opts.id`
+    /// is set, routes through the idempotent delayed-schedule path
+    /// (same dedup-marker semantics as `addInWithId`). The retry
+    /// override always rides inside the encoded `Job<T>`.
+    #[napi]
+    pub async fn add_in_with_options(
+        &self,
+        delay_ms: i64,
+        payload: Buffer,
+        opts: NativeAddOptions,
+    ) -> napi::Result<String> {
+        let bytes = buffer_to_bytes(&payload);
+        let dur = ms_to_duration(delay_ms)?;
+        let engine_opts = to_engine_add_options(opts)?;
+        self.inner
+            .add_in_with_options(dur, RawBytes(bytes), engine_opts)
+            .await
+            .map_err(map_engine_err)
+    }
+
+    /// Like `addAt`, but accepts a [`NativeAddOptions`]. Same dedup /
+    /// retry-carry model as [`Self::add_in_with_options`].
+    #[napi]
+    pub async fn add_at_with_options(
+        &self,
+        run_at_ms: i64,
+        payload: Buffer,
+        opts: NativeAddOptions,
+    ) -> napi::Result<String> {
+        let bytes = buffer_to_bytes(&payload);
+        let when = ms_to_systemtime(run_at_ms)?;
+        let engine_opts = to_engine_add_options(opts)?;
+        self.inner
+            .add_at_with_options(when, RawBytes(bytes), engine_opts)
+            .await
+            .map_err(map_engine_err)
+    }
+
+    /// Bulk variant of [`Self::add_with_options`]. The same retry override
+    /// is applied to every job in the batch. Setting `opts.id` when
+    /// `payloads.len() > 1` is rejected by the engine — propagate the
+    /// error verbatim through `map_engine_err`.
+    #[napi]
+    pub async fn add_bulk_with_options(
+        &self,
+        payloads: Vec<Buffer>,
+        opts: NativeAddOptions,
+    ) -> napi::Result<Vec<String>> {
+        let raw: Vec<RawBytes> = payloads
+            .iter()
+            .map(|b| RawBytes(buffer_to_bytes(b)))
+            .collect();
+        let engine_opts = to_engine_add_options(opts)?;
+        self.inner
+            .add_bulk_with_options(raw, engine_opts)
             .await
             .map_err(map_engine_err)
     }
@@ -432,4 +550,54 @@ fn f64_to_u64(n: f64, field: &str) -> napi::Result<u64> {
         )));
     }
     Ok(n as u64)
+}
+
+/// Translate a `NativeBackoffSpec` (JS-side, `f64` numbers, string `kind`)
+/// into the engine's `BackoffSpec`. Unknown `kind` values are rejected
+/// at the FFI boundary so a typo in JS surfaces as an Error rather than
+/// silently routing through `BackoffKind::Unknown`'s exponential
+/// fallback. Numeric fields go through `f64_to_u64` (errors on
+/// non-finite / negative / out-of-range values) so a `-100ms` slip is
+/// surfaced rather than silently clamped.
+fn to_engine_backoff(spec: NativeBackoffSpec) -> napi::Result<BackoffSpec> {
+    let kind = match spec.kind.as_str() {
+        "fixed" => BackoffKind::Fixed,
+        "exponential" => BackoffKind::Exponential,
+        other => {
+            return Err(napi::Error::from_reason(format!(
+                "unknown backoff kind {other:?}; expected 'fixed' or 'exponential'"
+            )));
+        }
+    };
+    Ok(BackoffSpec {
+        kind,
+        delay_ms: f64_to_u64(spec.delay_ms, "backoff.delayMs")?,
+        max_delay_ms: spec
+            .max_delay_ms
+            .map(|v| f64_to_u64(v, "backoff.maxDelayMs"))
+            .transpose()?,
+        multiplier: spec.multiplier,
+        jitter_ms: spec
+            .jitter_ms
+            .map(|v| f64_to_u64(v, "backoff.jitterMs"))
+            .transpose()?,
+    })
+}
+
+fn to_engine_add_options(opts: NativeAddOptions) -> napi::Result<AddOptions> {
+    let mut ao = AddOptions::new();
+    if let Some(id) = opts.id {
+        ao = ao.with_id(id);
+    }
+    if let Some(retry) = opts.retry {
+        let mut over = JobRetryOverride {
+            max_attempts: retry.max_attempts,
+            backoff: None,
+        };
+        if let Some(b) = retry.backoff {
+            over.backoff = Some(to_engine_backoff(b)?);
+        }
+        ao = ao.with_retry(over);
+    }
+    Ok(ao)
 }

@@ -27,9 +27,13 @@ export interface BackoffOptions {
 export interface JobsOptions {
   /** Delay in milliseconds before the job becomes processable. */
   delay?: number
-  /** Total attempt budget (default 1). Routed through engine slice 8 (TODO). */
+  /** Total attempt budget. Overrides the queue-wide `maxAttempts`
+   *  for this specific job; routed through the engine's per-job retry
+   *  override carried inside the encoded `Job<T>`. */
   attempts?: number
-  /** Per-job backoff override; engine wiring pending. */
+  /** Per-job backoff override. Either a plain `number` (treated as a
+   *  fixed delay in ms) or a `BackoffOptions` describing fixed /
+   *  exponential strategy with optional cap, multiplier, and jitter. */
   backoff?: number | BackoffOptions
   /** Mostly a no-op — chasquimq XACKDELs on success by default. */
   removeOnComplete?: boolean | number

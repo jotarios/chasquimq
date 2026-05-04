@@ -85,12 +85,16 @@ impl NativeConsumer {
     /// promise → `XACK`. A rejected promise → `HandlerError` (engine
     /// retries with backoff up to `maxAttempts`, then DLQ).
     ///
-    /// FUTURE (high-level shim / engine slice 8): when the JS
-    /// rejection's `error.name === 'FailedJob'`, we should map it to a
-    /// terminal-fail variant of `HandlerError` so the engine routes
-    /// straight to DLQ. The engine doesn't expose that variant today —
-    /// see `docs/phase3-napi-design.md` §6. Until then, every JS
-    /// rejection follows the standard retry-then-DLQ path.
+    /// **Unrecoverable errors:** if the JS rejection's `error.name`
+    /// is `'UnrecoverableError'`, the binding maps it to
+    /// `HandlerError::unrecoverable(...)` instead of `HandlerError::new(...)`.
+    /// The engine then short-circuits the retry budget and routes the
+    /// job straight to the DLQ with `DlqReason::Unrecoverable`. Detection
+    /// works off the rejection's stringified prefix — `JsUnknown` gets
+    /// `coerce_to_string`'d, which for a JS `Error` produces
+    /// `"<name>: <message>"`. We match the prefix `"UnrecoverableError"`
+    /// followed by either `:` (the standard `Error.toString()` form) or
+    /// end-of-string (an `UnrecoverableError` thrown with no message).
     #[napi(ts_args_type = "handler: (job: NativeJob) => Promise<void>")]
     pub async fn run(
         &self,
@@ -136,9 +140,7 @@ impl NativeConsumer {
                         match tsfn.call_async::<Promise<UnknownReturnValue>>(js_job).await {
                             Ok(promise) => match promise.await {
                                 Ok(_) => Ok(()),
-                                Err(e) => Err(HandlerError::new(JsHandlerError(format!(
-                                    "JS handler rejected: {e}"
-                                )))),
+                                Err(e) => Err(map_js_rejection(&e)),
                             },
                             Err(e) => Err(HandlerError::new(JsHandlerError(format!(
                                 "TSFN call failed: {e}"
@@ -251,3 +253,67 @@ fn clamp_u64_to_i64(v: u64) -> i64 {
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 struct JsHandlerError(String);
+
+/// Translate a `napi::Error` produced by a rejected JS Promise into the
+/// engine's `HandlerError`. When the rejection's stringified form starts
+/// with `UnrecoverableError` (followed by `:` or end-of-string), this
+/// returns `HandlerError::unrecoverable(...)` so the consumer routes the
+/// job straight to the DLQ. Every other rejection follows the standard
+/// retry-then-DLQ path via `HandlerError::new(...)`.
+///
+/// Why prefix-matching: `napi::Error::from(JsUnknown)` calls
+/// `coerce_to_string` on the rejected value, which for a `Error` object
+/// produces `"<error.name>: <error.message>"`. There's no reliable way
+/// to read the JS `.name` property back out of a moved-out `napi::Error`
+/// in a tokio context, so the prefix is the cheap, allocation-free way
+/// to detect the marker class.
+fn map_js_rejection(e: &napi::Error) -> HandlerError {
+    let reason = &e.reason;
+    if is_unrecoverable_prefix(reason) {
+        HandlerError::unrecoverable(JsHandlerError(format!("JS handler rejected: {reason}")))
+    } else {
+        HandlerError::new(JsHandlerError(format!("JS handler rejected: {reason}")))
+    }
+}
+
+fn is_unrecoverable_prefix(s: &str) -> bool {
+    const TAG: &str = "UnrecoverableError";
+    if let Some(rest) = s.strip_prefix(TAG) {
+        // Match either the standard `Error.toString()` form
+        // (`"UnrecoverableError: <msg>"`) or a bare `Error` with no
+        // message (`coerce_to_string` then yields `"UnrecoverableError"`).
+        rest.is_empty() || rest.starts_with(':')
+    } else {
+        false
+    }
+}
+
+#[cfg(test)]
+mod prefix_tests {
+    use super::is_unrecoverable_prefix;
+
+    #[test]
+    fn matches_standard_tostring_form() {
+        assert!(is_unrecoverable_prefix("UnrecoverableError: boom"));
+    }
+
+    #[test]
+    fn matches_bare_name_with_no_message() {
+        assert!(is_unrecoverable_prefix("UnrecoverableError"));
+    }
+
+    #[test]
+    fn rejects_other_named_errors() {
+        assert!(!is_unrecoverable_prefix("Error: boom"));
+        assert!(!is_unrecoverable_prefix("RateLimitError: too fast"));
+        assert!(!is_unrecoverable_prefix("NotSupportedError: nope"));
+    }
+
+    #[test]
+    fn rejects_substring_collisions() {
+        // A user-named class containing the literal substring must not
+        // match — the prefix must be the full token followed by `:` or end.
+        assert!(!is_unrecoverable_prefix("MyUnrecoverableError: boom"));
+        assert!(!is_unrecoverable_prefix("UnrecoverableErrorInfo: boom"));
+    }
+}

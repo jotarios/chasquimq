@@ -241,11 +241,12 @@ export class Worker<
         const e = err instanceof Error ? err : new Error(String(err))
         job.failedReason = e.message
         this.emit('failed', job, e, '')
-        // TODO(slice-8 native): when err.name === 'UnrecoverableError',
-        // signal terminal-fail to the engine so it routes immediately
-        // to DLQ rather than running through the retry budget. The
-        // native binding doesn't expose that variant today; for v1,
-        // every rejection follows the standard retry-then-DLQ path.
+        // The native binding inspects `err.name` and maps
+        // `'UnrecoverableError'` to `HandlerError::unrecoverable(...)` on
+        // the Rust side, so the engine routes the job straight to the
+        // DLQ (`DlqReason::Unrecoverable`) without consuming the retry
+        // budget. Re-throw so the rejection propagates verbatim — the
+        // binding sees the same error shape regardless of subclass.
         throw e
       }
     }
