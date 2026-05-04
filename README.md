@@ -212,6 +212,7 @@ ChasquiMQ is perf-first and Phase 3 complete; the table is honest about what isn
 | Pause/Resume                           | Future           | ✓      | ✓      | —       |
 | Repeatable / cron jobs                 | ✓                | ✓      | ✓      | —       |
 | Parent/child dependencies              | Future           | ✓      | —      | —       |
+| Fair queues (noisy-neighbor mitigation)<sup>1</sup> | Future           | —      | —      | —       |
 | Sandboxed worker                       | n/a (Rust)       | ✓      | ✓      | —       |
 | UI                                     | Phase 4          | ✓      | ✓      | —       |
 | Node SDK                               | Phase 3          | ✓      | ✓      | ✓       |
@@ -219,6 +220,8 @@ ChasquiMQ is perf-first and Phase 3 complete; the table is honest about what isn
 | Optimized for                          | Throughput       | Jobs   | Jobs   | Messages |
 
 "Future" rows aren't on the current roadmap (Phase 4 ships Python + a CLI dashboard). If one is blocking for you, please [open an issue](https://github.com/jotarios/chasquimq/issues) — it helps prioritize a v1.x.
+
+<sup>1</sup> Producers tag messages with a tenant identifier (e.g. customer id, request type); when one tenant creates a backlog the broker prioritizes delivery for the others so a single noisy tenant can't elevate dwell time across the queue. AWS calls this [SQS fair queues](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-fair-queues.html). Same multi-tenant queue, no per-tenant rate limit, no thread-pool partitioning — the engine just rebalances which group gets the next reservation when one group dominates the in-flight set.
 
 ## Repo layout
 
