@@ -1,0 +1,23 @@
+[package]
+name = "chasquimq-py"
+version = "0.1.0"
+description = "Python PyO3 bindings for the chasquimq message broker."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+name = "_native"
+path = "src-rs/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.28", features = ["extension-module", "abi3-py39"] }
+pyo3-async-runtimes = { version = "0.28", features = ["tokio-runtime"] }
+chasquimq = { path = "../chasquimq" }
+
+[profile.release]
+lto = true
+codegen-units = 1
