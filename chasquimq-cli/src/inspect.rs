@@ -21,17 +21,17 @@ pub async fn run(redis_url: &str, queue: &str, group: &str) -> Result<()> {
     Ok(())
 }
 
-struct Snapshot {
-    stream_depth: u64,
-    pending: u64,
-    pending_note: Option<&'static str>,
-    dlq_depth: u64,
-    delayed_depth: u64,
-    oldest_delayed_lag_ms: Option<u64>,
-    repeatable_count: u64,
+pub(crate) struct Snapshot {
+    pub stream_depth: u64,
+    pub pending: u64,
+    pub pending_note: Option<&'static str>,
+    pub dlq_depth: u64,
+    pub delayed_depth: u64,
+    pub oldest_delayed_lag_ms: Option<u64>,
+    pub repeatable_count: u64,
 }
 
-async fn collect(client: &Client, queue: &str, group: &str) -> Result<Snapshot> {
+pub(crate) async fn collect(client: &Client, queue: &str, group: &str) -> Result<Snapshot> {
     let stream_key = format!("{{chasqui:{queue}}}:stream");
     let dlq_key = format!("{{chasqui:{queue}}}:dlq");
     let delayed_key = format!("{{chasqui:{queue}}}:delayed");
@@ -127,7 +127,16 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn render(queue: &str, group: &str, s: &Snapshot) -> String {
+pub(crate) fn render(queue: &str, group: &str, s: &Snapshot) -> String {
+    render_with_deltas(queue, group, s, None)
+}
+
+pub(crate) fn render_with_deltas(
+    queue: &str,
+    group: &str,
+    s: &Snapshot,
+    deltas: Option<Deltas>,
+) -> String {
     let pending_cell = match s.pending_note {
         Some(note) => format!("{} ({})", s.pending, note),
         None => s.pending.to_string(),
@@ -138,24 +147,55 @@ fn render(queue: &str, group: &str, s: &Snapshot) -> String {
     };
 
     let mut table = Table::new();
+    let mut header = vec![
+        Cell::new(format!("queue: {queue}")),
+        Cell::new(format!("group: {group}")),
+    ];
+    if deltas.is_some() {
+        header.push(Cell::new("Δ"));
+    }
     table
         .load_preset(UTF8_FULL)
         .set_content_arrangement(ContentArrangement::Dynamic)
-        .set_header(vec![
-            Cell::new(format!("queue: {queue}")),
-            Cell::new(format!("group: {group}")),
-        ]);
-    table.add_row(vec![Cell::new("stream depth"), Cell::new(s.stream_depth)]);
-    table.add_row(vec![Cell::new("pending"), Cell::new(pending_cell)]);
-    table.add_row(vec![Cell::new("DLQ depth"), Cell::new(s.dlq_depth)]);
-    table.add_row(vec![Cell::new("delayed depth"), Cell::new(s.delayed_depth)]);
-    table.add_row(vec![
-        Cell::new("oldest delayed lag (ms)"),
-        Cell::new(lag_cell),
-    ]);
-    table.add_row(vec![
-        Cell::new("repeatable count"),
-        Cell::new(s.repeatable_count),
-    ]);
+        .set_header(header);
+
+    let mut row = |label: &str, value: String, delta: Option<i64>| {
+        let mut cells = vec![Cell::new(label), Cell::new(value)];
+        if deltas.is_some() {
+            cells.push(Cell::new(
+                delta.map(format_delta).unwrap_or_else(|| "-".to_string()),
+            ));
+        }
+        table.add_row(cells);
+    };
+
+    row(
+        "stream depth",
+        s.stream_depth.to_string(),
+        deltas.map(|d| d.stream_depth),
+    );
+    row("pending", pending_cell, None);
+    row(
+        "DLQ depth",
+        s.dlq_depth.to_string(),
+        deltas.map(|d| d.dlq_depth),
+    );
+    row("delayed depth", s.delayed_depth.to_string(), None);
+    row("oldest delayed lag (ms)", lag_cell, None);
+    row("repeatable count", s.repeatable_count.to_string(), None);
     table.to_string()
+}
+
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct Deltas {
+    pub stream_depth: i64,
+    pub dlq_depth: i64,
+}
+
+fn format_delta(d: i64) -> String {
+    if d > 0 {
+        format!("+{d}")
+    } else {
+        d.to_string()
+    }
 }
