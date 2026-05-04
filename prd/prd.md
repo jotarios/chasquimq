@@ -26,8 +26,8 @@ Unlike legacy Redis queues, ChasquiMQ will strictly avoid blocking Lua scripts a
 | :--- | :--- | :--- | :--- |
 | **Phase 1 (MVP)** ✅ | **The Core Engine** | Pure Rust implementation. Push/Pull/Ack loop. MessagePack serialization. Basic error handling. | Delayed jobs, retries, multi-language SDKs. |
 | **Phase 2** ✅ | **Scheduling & State** | Delayed jobs (via Sorted Sets) + leader-elected Lua promoter. Exponential retry backoff via delayed-ZSET re-scheduling. Dead-letter queue (DLQ) with inspect/replay tooling and bounded growth. First-class observability hooks (`MetricsSink` trait + `chasquimq-metrics` Prometheus/OTel/StatsD adapter). Idempotent delayed scheduling (`add_in_with_id` etc.). Cancellation (`cancel_delayed`). GitHub Actions CI. | Multi-language SDKs, complex parent/child job flows. |
-| **Phase 3** | **The Node Killer** | Node.js native bindings via NAPI-RS. Allowing JavaScript workers to process jobs pulled by the Rust engine. Design doc: [`docs/phase3-napi-design.md`](../docs/phase3-napi-design.md). | Python/Go bindings. |
-| **Phase 4** | **Ecosystem Expansion** | Python bindings via PyO3. CLI dashboard for monitoring queue health. | Complex UI dashboards. |
+| **Phase 3** ✅ | **The Node Killer** | Node.js native bindings via NAPI-RS. Allowing JavaScript workers to process jobs pulled by the Rust engine. Design doc: [`docs/phase3-napi-design.md`](../docs/phase3-napi-design.md). | Python/Go bindings. |
+| **Phase 4** ✅ | **Ecosystem Expansion** | Python bindings via PyO3. CLI dashboard for monitoring queue health. Design doc: [`docs/phase4-pyo3-design.md`](../docs/phase4-pyo3-design.md). | Complex UI dashboards. |
 
 ## 5. Phase 1 (MVP) Strict Requirements
 
