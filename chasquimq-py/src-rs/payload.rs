@@ -11,6 +11,12 @@ use std::fmt;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RawBytes(pub Bytes);
 
+impl RawBytes {
+    pub fn as_slice(&self) -> &[u8] {
+        self.0.as_ref()
+    }
+}
+
 impl From<Bytes> for RawBytes {
     fn from(b: Bytes) -> Self {
         Self(b)

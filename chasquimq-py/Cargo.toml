@@ -19,7 +19,9 @@ pyo3-async-runtimes = { version = "0.28", features = ["tokio-runtime"] }
 chasquimq = { path = "../chasquimq" }
 bytes = "1"
 serde = { version = "1", features = ["derive"] }
-tokio = { version = "1", features = ["rt-multi-thread"] }
+thiserror = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 
 [profile.release]
 lto = true
