@@ -1,5 +1,5 @@
 [workspace]
-members = ["chasquimq", "chasquimq-bench", "chasquimq-metrics", "chasquimq-node", "chasquimq-py"]
+members = ["chasquimq", "chasquimq-bench", "chasquimq-cli", "chasquimq-metrics", "chasquimq-node", "chasquimq-py"]
 resolver = "2"
 
 [workspace.package]

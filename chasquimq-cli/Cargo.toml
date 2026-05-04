@@ -1,0 +1,19 @@
+[package]
+name = "chasquimq-cli"
+description = "Command-line dashboard for ChasquiMQ — inspect queues, peek/replay DLQ, list repeatable jobs."
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "chasqui"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+comfy-table = "7"
+fred = { version = "10", features = ["i-streams"] }
+anyhow = "1"
