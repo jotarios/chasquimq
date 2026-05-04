@@ -373,9 +373,11 @@ function coerceDateLike(d: Date | string | number | undefined): number | undefin
 
 /**
  * Translate a `JobsOptions.backoff` (BullMQ-shaped: either a plain
- * `number` of ms, or `{ type, delay, ... }`) into the native
- * `NativeBackoffSpec` shape (`{ kind, delayMs, ... }`). Field-name
- * translation is the entire contract here — `type → kind`, `delay → delayMs`.
+ * `number` of ms, or `{ type, delay, maxDelay, multiplier, jitterMs }`)
+ * into the native `NativeBackoffSpec` shape (`{ kind, delayMs,
+ * maxDelayMs, multiplier, jitterMs }`). Field-name translation:
+ * `type → kind`, `delay → delayMs`, `maxDelay → maxDelayMs`. The
+ * `multiplier` and `jitterMs` fields keep their JS-side names.
  */
 function translateBackoff(b: number | BackoffOptions): NativeBackoffSpec {
   if (typeof b === 'number') {
@@ -384,10 +386,14 @@ function translateBackoff(b: number | BackoffOptions): NativeBackoffSpec {
   // Pass `kind` straight through; the engine's NAPI binding rejects
   // anything other than `'fixed'` / `'exponential'` so a typo here
   // surfaces as an Error rather than a silent fallthrough.
-  return {
+  const out: NativeBackoffSpec = {
     kind: b.type,
     delayMs: b.delay ?? 0,
   }
+  if (b.maxDelay != null) out.maxDelayMs = b.maxDelay
+  if (b.multiplier != null) out.multiplier = b.multiplier
+  if (b.jitterMs != null) out.jitterMs = b.jitterMs
+  return out
 }
 
 function buildRetryOverride(opts: JobsOptions): NativeJobRetryOverride | undefined {

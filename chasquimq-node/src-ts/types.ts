@@ -20,8 +20,19 @@ export interface ConnectionOptions {
 }
 
 export interface BackoffOptions {
-  type: 'fixed' | 'exponential' | string
-  delay?: number // ms
+  /** Strategy. Future engine variants may decode as `Unknown` and
+   *  degrade to exponential at the consumer; the NAPI binding rejects
+   *  unknown strings up-front, so keep this strict. */
+  type: 'fixed' | 'exponential'
+  /** Base delay in milliseconds. */
+  delay?: number
+  /** Cap on the computed backoff (per-attempt). */
+  maxDelay?: number
+  /** Multiplier for `exponential` (`delay * multiplier^(attempt-1)`).
+   *  Ignored for `fixed`. */
+  multiplier?: number
+  /** Symmetric ±jitter applied per attempt. */
+  jitterMs?: number
 }
 
 export interface JobsOptions {

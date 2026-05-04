@@ -214,6 +214,24 @@ skipIfNoRedis('Per-job retry overrides + UnrecoverableError', () => {
     expect((err as Error).name).toBe('UnrecoverableError')
     expect((err as Error).message).toBe('observed failure')
   }, 30_000)
+
+  it('addBulkWithOptions rejects opts.id with multiple payloads', async () => {
+    // Engine-side guard from PR #28 surfacing through the NAPI hop —
+    // setting opts.id with more than one payload is a footgun (the id
+    // would silently apply only to the first job). The engine returns
+    // Error::Config; the NAPI binding propagates it via map_engine_err.
+    const producer = await NativeProducer.connect(REDIS_URL!, { queueName })
+    const buf1 = Buffer.from([0x81, 0xa1, 0x76, 0x01]) // msgpack { v: 1 }
+    const buf2 = Buffer.from([0x81, 0xa1, 0x76, 0x02]) // msgpack { v: 2 }
+    await expect(
+      producer.addBulkWithOptions([buf1, buf2], { id: 'shared-id' }),
+    ).rejects.toThrow(/opts\.id|payloads\.len|use add_in_bulk_with_ids/i)
+
+    // Single payload + id is the legitimate path; should NOT throw.
+    await expect(
+      producer.addBulkWithOptions([buf1], { id: 'unique-id' }),
+    ).resolves.toEqual(['unique-id'])
+  })
 })
 
 async function waitFor(predicate: () => boolean, timeoutMs: number): Promise<void> {
