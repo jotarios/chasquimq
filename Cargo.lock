@@ -265,9 +265,12 @@ dependencies = [
 name = "chasquimq-py"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "chasquimq",
  "pyo3",
  "pyo3-async-runtimes",
+ "serde",
+ "tokio",
 ]
 
 [[package]]

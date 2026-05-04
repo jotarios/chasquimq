@@ -17,6 +17,9 @@ crate-type = ["cdylib"]
 pyo3 = { version = "0.28", features = ["extension-module", "abi3-py39"] }
 pyo3-async-runtimes = { version = "0.28", features = ["tokio-runtime"] }
 chasquimq = { path = "../chasquimq" }
+bytes = "1"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread"] }
 
 [profile.release]
 lto = true
