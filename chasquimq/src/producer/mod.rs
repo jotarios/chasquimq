@@ -51,10 +51,16 @@ pub struct DlqEntry {
 /// and [`crate::config::ConsumerConfig::retry`]. Carried in the encoded
 /// `Job<T>` payload and honored by the consumer's retry / DLQ gates. `None`
 /// → consumer falls back to its queue-wide retry config.
+///
+/// `name`: optional dispatch name carried as a separate `n` field on the
+/// stream entry (UTF-8, validated `<= 256` bytes at the producer boundary).
+/// Empty string is the default and means "no name supplied" — equivalent
+/// on the wire to omitting the field entirely.
 #[derive(Default, Clone, Debug)]
 pub struct AddOptions {
     pub id: Option<JobId>,
     pub retry: Option<JobRetryOverride>,
+    pub name: String,
 }
 
 impl AddOptions {
@@ -71,6 +77,29 @@ impl AddOptions {
         self.retry = Some(retry);
         self
     }
+
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
+    }
+}
+
+/// Maximum byte length of a job name on the wire. UTF-8 string, `<= 256` bytes.
+/// Pragmatic upper bound: handler-dispatch keys, queue topic strings, and
+/// BullMQ-style job names empirically fit in well under 100 bytes; the cap
+/// keeps the per-entry stream framing small (one-byte length prefix in
+/// Redis Streams' RESP frame) and gives operators a hard ceiling on a
+/// field that's tagged onto every event-stream emit and metric label.
+pub(crate) const MAX_NAME_LEN: usize = 256;
+
+fn validate_name(name: &str) -> Result<()> {
+    if name.len() > MAX_NAME_LEN {
+        return Err(Error::Config(format!(
+            "job name exceeds {MAX_NAME_LEN}-byte cap (got {} bytes)",
+            name.len()
+        )));
+    }
+    Ok(())
 }
 
 pub struct Producer<T> {
@@ -432,22 +461,25 @@ impl<T: Serialize> Producer<T> {
         let job = Job::new(payload);
         let id = job.id.clone();
         let bytes = Bytes::from(rmp_serde::to_vec(&job)?);
-        self.xadd(&id, bytes).await?;
+        self.xadd(&id, bytes, "").await?;
         Ok(id)
     }
 
     pub async fn add_with_id(&self, id: JobId, payload: T) -> Result<JobId> {
         let job = Job::with_id(id.clone(), payload);
         let bytes = Bytes::from(rmp_serde::to_vec(&job)?);
-        self.xadd(&id, bytes).await?;
+        self.xadd(&id, bytes, "").await?;
         Ok(id)
     }
 
     /// Like [`Producer::add`], but accepts an [`AddOptions`] carrying an
-    /// optional stable [`JobId`] and optional per-job [`JobRetryOverride`].
-    /// Per-job overrides ride along inside the encoded `Job<T>` and are
-    /// honored by the consumer's retry / DLQ gates.
+    /// optional stable [`JobId`], optional per-job [`JobRetryOverride`],
+    /// and an optional dispatch `name`. The retry override rides inside the
+    /// encoded `Job<T>` payload; the name rides as a separate `n` field on
+    /// the stream entry, capped at 256 bytes (rejected with [`Error::Config`]
+    /// when oversize).
     pub async fn add_with_options(&self, payload: T, opts: AddOptions) -> Result<JobId> {
+        validate_name(&opts.name)?;
         let mut job = match opts.id {
             Some(id) => Job::with_id(id, payload),
             None => Job::new(payload),
@@ -457,13 +489,14 @@ impl<T: Serialize> Producer<T> {
         }
         let id = job.id.clone();
         let bytes = Bytes::from(rmp_serde::to_vec(&job)?);
-        self.xadd(&id, bytes).await?;
+        self.xadd(&id, bytes, &opts.name).await?;
         Ok(id)
     }
 
     /// Bulk variant of [`Producer::add_with_options`]. All entries share
-    /// one [`AddOptions`] instance — the same retry override is applied to
-    /// every job in the batch.
+    /// one [`AddOptions`] instance — the same retry override **and** the
+    /// same `name` are applied to every job in the batch. Use
+    /// [`Producer::add_bulk_named`] when you need per-job names.
     ///
     /// Setting `opts.id` with multiple payloads is rejected with
     /// `Error::Config`; a single id can't be reused across `n` jobs and
@@ -479,6 +512,7 @@ impl<T: Serialize> Producer<T> {
         if payloads.is_empty() {
             return Ok(Vec::new());
         }
+        validate_name(&opts.name)?;
         if opts.id.is_some() && payloads.len() > 1 {
             return Err(Error::Config(
                 "add_bulk_with_options: opts.id can only be set when payloads.len() == 1; \
@@ -511,6 +545,7 @@ impl<T: Serialize> Producer<T> {
                 iid,
                 self.max_stream_len,
                 bytes.clone(),
+                &opts.name,
             );
             let _: () = pipeline
                 .custom(cmd.clone(), args)
@@ -543,6 +578,7 @@ impl<T: Serialize> Producer<T> {
                 iid,
                 self.max_stream_len,
                 bytes.clone(),
+                "",
             );
             let _: () = pipeline
                 .custom(cmd.clone(), args)
@@ -551,6 +587,47 @@ impl<T: Serialize> Producer<T> {
         }
         let _: Vec<Value> = pipeline.all().await.map_err(Error::Redis)?;
         Ok(encoded.into_iter().map(|(id, _)| id).collect())
+    }
+
+    /// Bulk variant that accepts a per-job `(name, payload)` pair so each
+    /// entry can carry its own dispatch name. Each name is validated against
+    /// the 256-byte cap before any XADD is issued; an oversize name in the
+    /// batch fails the whole call atomically (no partial writes to Redis,
+    /// matching `add_bulk`'s atomic-encode posture).
+    pub async fn add_bulk_named(&self, items: Vec<(String, T)>) -> Result<Vec<JobId>> {
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+        for (name, _) in &items {
+            validate_name(name)?;
+        }
+        let mut encoded: Vec<(JobId, Bytes, String)> = Vec::with_capacity(items.len());
+        for (name, payload) in items {
+            let job = Job::new(payload);
+            let id = job.id.clone();
+            let bytes = Bytes::from(rmp_serde::to_vec(&job)?);
+            encoded.push((id, bytes, name));
+        }
+
+        let client = self.pool.next_connected();
+        let pipeline = client.pipeline();
+        let cmd = CustomCommand::new_static("XADD", ClusterHash::FirstKey, false);
+        for (iid, bytes, name) in &encoded {
+            let args = xadd_args(
+                self.stream_key.as_ref(),
+                self.producer_id.as_ref(),
+                iid,
+                self.max_stream_len,
+                bytes.clone(),
+                name,
+            );
+            let _: () = pipeline
+                .custom(cmd.clone(), args)
+                .await
+                .map_err(Error::Redis)?;
+        }
+        let _: Vec<Value> = pipeline.all().await.map_err(Error::Redis)?;
+        Ok(encoded.into_iter().map(|(id, _, _)| id).collect())
     }
 
     /// Schedule a job to run after `delay`.
@@ -771,6 +848,7 @@ impl<T: Serialize> Producer<T> {
                 iid,
                 self.max_stream_len,
                 bytes.clone(),
+                "",
             );
             let _: () = pipeline
                 .custom(cmd.clone(), args)
@@ -959,7 +1037,7 @@ impl<T: Serialize> Producer<T> {
         Ok(encoded.into_iter().map(|(id, _)| id).collect())
     }
 
-    async fn xadd(&self, iid: &str, bytes: Bytes) -> Result<()> {
+    async fn xadd(&self, iid: &str, bytes: Bytes, name: &str) -> Result<()> {
         let client = self.pool.next_connected();
         let args = xadd_args(
             self.stream_key.as_ref(),
@@ -967,6 +1045,7 @@ impl<T: Serialize> Producer<T> {
             iid,
             self.max_stream_len,
             bytes,
+            name,
         );
         let cmd = CustomCommand::new_static("XADD", ClusterHash::FirstKey, false);
         let _: Value = client.custom(cmd, args).await.map_err(Error::Redis)?;
@@ -1201,5 +1280,46 @@ mod parse_lua_int_tests {
             0
         );
         assert_eq!(parse_lua_int(&Value::Null), 0);
+    }
+}
+
+#[cfg(test)]
+mod name_validation_tests {
+    use super::{MAX_NAME_LEN, validate_name};
+    use crate::error::Error;
+
+    #[test]
+    fn empty_name_is_valid() {
+        validate_name("").expect("empty name accepted");
+    }
+
+    #[test]
+    fn short_name_is_valid() {
+        validate_name("send-email").expect("short name accepted");
+    }
+
+    #[test]
+    fn name_at_cap_is_valid() {
+        let s = "x".repeat(MAX_NAME_LEN);
+        validate_name(&s).expect("name at cap accepted");
+    }
+
+    #[test]
+    fn oversize_name_is_rejected_with_config_error() {
+        let s = "x".repeat(MAX_NAME_LEN + 1);
+        let err = validate_name(&s).expect_err("oversize name rejected");
+        match err {
+            Error::Config(msg) => {
+                assert!(
+                    msg.contains("256") || msg.contains(&format!("{MAX_NAME_LEN}")),
+                    "error message must mention the cap: {msg}"
+                );
+                assert!(
+                    msg.contains(&format!("{}", MAX_NAME_LEN + 1)),
+                    "error message must mention the actual byte length: {msg}"
+                );
+            }
+            other => panic!("expected Error::Config, got {other:?}"),
+        }
     }
 }

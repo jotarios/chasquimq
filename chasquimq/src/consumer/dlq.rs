@@ -34,6 +34,10 @@ pub(crate) struct DlqRelocate {
     /// Attempt count that just gave up. `0` for arrival-side DLQ paths
     /// (malformed / oversize / decode-fail) where the handler never ran.
     pub attempt: u32,
+    /// Dispatch name plumbed from the source stream entry's `n` field, so
+    /// the DLQ entry preserves it as a sibling field. Empty for reader-side
+    /// routes where the entry was malformed or had no `n` to begin with.
+    pub name: String,
 }
 
 pub(crate) struct DlqRelocatorConfig {
@@ -53,6 +57,7 @@ pub(crate) async fn enqueue(
     payload: Bytes,
     reason: DlqReason,
     attempt: u32,
+    name: String,
 ) {
     if dlq_tx
         .send(DlqRelocate {
@@ -61,6 +66,7 @@ pub(crate) async fn enqueue(
             payload,
             reason,
             attempt,
+            name,
         })
         .await
         .is_err()
@@ -143,6 +149,7 @@ async fn relocate_once(
         relocate.reason.as_str(),
         relocate.reason.detail(),
         cfg.max_stream_len,
+        &relocate.name,
     );
     let xackdel_args = xackdel_args(
         &cfg.stream_key,
@@ -181,12 +188,14 @@ mod tests {
             Bytes::from_static(b"opaque"),
             DlqReason::RetriesExhausted,
             5,
+            "send-email".to_string(),
         )
         .await;
         let received = rx.recv().await.expect("relocate sent");
         assert_eq!(received.job_id, "job-xyz-789");
         assert_eq!(received.entry_id, entry_id);
         assert_eq!(received.attempt, 5);
+        assert_eq!(received.name, "send-email");
         assert!(matches!(received.reason, DlqReason::RetriesExhausted));
     }
 
@@ -209,10 +218,12 @@ mod tests {
                 reason: "missing payload field",
             },
             0,
+            String::new(),
         )
         .await;
         let received = rx.recv().await.expect("relocate sent");
         assert_eq!(received.job_id, "");
         assert_eq!(received.attempt, 0);
+        assert_eq!(received.name, "");
     }
 }

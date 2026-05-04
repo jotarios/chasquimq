@@ -114,6 +114,26 @@ pub struct Job<T> {
     /// will route those jobs to the DLQ (decode failure on read).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<JobRetryOverride>,
+    /// Optional handler-dispatch name carried as a separate `n` field on the
+    /// Redis Stream entry, NOT inside the msgpack-encoded `Job<T>` envelope.
+    ///
+    /// `#[serde(skip)]` on this field is load-bearing: putting `name` inside
+    /// the positional msgpack array alongside the trailing-optional `retry`
+    /// would create wire-format ambiguity (slot N could be a `retry`-shaped
+    /// struct or a `name` string depending on which trailing-skip fired).
+    /// Keeping it out of the envelope means the rmp-serde decode path stays
+    /// the existing 4-or-5-element shape pinned by slice 8, and `name`
+    /// travels via the `n` stream-entry field — readable into a metric label
+    /// or events-stream field without msgpack-decoding the payload bytes.
+    ///
+    /// Set on the read path by the consumer's reader (from the entry's `n`
+    /// field), `String::new()` for unnamed jobs and for paths that re-encode
+    /// `Job<T>` and re-write to Redis without re-attaching `n` — the
+    /// retry-reschedule (delayed ZSET) and scheduler-fire paths fall in this
+    /// bucket today and will be handled in slice 3. Slice 5 wires the
+    /// already-populated `name` into the events stream.
+    #[serde(default, skip)]
+    pub name: String,
 }
 
 impl<T> Job<T> {
@@ -128,12 +148,21 @@ impl<T> Job<T> {
             created_at_ms: now_ms(),
             attempt: 0,
             retry: None,
+            name: String::new(),
         }
     }
 
     /// Builder-style setter for the per-job retry override.
     pub fn with_retry(mut self, retry: JobRetryOverride) -> Self {
         self.retry = Some(retry);
+        self
+    }
+
+    /// Builder-style setter for the dispatch name. Same parser-populated
+    /// field set on the read path; this is just a convenience for tests and
+    /// for consumers that want to construct a `Job<T>` by hand.
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
         self
     }
 }
@@ -183,6 +212,29 @@ mod tests {
         assert_eq!(job.payload, decoded.payload);
         assert_eq!(job.created_at_ms, decoded.created_at_ms);
         assert_eq!(decoded.retry, None);
+        assert_eq!(decoded.name, "");
+    }
+
+    /// `Job::name` is `#[serde(skip)]` — encoding a job with a non-empty name
+    /// must not grow the msgpack envelope; decoding always defaults to `""`.
+    /// This is what keeps the wire shape identical to the pre-slice-1 form
+    /// and makes the `n` stream-entry field the single source of truth on
+    /// the read path.
+    #[test]
+    fn name_field_is_not_serialized() {
+        let job_named: Job<u32> = Job::with_id("test".into(), 42).with_name("send-email");
+        let job_unnamed: Job<u32> = Job::with_id("test".into(), 42);
+        let bytes_named = rmp_serde::to_vec(&job_named).expect("encode named");
+        let bytes_unnamed = rmp_serde::to_vec(&job_unnamed).expect("encode unnamed");
+        assert_eq!(
+            bytes_named, bytes_unnamed,
+            "name must be #[serde(skip)] — encoded bytes must match the unnamed shape"
+        );
+        let decoded: Job<u32> = rmp_serde::from_slice(&bytes_named).expect("decode");
+        assert_eq!(
+            decoded.name, "",
+            "decoded name defaults to empty; the n stream-entry field is the source of truth"
+        );
     }
 
     #[test]

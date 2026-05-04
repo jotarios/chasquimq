@@ -1,4 +1,4 @@
-use crate::redis::keys::PAYLOAD_FIELD;
+use crate::redis::keys::{NAME_FIELD, PAYLOAD_FIELD};
 use bytes::Bytes;
 use fred::types::Value;
 
@@ -333,19 +333,24 @@ pub(crate) fn xadd_args(
     iid: &str,
     max_stream_len: u64,
     bytes: Bytes,
+    name: &str,
 ) -> Vec<Value> {
-    vec![
-        Value::from(stream_key),
-        Value::from("IDMP"),
-        Value::from(producer_id),
-        Value::from(iid),
-        Value::from("MAXLEN"),
-        Value::from("~"),
-        Value::from(max_stream_len as i64),
-        Value::from("*"),
-        Value::from(PAYLOAD_FIELD),
-        Value::Bytes(bytes),
-    ]
+    let mut args: Vec<Value> = Vec::with_capacity(10 + (!name.is_empty() as usize) * 2);
+    args.push(Value::from(stream_key));
+    args.push(Value::from("IDMP"));
+    args.push(Value::from(producer_id));
+    args.push(Value::from(iid));
+    args.push(Value::from("MAXLEN"));
+    args.push(Value::from("~"));
+    args.push(Value::from(max_stream_len as i64));
+    args.push(Value::from("*"));
+    args.push(Value::from(PAYLOAD_FIELD));
+    args.push(Value::Bytes(bytes));
+    if !name.is_empty() {
+        args.push(Value::from(NAME_FIELD));
+        args.push(Value::from(name));
+    }
+    args
 }
 
 pub(crate) fn xreadgroup_args(
@@ -385,7 +390,10 @@ pub(crate) fn xackdel_args(stream_key: &str, group: &str, ids: &[impl AsRef<str>
 }
 
 /// XADD args for relocating a stream entry into the DLQ.
-/// Carries the original payload plus source_id/reason/optional detail metadata.
+/// Carries the original payload plus source_id/reason/optional detail metadata,
+/// and the optional `n` field if the source entry had one — preserved verbatim
+/// so DLQ inspectors and the future replay path can route by name.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn xadd_dlq_args(
     dlq_key: &str,
     producer_id: &str,
@@ -394,8 +402,10 @@ pub(crate) fn xadd_dlq_args(
     reason: &str,
     detail: Option<&str>,
     max_stream_len: u64,
+    name: &str,
 ) -> Vec<Value> {
-    let mut args: Vec<Value> = Vec::with_capacity(16 + detail.is_some() as usize * 2);
+    let mut args: Vec<Value> =
+        Vec::with_capacity(16 + (detail.is_some() as usize + !name.is_empty() as usize) * 2);
     args.push(Value::from(dlq_key));
     args.push(Value::from("IDMP"));
     args.push(Value::from(producer_id));
@@ -406,6 +416,10 @@ pub(crate) fn xadd_dlq_args(
     args.push(Value::from("*"));
     args.push(Value::from(PAYLOAD_FIELD));
     args.push(Value::Bytes(payload));
+    if !name.is_empty() {
+        args.push(Value::from(NAME_FIELD));
+        args.push(Value::from(name));
+    }
     args.push(Value::from("source_id"));
     args.push(Value::from(source_id));
     args.push(Value::from("reason"));
