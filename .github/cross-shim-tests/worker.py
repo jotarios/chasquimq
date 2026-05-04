@@ -3,6 +3,13 @@
 Consumes COUNT jobs from QUEUE. Each payload must be a dict with
 integer ``i`` in [0, COUNT) and string ``tag`` matching EXPECT_TAG.
 Exits 0 on full distinct-id coverage within TIMEOUT_SECS, else 1.
+
+Env vars:
+  QUEUE, COUNT — required.
+  MODE         — `immediate` (default) | `delayed`. `delayed` flips
+                  ``delayed_enabled=True`` so the embedded promoter
+                  drains the delayed ZSET into the stream.
+  EXPECT_TAG, TIMEOUT_SECS, REDIS_URL — optional.
 """
 
 from __future__ import annotations
@@ -20,6 +27,11 @@ async def main() -> int:
     expect_tag = os.environ.get("EXPECT_TAG", "py")
     timeout_secs = float(os.environ.get("TIMEOUT_SECS", "30"))
     redis_url = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
+    mode = os.environ.get("MODE", "immediate").lower()
+
+    if mode not in ("immediate", "delayed"):
+        print(f"[py-worker] ERROR: unknown MODE={mode!r}", file=sys.stderr)
+        return 1
 
     seen: set[int] = set()
     done = asyncio.Event()
@@ -45,6 +57,8 @@ async def main() -> int:
         if len(seen) >= count:
             done.set()
 
+    delayed_enabled = mode == "delayed"
+
     worker = Worker(
         queue_name,
         handler,
@@ -52,7 +66,7 @@ async def main() -> int:
         concurrency=8,
         max_attempts=1,
         read_block_ms=200,
-        delayed_enabled=False,
+        delayed_enabled=delayed_enabled,
         run_scheduler=False,
     )
 
@@ -86,7 +100,10 @@ async def main() -> int:
         )
         return 1
 
-    print(f"[py-worker] OK — drained {count} distinct jobs with tag={expect_tag!r}")
+    print(
+        f"[py-worker] OK — drained {count} distinct jobs with "
+        f"tag={expect_tag!r} mode={mode!r}"
+    )
     return 0
 
 

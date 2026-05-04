@@ -145,6 +145,7 @@ impl NativeConsumer {
         let cfg = self.cfg.clone();
         let shutdown = (*self.shutdown).clone();
         let handler = Arc::new(handler);
+        // GIL-free fast path: clone_ref needs the GIL; Arc::clone in the per-job closure does not.
         let unrecoverable_cls = Arc::new(self.unrecoverable_cls.clone_ref(py));
         // Capture the user's running asyncio loop + contextvars at `run()`
         // entry. The engine-side handler closure runs on tokio worker
