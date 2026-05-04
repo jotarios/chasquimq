@@ -1,6 +1,6 @@
 use crate::inspect::{self, Deltas, Snapshot};
 use anyhow::{Context, Result};
-use crossterm::{ExecutableCommand, cursor, terminal};
+use crossterm::{QueueableCommand, cursor, terminal};
 use fred::clients::Client;
 use fred::interfaces::ClientLike;
 use fred::prelude::Config;
@@ -51,9 +51,9 @@ fn redraw(
     interval_ms: u64,
 ) -> Result<()> {
     let mut out = stdout();
-    out.execute(terminal::Clear(terminal::ClearType::All))
-        .context("terminal clear failed")?;
-    out.execute(cursor::MoveTo(0, 0))
+    out.queue(terminal::Clear(terminal::ClearType::All))
+        .context("terminal clear failed")?
+        .queue(cursor::MoveTo(0, 0))
         .context("cursor reset failed")?;
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     writeln!(
