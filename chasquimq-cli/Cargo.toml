@@ -13,9 +13,11 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "signal", "time"] }
 comfy-table = "7"
+crossterm = "0.28"
 fred = { version = "10", features = ["i-streams"] }
 anyhow = "1"
 chasquimq = { path = "../chasquimq" }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 rmpv = { version = "1", features = ["with-serde"] }

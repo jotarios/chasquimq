@@ -1,6 +1,8 @@
 mod dlq;
+mod events;
 mod inspect;
 mod repeatable;
+mod watch;
 
 use clap::{Parser, Subcommand};
 
@@ -40,6 +42,28 @@ enum Command {
     /// List or remove repeatable job specs.
     #[command(subcommand)]
     Repeatable(RepeatableCommand),
+    /// Auto-refreshing inspect table. Re-runs the inspect snapshot every
+    /// `--interval-ms` ms and renders a delta column for stream + DLQ depth.
+    /// Exits cleanly on Ctrl+C.
+    Watch {
+        queue: String,
+        #[arg(long, default_value_t = 1000)]
+        interval_ms: u64,
+        #[arg(long, default_value = DEFAULT_REDIS_URL)]
+        redis_url: String,
+        #[arg(long, default_value = DEFAULT_GROUP)]
+        group: String,
+    },
+    /// Tail the per-queue events stream (`{chasqui:<queue>}:events`). One
+    /// line per event with ISO-8601 timestamp and sorted key=value pairs.
+    /// Default `--from $` reads only new events; pass `0` to replay history.
+    Events {
+        queue: String,
+        #[arg(long, default_value = "$")]
+        from: String,
+        #[arg(long, default_value = DEFAULT_REDIS_URL)]
+        redis_url: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -115,5 +139,16 @@ async fn main() -> anyhow::Result<()> {
             key,
             redis_url,
         }) => repeatable::remove(&redis_url, &queue, &key).await,
+        Command::Watch {
+            queue,
+            interval_ms,
+            redis_url,
+            group,
+        } => watch::run(&redis_url, &queue, &group, interval_ms).await,
+        Command::Events {
+            queue,
+            from,
+            redis_url,
+        } => events::run(&redis_url, &queue, &from).await,
     }
 }

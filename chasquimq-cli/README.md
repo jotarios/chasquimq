@@ -7,15 +7,15 @@ for the full command surface and roadmap.
 
 ## Status
 
-Slice B2 complete. Today the CLI ships:
+Slice B3 complete. Today the CLI ships:
 
 - `chasqui inspect` — one-shot snapshot of stream depth, pending, DLQ depth, delayed depth, oldest delayed lag, and repeatable count.
 - `chasqui dlq peek` — render the next N DLQ entries plus a `reason` histogram.
 - `chasqui dlq replay` — atomically replay up to N DLQ entries back into the main stream (resets the attempt counter).
 - `chasqui repeatable list` — render repeatable specs ordered by next fire time.
 - `chasqui repeatable remove` — remove a repeatable spec by key.
-
-Subsequent slices add `watch` and `events`.
+- `chasqui watch` — auto-refreshing inspect table with deltas for stream + DLQ depth.
+- `chasqui events` — tail the per-queue events stream with ISO-8601 timestamps.
 
 ## Install
 
@@ -114,6 +114,67 @@ Atomically `ZREM`s the spec from the repeat ZSET and `DEL`s its spec hash in a
 single Lua round trip — no half-removed state is observable to a concurrent
 scheduler tick. Prints `removed` on success or `not found` if no spec with that
 key existed.
+
+### `watch`
+
+```
+chasqui watch <queue> [--interval-ms 1000] [--redis-url URL] [--group default]
+```
+
+Same fields as `inspect`, refreshed every `--interval-ms` until Ctrl+C. Adds a
+`Δ` column for stream depth and DLQ depth, computed against the previous tick
+(`+N` for positive deltas, plain `-N` for negative, `0` for steady-state). The
+first tick has no previous snapshot so the delta column is omitted from that
+render. The terminal is cleared and redrawn each tick — no alternate screen, so
+the final state stays on-screen after exit.
+
+Each tick is a single fred `Pipeline` round trip — same six commands as
+`inspect`, batched.
+
+```
+$ chasqui watch smoketest-queue --interval-ms 500
+chasqui watch smoketest-queue  refresh=500ms  2026-05-04T13:21:27.950Z  (Ctrl+C to exit)
+┌─────────────────────────┬───────────────────────┬────┐
+│ queue: smoketest-queue  ┆ group: default        ┆ Δ  │
+╞═════════════════════════╪═══════════════════════╪════╡
+│ stream depth            ┆ 1                     ┆ +1 │
+│ pending                 ┆ 0 (group not created) ┆ -  │
+│ DLQ depth               ┆ 0                     ┆ 0  │
+│ delayed depth           ┆ 0                     ┆ -  │
+│ oldest delayed lag (ms) ┆ -                     ┆ -  │
+│ repeatable count        ┆ 0                     ┆ -  │
+└─────────────────────────┴───────────────────────┴────┘
+```
+
+### `events`
+
+```
+chasqui events <queue> [--from <id>] [--redis-url URL]
+```
+
+Tails `{chasqui:<queue>}:events` over `XREAD BLOCK` and prints one line per event:
+
+```
+<ts_iso8601>  <stream_id>  <event>  id=<job_id> [k=v ...]
+```
+
+`--from` defaults to `$` (only new events). Pass `0` to replay history from
+the start of the stream (or any specific stream id to resume). Extra fields are
+sorted by key for deterministic output and values >80 chars are truncated with
+`...`. The `e`, `id`, and `ts` fields are pulled out into the leading columns;
+all other event-specific fields (`attempt`, `reason`, `duration_us`,
+`backoff_ms`, `delay_ms`) are rendered as sorted `k=v` pairs.
+
+```
+$ chasqui events smoketest-queue
+2026-05-04T13:21:39.000Z 1777900899221-0 completed id=testjob attempt=1 duration_us=1234
+2026-05-04T13:21:55.000Z 1777900915849-0 drained id=-
+2026-05-04T13:21:55.000Z 1777900915942-0 retry-scheduled id=job-1 attempt=2 backoff_ms=500
+2026-05-04T13:21:55.000Z 1777900916019-0 dlq id=job-2 attempt=5 reason=retries_exhausted
+```
+
+Schema reference: [`chasquimq/src/events.rs`](../chasquimq/src/events.rs) — the
+engine writes `e=<event>`, `id=<job_id>`, `ts=<unix_ms>` plus per-event fields.
 
 ## Sources
 
