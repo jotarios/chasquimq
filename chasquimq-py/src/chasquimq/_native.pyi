@@ -79,3 +79,18 @@ class NativeConsumer:
         self, handler: Callable[[NativeJob], Awaitable[Any]]
     ) -> Awaitable[None]: ...
     def shutdown(self) -> None: ...
+
+class NativeScheduler:
+    def __init__(
+        self,
+        redis_url: str,
+        queue_name: str,
+        *,
+        tick_interval_ms: Optional[int] = None,
+        batch: Optional[int] = None,
+        max_stream_len: Optional[int] = None,
+        lock_ttl_secs: Optional[int] = None,
+        holder_id: Optional[str] = None,
+    ) -> None: ...
+    def run(self) -> Awaitable[None]: ...
+    def shutdown(self) -> None: ...

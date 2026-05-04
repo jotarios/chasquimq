@@ -4,6 +4,7 @@ mod consumer;
 mod job;
 mod payload;
 mod producer;
+mod scheduler;
 
 const ENGINE_VERSION: &str = env!("CHASQUIMQ_ENGINE_VERSION");
 
@@ -17,6 +18,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_class::<producer::NativeProducer>()?;
     m.add_class::<consumer::NativeConsumer>()?;
+    m.add_class::<scheduler::NativeScheduler>()?;
     m.add_class::<job::NativeJob>()?;
     Ok(())
 }
