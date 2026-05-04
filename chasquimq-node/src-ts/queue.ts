@@ -6,8 +6,15 @@
 // `NotSupportedError` until a future slice exposes the matching engine
 // surface; this keeps the public types stable while we iterate.
 
-import { NativeProducer, type NativeProducerOpts } from '../index.js'
+import {
+  NativeProducer,
+  type NativeProducerOpts,
+  type NativeAddOptions,
+  type NativeBackoffSpec,
+  type NativeJobRetryOverride,
+} from '../index.js'
 import type {
+  BackoffOptions,
   ConnectionOptions,
   JobsOptions,
   BulkJobOptions,
@@ -81,20 +88,20 @@ export class Queue<
       warnedNamePersist = true
     }
 
-    if (merged.attempts != null || merged.backoff != null) {
-      // TODO(slice-8 native): pass retry override once
-      // NativeProducer.addWithOptions is exposed.
-    }
+    const retryOverride = buildRetryOverride(merged)
+    const nativeOpts = buildNativeAddOptions(merged.jobId, retryOverride)
 
     const buf = encodePayload(data)
     const producer = await this.producer()
     let id: string
     if (merged.delay && merged.delay > 0) {
-      id = merged.jobId
-        ? await producer.addInWithId(merged.jobId, merged.delay, buf)
-        : await producer.addIn(merged.delay, buf)
-    } else if (merged.jobId) {
-      id = await producer.addWithId(merged.jobId, buf)
+      if (nativeOpts) {
+        id = await producer.addInWithOptions(merged.delay, buf, nativeOpts)
+      } else {
+        id = await producer.addIn(merged.delay, buf)
+      }
+    } else if (nativeOpts) {
+      id = await producer.addWithOptions(buf, nativeOpts)
     } else {
       id = await producer.add(buf)
     }
@@ -362,4 +369,48 @@ function coerceDateLike(d: Date | string | number | undefined): number | undefin
     throw new Error(`RepeatOptions: invalid date string ${JSON.stringify(d)}`)
   }
   return parsed
+}
+
+/**
+ * Translate a `JobsOptions.backoff` (BullMQ-shaped: either a plain
+ * `number` of ms, or `{ type, delay, maxDelay, multiplier, jitterMs }`)
+ * into the native `NativeBackoffSpec` shape (`{ kind, delayMs,
+ * maxDelayMs, multiplier, jitterMs }`). Field-name translation:
+ * `type → kind`, `delay → delayMs`, `maxDelay → maxDelayMs`. The
+ * `multiplier` and `jitterMs` fields keep their JS-side names.
+ */
+function translateBackoff(b: number | BackoffOptions): NativeBackoffSpec {
+  if (typeof b === 'number') {
+    return { kind: 'fixed', delayMs: b }
+  }
+  // Pass `kind` straight through; the engine's NAPI binding rejects
+  // anything other than `'fixed'` / `'exponential'` so a typo here
+  // surfaces as an Error rather than a silent fallthrough.
+  const out: NativeBackoffSpec = {
+    kind: b.type,
+    delayMs: b.delay ?? 0,
+  }
+  if (b.maxDelay != null) out.maxDelayMs = b.maxDelay
+  if (b.multiplier != null) out.multiplier = b.multiplier
+  if (b.jitterMs != null) out.jitterMs = b.jitterMs
+  return out
+}
+
+function buildRetryOverride(opts: JobsOptions): NativeJobRetryOverride | undefined {
+  if (opts.attempts == null && opts.backoff == null) return undefined
+  const out: NativeJobRetryOverride = {}
+  if (opts.attempts != null) out.maxAttempts = opts.attempts
+  if (opts.backoff != null) out.backoff = translateBackoff(opts.backoff)
+  return out
+}
+
+function buildNativeAddOptions(
+  jobId: string | undefined,
+  retry: NativeJobRetryOverride | undefined,
+): NativeAddOptions | undefined {
+  if (jobId == null && retry == null) return undefined
+  const out: NativeAddOptions = {}
+  if (jobId != null) out.id = jobId
+  if (retry != null) out.retry = retry
+  return out
 }
