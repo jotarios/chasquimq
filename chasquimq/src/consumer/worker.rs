@@ -5,6 +5,7 @@ use crate::error::HandlerError;
 use crate::events::EventsWriter;
 use crate::job::{Job, now_ms};
 use crate::metrics::{self, JobOutcome, JobOutcomeKind, MetricsSink};
+use crate::redis::delayed_member::encode_delayed_member;
 use crate::redis::parse::StreamEntryId;
 use bytes::Bytes;
 use futures_util::FutureExt;
@@ -211,13 +212,18 @@ async fn on_handler_failure<T: Serialize + Send + 'static>(
     };
 
     job.attempt = next_attempt;
-    let encoded_with_bumped = match rmp_serde::to_vec(&job) {
-        Ok(b) => Bytes::from(b),
+    let payload_bytes = match rmp_serde::to_vec(&job) {
+        Ok(b) => b,
         Err(e) => {
             tracing::error!(job_id = %job.id, error = %e, "retry: re-encode failed; entry will reclaim via CLAIM");
             return;
         }
     };
+    // Wrap with the slice-3 length-prefixed delayed-ZSET member so the
+    // promoter re-emits `n` on the stream entry when the retry fires.
+    // `Job::name` is `#[serde(skip)]` so it's not in `payload_bytes` — it
+    // travels via the prefix only.
+    let encoded_with_bumped = encode_delayed_member(&job.name, &payload_bytes);
     let run_at = now_ms().saturating_add(backoff);
     let run_at_i64 = i64::try_from(run_at).unwrap_or(i64::MAX);
     retry::enqueue(

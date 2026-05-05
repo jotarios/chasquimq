@@ -15,19 +15,38 @@ use fred::types::Value;
 ///   ZSET is empty or the oldest remaining entry is still future-dated.
 ///   In a healthy steady state this is `0` most ticks — it becomes positive
 ///   only when a real backlog forms.
-/// - `promoted_members` — array of raw msgpack-encoded `Job<T>` byte strings
-///   that were promoted this tick. The caller decodes the `JobId` from each
-///   and pipelines `DEL didx:<id>` to clean up the side-index written at
-///   schedule time. The dedup marker (`dlid:<id>`) is **deliberately not
-///   touched here** — its remaining TTL covers the post-promote window in
-///   which a delayed producer-retry could otherwise duplicate-schedule.
+/// - `promoted_members` — array of msgpack-encoded `Job<T>` byte strings
+///   (with the slice-3 length-prefix already stripped) that were promoted
+///   this tick. The caller decodes the `JobId` from each and pipelines
+///   `DEL didx:<id>` to clean up the side-index written at schedule time.
+///   The dedup marker (`dlid:<id>`) is **deliberately not touched here** —
+///   its remaining TTL covers the post-promote window in which a delayed
+///   producer-retry could otherwise duplicate-schedule.
+///
+/// **ZSET member format (slice 3)**: each member is
+/// `[u32_le name_len][name utf8][msgpack Job<T>]`. The script strips the
+/// prefix in Lua and re-emits the name as the stream entry's `n` field
+/// when non-empty (matching `xadd_args`'s shape on the immediate path).
+/// See `chasquimq/src/redis/delayed_member.rs` for the encoder.
 pub(crate) const PROMOTE_SCRIPT: &str = r#"
 local time = redis.call('TIME')
 local now_ms = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
 local due = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', now_ms, 'LIMIT', 0, tonumber(ARGV[1]))
-for _, bytes in ipairs(due) do
-  redis.call('XADD', KEYS[2], 'MAXLEN', '~', tonumber(ARGV[2]), '*', 'd', bytes)
-  redis.call('ZREM', KEYS[1], bytes)
+local payloads = {}
+for i, member in ipairs(due) do
+  -- Parse the slice-3 length-prefixed member:
+  --   [u32_le name_len][name utf8][msgpack payload]
+  local b1, b2, b3, b4 = string.byte(member, 1, 4)
+  local name_len = b1 + (b2 * 256) + (b3 * 65536) + (b4 * 16777216)
+  local name = name_len > 0 and string.sub(member, 5, 4 + name_len) or ''
+  local payload = string.sub(member, 5 + name_len)
+  if name ~= '' then
+    redis.call('XADD', KEYS[2], 'MAXLEN', '~', tonumber(ARGV[2]), '*', 'd', payload, 'n', name)
+  else
+    redis.call('XADD', KEYS[2], 'MAXLEN', '~', tonumber(ARGV[2]), '*', 'd', payload)
+  end
+  redis.call('ZREM', KEYS[1], member)
+  payloads[i] = payload
 end
 local depth = redis.call('ZCARD', KEYS[1])
 local lag_ms = 0
@@ -38,7 +57,7 @@ if depth > 0 then
     if diff > 0 then lag_ms = diff end
   end
 end
-return {#due, depth, lag_ms, due}
+return {#due, depth, lag_ms, payloads}
 "#;
 
 /// Atomically acknowledge-and-delete a stream entry from the consumer group's
@@ -51,6 +70,11 @@ return {#due, depth, lag_ms, due}
 ///
 /// KEYS[1] = stream, KEYS[2] = delayed
 /// ARGV[1] = group, ARGV[2] = entry_id, ARGV[3] = run_at_ms, ARGV[4] = encoded_bytes
+///
+/// **Encoded bytes shape (slice 3)**: `encode_delayed_member(name, msgpack)`
+/// — the caller writes a length-prefixed member so the promoter can later
+/// re-emit `n` on the stream entry. Pre-slice-3 callers wrote raw msgpack
+/// here; under slice 3 that shape no longer parses on the promoter side.
 pub(crate) const RETRY_RESCHEDULE_SCRIPT: &str = r#"
 local result = redis.call('XACKDEL', KEYS[1], ARGV[1], 'IDS', 1, ARGV[2])
 local first
@@ -144,6 +168,11 @@ return 0
 /// ARGV[1] = marker / index TTL in seconds
 /// ARGV[2] = run_at_ms (ZADD score)
 /// ARGV[3] = encoded payload bytes (ZSET member + side-index value)
+///
+/// **Encoded bytes shape (slice 3)**: `encode_delayed_member(name, msgpack)`.
+/// The same prefixed bytes serve as both the ZSET member and the
+/// side-index value, so a later `cancel_delayed` ZREMs by exact byte
+/// match without decoding the prefix.
 ///
 /// Returns 1 if newly scheduled, 0 if a duplicate was suppressed.
 pub(crate) const SCHEDULE_DELAYED_IDEMPOTENT_SCRIPT: &str = r#"
@@ -264,11 +293,19 @@ return removed
 /// ARGV[4] = spec_key (member in the repeat ZSET)
 /// ARGV[5] = limit (0 = unlimited)
 /// ARGV[6] = end_before_ms (0 = no end-bound)
-/// ARGV[7] = fire_count (N — number of (fire_at_ms, payload) pairs that
+/// ARGV[7] = fire_count (N — number of (fire_at_ms, member) pairs that
 ///           follow). 0 is legal (Skip policy with no on-time fire — just
 ///           reschedule).
-/// ARGV[8 .. 7+2*N] = interleaved `(fire_at_ms_i, payload_i)` pairs, in
+/// ARGV[8 .. 7+2*N] = interleaved `(fire_at_ms_i, member_i)` pairs, in
 ///                    chronological order. Each pair is two ARGV slots.
+///
+/// **Member format (slice 3)**: each `member_i` is the slice-3
+/// length-prefixed delayed-ZSET shape
+/// (`[u32_le name_len][name utf8][msgpack Job<T>]`). For on-time fires
+/// (`fire_at_ms <= now_ms`) the script splits the prefix and emits
+/// `XADD ... d <payload> [n <name>]`; for future fires the prefixed bytes
+/// are written verbatim into the delayed ZSET so the promoter sees the
+/// same shape as a producer-supplied delayed add.
 ///
 /// Returns `{fired_now, removed}` where:
 /// - `fired_now` is the count of jobs actually dispatched this call
@@ -290,7 +327,7 @@ local hit_limit = false
 local i = 0
 while i < fire_count do
   local fire_at_ms = tonumber(ARGV[8 + i * 2])
-  local payload = ARGV[9 + i * 2]
+  local member = ARGV[9 + i * 2]
   if limit > 0 then
     local fired_so_far = tonumber(redis.call('HGET', KEYS[4], 'fired')) or 0
     if fired_so_far >= limit then
@@ -299,9 +336,19 @@ while i < fire_count do
     end
   end
   if fire_at_ms <= now_ms then
-    redis.call('XADD', KEYS[1], 'MAXLEN', '~', max_stream_len, '*', 'd', payload)
+    -- Split the slice-3 length-prefixed member:
+    --   [u32_le name_len][name utf8][msgpack payload]
+    local b1, b2, b3, b4 = string.byte(member, 1, 4)
+    local name_len = b1 + (b2 * 256) + (b3 * 65536) + (b4 * 16777216)
+    local name = name_len > 0 and string.sub(member, 5, 4 + name_len) or ''
+    local payload = string.sub(member, 5 + name_len)
+    if name ~= '' then
+      redis.call('XADD', KEYS[1], 'MAXLEN', '~', max_stream_len, '*', 'd', payload, 'n', name)
+    else
+      redis.call('XADD', KEYS[1], 'MAXLEN', '~', max_stream_len, '*', 'd', payload)
+    end
   else
-    redis.call('ZADD', KEYS[2], fire_at_ms, payload)
+    redis.call('ZADD', KEYS[2], fire_at_ms, member)
   end
   redis.call('HINCRBY', KEYS[4], 'fired', 1)
   fired_now = fired_now + 1
