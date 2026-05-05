@@ -51,6 +51,10 @@ pub struct NativeConsumerOpts {
 #[napi(object)]
 pub struct NativeJob {
     pub id: String,
+    /// Dispatch name from the source stream entry's `n` field. Empty when
+    /// the entry had no `n` (legacy producers, delayed-path re-encodes,
+    /// repeatable scheduler fires).
+    pub name: String,
     pub payload: Buffer,
     /// `i64` so JS can read it as a regular `number` (safe up to 2^53-1
     /// ms ≈ year 287396; far past any realistic Job timestamp). Using
@@ -124,6 +128,7 @@ impl NativeConsumer {
                         // schema-agnostic.
                         let js_job = NativeJob {
                             id: job.id,
+                            name: job.name,
                             payload: Buffer::from(job.payload.0.to_vec()),
                             created_at_ms: clamp_u64_to_i64(job.created_at_ms),
                             attempt: job.attempt,

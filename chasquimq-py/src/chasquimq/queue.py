@@ -107,12 +107,17 @@ class Queue:
                 job_id=job_id,
             )
 
-        opts = _build_add_options(job_id, attempts, backoff)
-        payload = encode_payload(data)
-        producer = self._get_producer()
-
         delay_ms = _coerce_delay_ms(delay)
         absolute_ms = _coerce_absolute_ms(delay)
+        is_delayed = absolute_ms is not None or (delay_ms is not None and delay_ms > 0)
+        # Engine guard rejects non-empty `AddOptions::name` on `add_in_with_options`
+        # / `add_at_with_options` until the slice that wires `n` through the
+        # delayed path lands; pass the name only on the immediate XADD.
+        opts = _build_add_options(
+            job_id, attempts, backoff, name=None if is_delayed else name
+        )
+        payload = encode_payload(data)
+        producer = self._get_producer()
 
         if absolute_ms is not None:
             if opts is not None:
@@ -130,6 +135,10 @@ class Queue:
                 job_id_ret = await producer.add_in(delay_ms, payload)
         elif opts is not None:
             job_id_ret = await producer.add_with_options(payload, opts)
+        elif name:
+            job_id_ret = await producer.add_with_options(
+                payload, {"name": name}
+            )
         else:
             job_id_ret = await producer.add(payload)
 
@@ -147,8 +156,9 @@ class Queue:
         Each entry is a dict with keys ``name``, ``data`` and optional
         ``delay`` / ``attempts`` / ``backoff`` / ``job_id``. When all
         entries lack per-job overrides the call routes through
-        :meth:`NativeProducer.add_bulk` for pipelining; otherwise the
-        bulk degrades to a per-entry :meth:`add` loop.
+        :meth:`NativeProducer.add_bulk_named` (per-entry names) for
+        pipelining; otherwise the bulk degrades to a per-entry
+        :meth:`add` loop.
         """
         if not jobs:
             return []
@@ -162,9 +172,11 @@ class Queue:
             for j in jobs
         )
         if all_simple:
-            payloads = [encode_payload(j["data"]) for j in jobs]
             producer = self._get_producer()
-            ids = await producer.add_bulk(payloads)
+            named: list[tuple[str, bytes]] = [
+                (j.get("name") or "", encode_payload(j["data"])) for j in jobs
+            ]
+            ids = await producer.add_bulk_named(named)
             now = _now_ms()
             return [
                 Job(
@@ -348,12 +360,21 @@ def _build_add_options(
     job_id: Optional[str],
     attempts: Optional[int],
     backoff: Optional[BackoffLike],
+    name: Optional[str] = None,
 ) -> Optional[dict[str, Any]]:
-    if job_id is None and attempts is None and backoff is None:
+    has_name = bool(name)
+    if (
+        job_id is None
+        and attempts is None
+        and backoff is None
+        and not has_name
+    ):
         return None
     out: dict[str, Any] = {}
     if job_id is not None:
         out["id"] = job_id
+    if has_name:
+        out["name"] = name
     retry = _build_retry_override(attempts, backoff)
     if retry is not None:
         out["retry"] = retry

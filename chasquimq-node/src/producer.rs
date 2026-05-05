@@ -79,11 +79,21 @@ pub struct NativeJobRetryOverride {
 ///
 /// Mirrors `chasquimq::producer::AddOptions`. `id` is the stable
 /// [`chasquimq::JobId`] for at-most-once / idempotent scheduling;
-/// `retry` carries per-job retry overrides.
+/// `retry` carries per-job retry overrides; `name` is the dispatch
+/// name surfaced to the worker via the stream entry's `n` field
+/// (capped at 256 bytes by the engine).
 #[napi(object)]
 pub struct NativeAddOptions {
     pub id: Option<String>,
     pub retry: Option<NativeJobRetryOverride>,
+    pub name: Option<String>,
+}
+
+/// Per-entry pair for [`NativeProducer::add_bulk_named`].
+#[napi(object)]
+pub struct NativeNamedPayload {
+    pub name: String,
+    pub payload: Buffer,
 }
 
 #[napi]
@@ -275,6 +285,25 @@ impl NativeProducer {
         let engine_opts = to_engine_add_options(opts)?;
         self.inner
             .add_bulk_with_options(raw, engine_opts)
+            .await
+            .map_err(map_engine_err)
+    }
+
+    /// Bulk variant that accepts a per-entry `(name, payload)` pair so each
+    /// job carries its own dispatch name through the stream entry's `n`
+    /// field. Each name is validated against the engine's 256-byte cap before
+    /// any XADD is issued; an oversize name fails the whole call atomically.
+    #[napi]
+    pub async fn add_bulk_named(
+        &self,
+        items: Vec<NativeNamedPayload>,
+    ) -> napi::Result<Vec<String>> {
+        let pairs: Vec<(String, RawBytes)> = items
+            .into_iter()
+            .map(|it| (it.name, RawBytes(buffer_to_bytes(&it.payload))))
+            .collect();
+        self.inner
+            .add_bulk_named(pairs)
             .await
             .map_err(map_engine_err)
     }
@@ -603,6 +632,9 @@ fn to_engine_add_options(opts: NativeAddOptions) -> napi::Result<AddOptions> {
             over.backoff = Some(to_engine_backoff(b)?);
         }
         ao = ao.with_retry(over);
+    }
+    if let Some(name) = opts.name {
+        ao = ao.with_name(name);
     }
     Ok(ao)
 }

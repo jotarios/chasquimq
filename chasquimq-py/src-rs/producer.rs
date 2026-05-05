@@ -212,6 +212,18 @@ impl NativeProducer {
         })
     }
 
+    fn add_bulk_named<'py>(
+        &self,
+        py: Python<'py>,
+        items: &Bound<'py, PyList>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let pairs = pylist_of_named_payloads(items)?;
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            inner.add_bulk_named(pairs).await.map_err(map_engine_err)
+        })
+    }
+
     fn add_in_bulk<'py>(
         &self,
         py: Python<'py>,
@@ -335,6 +347,17 @@ fn pylist_of_bytes_to_raw(items: &Bound<'_, PyList>) -> PyResult<Vec<RawBytes>> 
     Ok(out)
 }
 
+fn pylist_of_named_payloads(items: &Bound<'_, PyList>) -> PyResult<Vec<(String, RawBytes)>> {
+    let mut out: Vec<(String, RawBytes)> = Vec::with_capacity(items.len());
+    for item in items.iter() {
+        let tup: (String, Bound<'_, PyBytes>) = item.extract().map_err(|_| {
+            PyValueError::new_err("named payload entries must be (str, bytes) tuples")
+        })?;
+        out.push((tup.0, RawBytes(pybytes_to_bytes(&tup.1))));
+    }
+    Ok(out)
+}
+
 fn ms_to_duration(ms: i64) -> PyResult<Duration> {
     if ms < 0 {
         return Err(PyValueError::new_err(format!(
@@ -374,6 +397,14 @@ fn dict_to_add_options(d: &Bound<'_, PyDict>) -> PyResult<AddOptions> {
                 .map_err(|_| PyValueError::new_err("opts.retry must be a dict or None"))?;
             let over = dict_to_retry_override(&retry_dict)?;
             ao = ao.with_retry(over);
+        }
+    }
+    if let Some(name) = d.get_item("name")? {
+        if !name.is_none() {
+            let s: String = name
+                .extract()
+                .map_err(|_| PyValueError::new_err("opts.name must be a string"))?;
+            ao = ao.with_name(s);
         }
     }
     Ok(ao)

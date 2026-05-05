@@ -42,8 +42,65 @@ skipIfNoRedis('Worker integration', () => {
     await waitFor(() => completedSpy.mock.calls.length >= 1, 5_000)
     expect(activeSpy).toHaveBeenCalled()
     const [job, result] = completedSpy.mock.calls[0]!
+    expect(job.name).toBe('double')
     expect(job.data).toEqual({ value: 7 })
     expect(result).toBe(14)
+  })
+
+  it('surfaces job name on the worker callback (round-trip)', async () => {
+    const completedSpy = vi.fn()
+    worker = new Worker<{ value: number }, number>(
+      queueName,
+      async (job) => job.data.value,
+      { connection: parseConn(REDIS_URL!), concurrency: 1, autorun: false },
+    )
+    worker.on('completed', completedSpy)
+    void worker.run()
+
+    await queue.add('send-email', { value: 1 })
+
+    await waitFor(() => completedSpy.mock.calls.length >= 1, 5_000)
+    const [job] = completedSpy.mock.calls[0]!
+    expect(job.name).toBe('send-email')
+  })
+
+  it('addBulk routes per-entry names through to the worker', async () => {
+    const seen: string[] = []
+    let resolveDone!: () => void
+    const done = new Promise<void>((resolve) => {
+      resolveDone = resolve
+    })
+    worker = new Worker<{ value: number }, number>(
+      queueName,
+      // eslint-disable-next-line @typescript-eslint/require-await
+      async (job) => {
+        seen.push(job.name as string)
+        if (seen.length >= 3) resolveDone()
+        return job.data.value
+      },
+      { connection: parseConn(REDIS_URL!), concurrency: 4, autorun: false },
+    )
+    void worker.run()
+
+    await queue.addBulk([
+      { name: 'send-email', data: { value: 0 } },
+      { name: 'render-pdf', data: { value: 1 } },
+      { name: 'audit-log', data: { value: 2 } },
+    ])
+
+    await Promise.race([
+      done,
+      new Promise<void>((_, rej) =>
+        setTimeout(() => rej(new Error('timeout waiting for 3 jobs')), 10_000),
+      ),
+    ])
+
+    expect(seen.sort()).toEqual(['audit-log', 'render-pdf', 'send-email'])
+  })
+
+  it('rejects job name over 256 bytes via the engine cap', async () => {
+    const oversize = 'x'.repeat(257)
+    await expect(queue.add(oversize, { value: 0 } as never)).rejects.toThrow(/256/)
   })
 
   it('emits failed when the processor rejects', async () => {

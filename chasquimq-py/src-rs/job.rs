@@ -12,6 +12,7 @@ use pyo3::types::PyBytes;
 #[pyclass(module = "chasquimq._native", name = "NativeJob", frozen)]
 pub struct NativeJob {
     id: String,
+    name: String,
     payload: Vec<u8>,
     created_at_ms: u64,
     attempt: u32,
@@ -21,6 +22,7 @@ impl NativeJob {
     pub fn from_engine(job: Job<RawBytes>) -> Self {
         Self {
             id: job.id,
+            name: job.name,
             payload: job.payload.0.to_vec(),
             created_at_ms: job.created_at_ms,
             attempt: job.attempt,
@@ -33,6 +35,11 @@ impl NativeJob {
     #[getter]
     fn id(&self) -> &str {
         &self.id
+    }
+
+    #[getter]
+    fn name(&self) -> &str {
+        &self.name
     }
 
     #[getter]
@@ -52,8 +59,9 @@ impl NativeJob {
 
     fn __repr__(&self) -> String {
         format!(
-            "NativeJob(id={:?}, attempt={}, created_at_ms={}, payload_len={})",
+            "NativeJob(id={:?}, name={:?}, attempt={}, created_at_ms={}, payload_len={})",
             self.id,
+            self.name,
             self.attempt,
             self.created_at_ms,
             self.payload.len()

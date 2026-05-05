@@ -30,7 +30,6 @@ import { encodePayload } from './encoding.js'
 
 let warnedPriority = false
 let warnedLifo = false
-let warnedNamePersist = false
 
 export class Queue<
   DataType = unknown,
@@ -81,12 +80,6 @@ export class Queue<
       console.warn('[chasquimq] JobsOptions.lifo is ignored (FIFO Streams).')
       warnedLifo = true
     }
-    if (name && !warnedNamePersist) {
-      console.warn(
-        '[chasquimq] Job names are not persisted in v1. job.name is only available in the same process. The Worker callback receives an empty string.',
-      )
-      warnedNamePersist = true
-    }
 
     if (merged.delay !== undefined) {
       if (!Number.isFinite(merged.delay)) {
@@ -97,17 +90,27 @@ export class Queue<
       }
     }
 
+    const isDelayed = !!(merged.delay && merged.delay > 0)
     const retryOverride = buildRetryOverride(merged)
-    const nativeOpts = buildNativeAddOptions(merged.jobId, retryOverride)
+    // Engine guard rejects non-empty `AddOptions::name` on the delayed path
+    // (`add_in_with_options` / `add_at_with_options`) until `n` is wired
+    // through the delayed-ZSET → promote → XADD path; only thread `name`
+    // on the immediate XADD.
+    const nameForOpts = isDelayed ? undefined : (name as string)
+    const nativeOpts = buildNativeAddOptions(
+      merged.jobId,
+      retryOverride,
+      nameForOpts,
+    )
 
     const buf = encodePayload(data)
     const producer = await this.producer()
     let id: string
-    if (merged.delay && merged.delay > 0) {
+    if (isDelayed) {
       if (nativeOpts) {
-        id = await producer.addInWithOptions(merged.delay, buf, nativeOpts)
+        id = await producer.addInWithOptions(merged.delay!, buf, nativeOpts)
       } else {
-        id = await producer.addIn(merged.delay, buf)
+        id = await producer.addIn(merged.delay!, buf)
       }
     } else if (nativeOpts) {
       id = await producer.addWithOptions(buf, nativeOpts)
@@ -143,9 +146,12 @@ export class Queue<
       return !o.delay && !o.jobId && !o.attempts && !o.backoff
     })
     if (allSimple) {
-      const buffers = jobs.map((j) => encodePayload(j.data))
+      const named = jobs.map((j) => ({
+        name: j.name as string,
+        payload: encodePayload(j.data),
+      }))
       const producer = await this.producer()
-      const ids = await producer.addBulk(buffers)
+      const ids = await producer.addBulkNamed(named)
       return jobs.map(
         (j, i) =>
           new Job(
@@ -427,10 +433,12 @@ function buildRetryOverride(opts: JobsOptions): NativeJobRetryOverride | undefin
 function buildNativeAddOptions(
   jobId: string | undefined,
   retry: NativeJobRetryOverride | undefined,
+  name: string | undefined,
 ): NativeAddOptions | undefined {
-  if (jobId == null && retry == null) return undefined
+  if (jobId == null && retry == null && !name) return undefined
   const out: NativeAddOptions = {}
   if (jobId != null) out.id = jobId
   if (retry != null) out.retry = retry
+  if (name) out.name = name
   return out
 }
