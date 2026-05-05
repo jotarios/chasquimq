@@ -29,6 +29,8 @@ Unlike legacy Redis queues, ChasquiMQ will strictly avoid blocking Lua scripts a
 | **Phase 3** ✅ | **The Node Killer** | Node.js native bindings via NAPI-RS. Allowing JavaScript workers to process jobs pulled by the Rust engine. Design doc: [`docs/phase3-napi-design.md`](../docs/phase3-napi-design.md). | Python/Go bindings. |
 | **Phase 4** ✅ | **Ecosystem Expansion** | Python bindings via PyO3. CLI dashboard for monitoring queue health. Design doc: [`docs/phase4-pyo3-design.md`](../docs/phase4-pyo3-design.md). | Complex UI dashboards. |
 
+After Phase 4 closed, the next milestone is post-1.0 polish (function-reference enqueue, result backends, deeper bench coverage with a non-Rust handler in the loop). One post-Phase-4 polish slice already landed: **name-on-wire** — `Queue.add(name, data)` now plumbs `name` through Redis Streams as a separate `n` field, preserved across delayed / repeatable / DLQ / events / shims, and surfaced on `MetricsSink` events and the `chasqui events` CLI. Design doc: [`docs/name-on-wire-design.md`](../docs/name-on-wire-design.md).
+
 ## 5. Phase 1 (MVP) Strict Requirements
 
 * **Producer:** Must be able to take a Rust `Job` struct, serialize it to MessagePack, and `XADD` it to a designated Redis Stream.
