@@ -219,14 +219,12 @@ export class Worker<
 
     const handler = async (nativeJob: NativeJob): Promise<void> => {
       const data = decode(nativeJob.payload) as DataType
-      // The engine doesn't carry job.name on the wire today; default to
-      // '' until the producer-side envelope with name lands. Worker-side
-      // jobs also have no producer-supplied JobsOptions on the wire — pass
-      // `{ timestamp }` so the canonical Job class still gets a non-null
-      // opts object and a real timestamp.
+      // Worker-side jobs have no producer-supplied JobsOptions on the wire —
+      // pass `{ timestamp }` so the canonical Job class still gets a
+      // non-null opts object and a real timestamp.
       const opts: JobsOptions = { timestamp: Number(nativeJob.createdAtMs) }
       const job = new Job<DataType, ResultType, NameType>(
-        '' as NameType,
+        (nativeJob.name as NameType) ?? ('' as NameType),
         data,
         opts,
         nativeJob.id,

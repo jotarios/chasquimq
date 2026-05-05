@@ -96,7 +96,7 @@ async def test_queue_add_round_trips_through_worker(
     assert len(received) == 1
     received_job = received[0]
     assert received_job.id
-    assert received_job.name == ""
+    assert received_job.name == "hello-task"
     assert received_job.data == {"value": 42, "tag": "x"}
     assert received_job.attempt == 0
 
@@ -117,6 +117,107 @@ async def test_queue_add_bulk_fast_path_when_simple(
     assert (
         await redis_client.xlen(stream_key_for(queue_name))
     ) == 5
+    await queue.close()
+
+
+@pytest.mark.asyncio
+async def test_queue_add_with_name_round_trips_to_handler(
+    redis_url: str, queue_name: str
+) -> None:
+    queue = Queue(queue_name, redis_url=redis_url)
+    received: list[Job] = []
+    done = asyncio.Event()
+
+    async def handler(job: Job) -> None:
+        received.append(job)
+        done.set()
+
+    worker = Worker(
+        queue_name,
+        handler,
+        redis_url=redis_url,
+        concurrency=1,
+        max_attempts=3,
+        read_block_ms=200,
+        delayed_enabled=False,
+        run_scheduler=False,
+    )
+
+    run_task = asyncio.create_task(worker.run())
+    try:
+        await queue.add("send-email", {"to": "ada@example.com"})
+        await asyncio.wait_for(done.wait(), timeout=10.0)
+    finally:
+        await worker.close()
+        try:
+            await asyncio.wait_for(run_task, timeout=5.0)
+        except asyncio.TimeoutError:
+            pass
+        await queue.close()
+
+    assert len(received) == 1
+    assert received[0].name == "send-email"
+    assert received[0].data == {"to": "ada@example.com"}
+
+
+@pytest.mark.asyncio
+async def test_queue_add_bulk_named_round_trip(
+    redis_url: str, queue_name: str
+) -> None:
+    queue = Queue(queue_name, redis_url=redis_url)
+    received: list[Job] = []
+    done = asyncio.Event()
+
+    async def handler(job: Job) -> None:
+        received.append(job)
+        if len(received) >= 3:
+            done.set()
+
+    worker = Worker(
+        queue_name,
+        handler,
+        redis_url=redis_url,
+        concurrency=4,
+        max_attempts=3,
+        read_block_ms=200,
+        delayed_enabled=False,
+        run_scheduler=False,
+    )
+
+    run_task = asyncio.create_task(worker.run())
+    try:
+        await queue.add_bulk(
+            [
+                {"name": "send-email", "data": {"i": 0}},
+                {"name": "render-pdf", "data": {"i": 1}},
+                {"name": "audit-log", "data": {"i": 2}},
+            ]
+        )
+        await asyncio.wait_for(done.wait(), timeout=10.0)
+    finally:
+        await worker.close()
+        try:
+            await asyncio.wait_for(run_task, timeout=5.0)
+        except asyncio.TimeoutError:
+            pass
+        await queue.close()
+
+    by_idx = {j.data["i"]: j.name for j in received}
+    assert by_idx == {
+        0: "send-email",
+        1: "render-pdf",
+        2: "audit-log",
+    }
+
+
+@pytest.mark.asyncio
+async def test_queue_add_rejects_name_over_256_bytes(
+    redis_url: str, queue_name: str
+) -> None:
+    queue = Queue(queue_name, redis_url=redis_url)
+    oversize = "x" * 257
+    with pytest.raises(RuntimeError, match="256"):
+        await queue.add(oversize, {"k": 1})
     await queue.close()
 
 

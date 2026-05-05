@@ -127,7 +127,7 @@ class Worker:
             data = decode_payload(bytes(native_job.payload))
             job = Job(
                 id=native_job.id,
-                name="",
+                name=native_job.name,
                 data=data,
                 attempt=native_job.attempt,
                 created_at_ms=native_job.created_at_ms,
