@@ -349,7 +349,8 @@ fn is_transient(err: &fred::error::Error) -> bool {
 pub(crate) fn value_as_tick(v: &Value) -> PromoterTick {
     // PROMOTE_SCRIPT returns `{promoted, depth, oldest_pending_lag_ms,
     // promoted_members}` as a Lua table, which fred surfaces as
-    // `Value::Array`. The 4th slot (promoted member bytes) is consumed by
+    // `Value::Array`. The 4th slot (promoted msgpack-only payload bytes —
+    // the slice-3 length prefix is stripped server-side) is consumed by
     // `value_as_promoted_members` and intentionally ignored here so the
     // public `PromoterTick` stays a small `Copy` struct. Older deployments /
     // a future script regression returning a bare integer for `promoted` is

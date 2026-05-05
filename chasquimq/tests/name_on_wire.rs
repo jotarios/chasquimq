@@ -7,7 +7,7 @@
 
 use chasquimq::config::{ConsumerConfig, ProducerConfig};
 use chasquimq::consumer::Consumer;
-use chasquimq::error::{Error, HandlerError};
+use chasquimq::error::HandlerError;
 use chasquimq::job::Job;
 use chasquimq::producer::{AddOptions, Producer, dlq_key, stream_key};
 use fred::clients::Client;
@@ -258,97 +258,11 @@ async fn add_bulk_named_round_trips_per_entry_names() {
     let _: () = admin.quit().await.unwrap();
 }
 
-// -- Fix 1 (PR #56 review): delayed paths must reject `name` until slice 4 --
-
-/// `add_in_with_options` with a non-empty `name` is rejected up-front with
-/// `Error::Config`. Until slice 4 plumbs `name` through the delayed-ZSET
-/// encoder, accepting it would silently drop the name on promotion. Loud
-/// is better than silent.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn add_in_with_options_rejects_non_empty_name() {
-    // No REDIS_URL needed: the guard fires before any network call. Use a
-    // dummy URL the producer never actually contacts because we don't even
-    // try to connect — call the producer indirectly via a fresh connect to
-    // a real Redis only if available; otherwise short-circuit.
-    let url = match std::env::var("REDIS_URL") {
-        Ok(u) => u,
-        Err(_) => return, // skip silently in offline runs
-    };
-    let queue = "name_reject_in";
-    let admin = admin().await;
-    flush_all(&admin, queue).await;
-
-    let producer: Producer<Sample> = Producer::connect(&url, producer_cfg(queue))
-        .await
-        .expect("connect producer");
-    let res = producer
-        .add_in_with_options(
-            Duration::from_secs(60),
-            Sample { n: 1 },
-            AddOptions::new().with_name("send-email"),
-        )
-        .await;
-    match res {
-        Err(Error::Config(msg)) => {
-            assert!(
-                msg.contains("delayed scheduling does not yet preserve")
-                    && msg.contains("send-email"),
-                "guard message must explain why and echo the name: {msg}"
-            );
-            assert!(
-                msg.contains("add_in_with_options"),
-                "guard message must name the offending method: {msg}"
-            );
-        }
-        other => panic!("expected Error::Config, got {other:?}"),
-    }
-
-    let _: () = admin.quit().await.unwrap();
-}
-
-/// Same guard for `add_at_with_options`: a non-empty `name` is rejected.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn add_at_with_options_rejects_non_empty_name() {
-    let url = match std::env::var("REDIS_URL") {
-        Ok(u) => u,
-        Err(_) => return,
-    };
-    let queue = "name_reject_at";
-    let admin = admin().await;
-    flush_all(&admin, queue).await;
-
-    let producer: Producer<Sample> = Producer::connect(&url, producer_cfg(queue))
-        .await
-        .expect("connect producer");
-    let when = std::time::SystemTime::now() + Duration::from_secs(60);
-    let res = producer
-        .add_at_with_options(
-            when,
-            Sample { n: 1 },
-            AddOptions::new().with_name("resize-image"),
-        )
-        .await;
-    match res {
-        Err(Error::Config(msg)) => {
-            assert!(
-                msg.contains("delayed scheduling does not yet preserve")
-                    && msg.contains("resize-image"),
-                "guard message must explain why and echo the name: {msg}"
-            );
-            assert!(
-                msg.contains("add_at_with_options"),
-                "guard message must name the offending method: {msg}"
-            );
-        }
-        other => panic!("expected Error::Config, got {other:?}"),
-    }
-
-    let _: () = admin.quit().await.unwrap();
-}
+// -- Slice 3: delayed paths preserve `name` end-to-end --
 
 /// Positive control: empty `name` (or unset) on the delayed path still works,
-/// matching the legacy `add_in` shape. The guard only fires when the user
-/// asks for a feature the engine doesn't yet honor.
+/// matching the legacy `add_in` shape — verifies the prefix-encode path
+/// handles the empty-name case (zero-length prefix + msgpack).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REDIS_URL"]
 async fn add_in_with_options_accepts_empty_name() {
