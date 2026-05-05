@@ -12,6 +12,7 @@ use crate::redis::commands::{
     xadd_args, zadd_delayed_args,
 };
 use crate::redis::conn::connect_pool;
+use crate::redis::delayed_member::encode_delayed_member;
 use crate::repeat::{RepeatableMeta, RepeatableSpec, StoredSpec, next_fire_after};
 use bytes::Bytes;
 use fred::clients::{Client, Pool};
@@ -66,16 +67,18 @@ pub struct DlqEntry {
 /// Empty string is the default and means "no name supplied" — equivalent
 /// on the wire to omitting the field entirely.
 ///
-/// **Slice-4 gap**: `name` is honored by [`Producer::add_with_options`] /
-/// [`Producer::add_bulk_with_options`] (immediate XADD path) and survives
-/// DLQ peek + DLQ replay. It is **not** yet supported on the delayed path —
-/// [`Producer::add_in_with_options`] and [`Producer::add_at_with_options`]
-/// reject a non-empty `name` with [`Error::Config`] until slice 4 plumbs
-/// it through the delayed-ZSET encoder. Automatic retry-via-delayed-ZSET
-/// (the consumer's retry path) and repeatable-spec fires also drop the
-/// name on re-emit; the consumer sees `Job::name = ""` after a handler
-/// error reschedules the job. See [`Job::name`] for the canonical list of
-/// preserve / drop sites.
+/// `name` is honored on **every** producer path:
+/// - Immediate XADD ([`Producer::add_with_options`] /
+///   [`Producer::add_bulk_with_options`]).
+/// - Delayed ZSET ([`Producer::add_in_with_options`] /
+///   [`Producer::add_at_with_options`]) — carried via the slice-3
+///   length-prefixed delayed-ZSET member, re-emitted as `n` on the
+///   stream entry by the promoter.
+/// - DLQ peek + DLQ replay ([`Producer::peek_dlq`] /
+///   [`Producer::replay_dlq`]).
+/// - Automatic retry-via-delayed-ZSET reschedule (consumer-side retry path).
+/// - Repeatable-spec scheduler-fire (`RepeatableSpec::job_name` is
+///   threaded onto each fired job's `n` field).
 #[derive(Default, Clone, Debug)]
 pub struct AddOptions {
     pub id: Option<JobId>,
@@ -99,10 +102,9 @@ impl AddOptions {
     }
 
     /// Set the dispatch [`Self::name`] on these options. See [`AddOptions`]
-    /// for the slice-4 gap on delayed / retry-reschedule / repeatable-fire
-    /// paths — a name set here survives the immediate-XADD path and DLQ
-    /// peek / replay, but **not** the delayed path (rejected up-front),
-    /// automatic retry-via-delayed-ZSET, or scheduler-fire.
+    /// for the canonical list of preserve sites — `name` survives every
+    /// producer path under slice 3 onward (immediate XADD, delayed ZSET,
+    /// retry reschedule, repeatable scheduler fire, DLQ peek / replay).
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
         self.name = name.into();
         self
@@ -122,24 +124,6 @@ fn validate_name(name: &str) -> Result<()> {
         return Err(Error::Config(format!(
             "job name exceeds {MAX_NAME_LEN}-byte cap (got {} bytes)",
             name.len()
-        )));
-    }
-    Ok(())
-}
-
-/// Reject `AddOptions::name` on producer entry points whose downstream path
-/// re-encodes the job onto the delayed ZSET (or otherwise re-XADDs without
-/// re-attaching the source entry's `n` field). Slice 1 only wired `name`
-/// through the immediate `XADD`; the delayed-ZSET encoder, the promoter's
-/// `ZRANGEBYSCORE → XADD`, and the scheduler-fire path will all silently
-/// drop a producer-supplied name today. Until slice 4 closes that, an
-/// explicit error is loudly preferable to a silent drop — callers find out
-/// at compile-test time, not in production where the worker sees `name = ""`.
-fn reject_name_on_delayed_path(name: &str, method: &str) -> Result<()> {
-    if !name.is_empty() {
-        return Err(Error::Config(format!(
-            "{method}: delayed scheduling does not yet preserve `name` (slice 4); \
-             got name={name:?}"
         )));
     }
     Ok(())
@@ -522,17 +506,11 @@ impl<T: Serialize> Producer<T> {
     /// the stream entry, capped at 256 bytes (rejected with [`Error::Config`]
     /// when oversize).
     ///
-    /// **`name` survives** this immediate `XADD` path end-to-end — the
-    /// consumer reads it back as [`Job::name`]. It also survives a DLQ
-    /// route + replay round trip (see [`Producer::peek_dlq`] /
-    /// [`Producer::replay_dlq`]).
-    ///
-    /// **`name` does NOT survive** an automatic retry-via-delayed-ZSET
-    /// reschedule (consumer-side retry path re-encodes `Job<T>` and
-    /// `ZADD`s it without the `n` field — the promoter's later XADD has no
-    /// name to attach). After the first handler error, the consumer sees
-    /// `Job::name = ""` on the retry attempt. Slice 4 closes this gap.
-    /// See [`Job::name`] for the canonical list of preserve / drop sites.
+    /// **`name` survives** every engine path end-to-end — the consumer
+    /// reads it back as [`Job::name`] on the immediate XADD, and the
+    /// retry-via-delayed-ZSET reschedule path (slice 3) preserves it
+    /// onto subsequent attempts. See [`Job::name`] for the canonical
+    /// list of preserve sites.
     pub async fn add_with_options(&self, payload: T, opts: AddOptions) -> Result<JobId> {
         validate_name(&opts.name)?;
         let mut job = match opts.id {
@@ -560,11 +538,9 @@ impl<T: Serialize> Producer<T> {
     /// `opts.id` set with exactly one payload is fine — it's the same as
     /// [`Producer::add_with_options`] one call deep.
     ///
-    /// **`name`** has the same preserve / drop profile as
-    /// [`Producer::add_with_options`]: survives the immediate XADD →
-    /// consumer path and DLQ peek / replay; dropped on automatic
-    /// retry-via-delayed-ZSET and repeatable-spec scheduler-fire until
-    /// slice 4. See [`Job::name`] for the canonical list.
+    /// **`name`** is preserved on every engine path — see
+    /// [`Producer::add_with_options`] and [`Job::name`] for the canonical
+    /// list.
     pub async fn add_bulk_with_options(
         &self,
         payloads: Vec<T>,
@@ -656,12 +632,9 @@ impl<T: Serialize> Producer<T> {
     /// batch fails the whole call atomically (no partial writes to Redis,
     /// matching `add_bulk`'s atomic-encode posture).
     ///
-    /// **Preserve / drop profile** matches [`Producer::add_with_options`]:
-    /// each per-entry `name` survives the immediate XADD → consumer path
-    /// and DLQ peek / replay. It does **not** survive automatic retry-via-
-    /// delayed-ZSET re-encode or repeatable-spec scheduler-fire (slice 4
-    /// closes this). See [`Job::name`] for the canonical list of preserve /
-    /// drop sites.
+    /// Each per-entry `name` is preserved on every engine path — see
+    /// [`Producer::add_with_options`] and [`Job::name`] for the canonical
+    /// list.
     pub async fn add_bulk_named(&self, items: Vec<(String, T)>) -> Result<Vec<JobId>> {
         if items.is_empty() {
             return Ok(Vec::new());
@@ -753,27 +726,23 @@ impl<T: Serialize> Producer<T> {
     }
 
     /// Like [`Producer::add_in`], but accepts an [`AddOptions`] carrying an
-    /// optional stable [`JobId`] and optional per-job [`JobRetryOverride`].
+    /// optional stable [`JobId`], optional per-job [`JobRetryOverride`],
+    /// and an optional dispatch `name`.
     ///
     /// When `opts.id` is set, this routes through the idempotent
     /// `SCHEDULE_DELAYED_IDEMPOTENT_SCRIPT` path (same dedup-marker semantics
     /// as [`Producer::add_in_with_id`]). When `opts.id` is `None`, this
     /// uses the at-least-once `ZADD` path. Either way, the per-job retry
-    /// override rides inside the encoded `Job<T>`.
-    ///
-    /// **`opts.name` is currently rejected with [`Error::Config`] when set
-    /// on the delayed path** (slice 1 only plumbed `n` through the immediate
-    /// `XADD`). Slice 4 will close this gap by carrying the name through the
-    /// delayed-ZSET re-encode and the promoter's `ZRANGEBYSCORE → XADD` path.
-    /// Until then, naming a delayed job would silently drop the name on
-    /// promotion — an explicit error is loudly preferable.
+    /// override rides inside the encoded `Job<T>` and `opts.name` rides
+    /// alongside as the slice-3 length-prefixed delayed-ZSET member, so
+    /// the promoter re-emits `n` on the stream entry at fire time.
     pub async fn add_in_with_options(
         &self,
         delay: Duration,
         payload: T,
         opts: AddOptions,
     ) -> Result<JobId> {
-        reject_name_on_delayed_path(&opts.name, "add_in_with_options")?;
+        validate_name(&opts.name)?;
         self.check_delay_secs(delay.as_secs())?;
         if delay.is_zero() {
             return self.add_with_options(payload, opts).await;
@@ -787,27 +756,27 @@ impl<T: Serialize> Producer<T> {
             Some(id) => {
                 let delay_secs = delay.as_secs().max(1);
                 self.schedule_delayed_idempotent_with_retry(
-                    id, payload, run_at_ms, delay_secs, opts.retry,
+                    id, payload, run_at_ms, delay_secs, opts.retry, &opts.name,
                 )
                 .await
             }
             None => {
-                self.zadd_delayed_with_retry(payload, run_at_ms, opts.retry)
+                self.zadd_delayed_with_retry(payload, run_at_ms, opts.retry, &opts.name)
                     .await
             }
         }
     }
 
     /// Like [`Producer::add_at`], but accepts an [`AddOptions`]. See
-    /// [`Producer::add_in_with_options`] for the dedup / retry-carry model
-    /// and the slice-4 `opts.name` rejection.
+    /// [`Producer::add_in_with_options`] for the dedup / retry-carry / name
+    /// preservation model.
     pub async fn add_at_with_options(
         &self,
         run_at: SystemTime,
         payload: T,
         opts: AddOptions,
     ) -> Result<JobId> {
-        reject_name_on_delayed_path(&opts.name, "add_at_with_options")?;
+        validate_name(&opts.name)?;
         let run_at_ms = match run_at.duration_since(UNIX_EPOCH) {
             Ok(d) => u128_to_u64_or_err(d.as_millis())?,
             Err(_) => 0,
@@ -821,12 +790,12 @@ impl<T: Serialize> Producer<T> {
         match opts.id {
             Some(id) => {
                 self.schedule_delayed_idempotent_with_retry(
-                    id, payload, run_at_ms, delay_secs, opts.retry,
+                    id, payload, run_at_ms, delay_secs, opts.retry, &opts.name,
                 )
                 .await
             }
             None => {
-                self.zadd_delayed_with_retry(payload, run_at_ms, opts.retry)
+                self.zadd_delayed_with_retry(payload, run_at_ms, opts.retry, &opts.name)
                     .await
             }
         }
@@ -948,7 +917,8 @@ impl<T: Serialize> Producer<T> {
     }
 
     async fn zadd_delayed(&self, payload: T, run_at_ms: u64) -> Result<JobId> {
-        self.zadd_delayed_with_retry(payload, run_at_ms, None).await
+        self.zadd_delayed_with_retry(payload, run_at_ms, None, "")
+            .await
     }
 
     async fn zadd_delayed_with_retry(
@@ -956,19 +926,21 @@ impl<T: Serialize> Producer<T> {
         payload: T,
         run_at_ms: u64,
         retry: Option<JobRetryOverride>,
+        name: &str,
     ) -> Result<JobId> {
         let mut job = Job::new(payload);
         if retry.is_some() {
             job.retry = retry;
         }
         let id = job.id.clone();
-        let bytes = Bytes::from(rmp_serde::to_vec(&job)?);
+        let payload_bytes = rmp_serde::to_vec(&job)?;
+        let member = encode_delayed_member(name, &payload_bytes);
         let client = self.pool.next_connected();
         let cmd = CustomCommand::new_static("ZADD", ClusterHash::FirstKey, false);
         let args = zadd_delayed_args(
             self.delayed_key.as_ref(),
             run_at_ms_as_i64(run_at_ms)?,
-            bytes,
+            member,
         );
         let _: Value = client.custom(cmd, args).await.map_err(Error::Redis)?;
         Ok(id)
@@ -979,8 +951,9 @@ impl<T: Serialize> Producer<T> {
         for payload in payloads {
             let job = Job::new(payload);
             let id = job.id.clone();
-            let bytes = Bytes::from(rmp_serde::to_vec(&job)?);
-            encoded.push((id, bytes));
+            let payload_bytes = rmp_serde::to_vec(&job)?;
+            let member = encode_delayed_member("", &payload_bytes);
+            encoded.push((id, member));
         }
 
         let score = run_at_ms_as_i64(run_at_ms)?;
@@ -1005,7 +978,7 @@ impl<T: Serialize> Producer<T> {
         run_at_ms: u64,
         delay_secs: u64,
     ) -> Result<JobId> {
-        self.schedule_delayed_idempotent_with_retry(id, payload, run_at_ms, delay_secs, None)
+        self.schedule_delayed_idempotent_with_retry(id, payload, run_at_ms, delay_secs, None, "")
             .await
     }
 
@@ -1016,12 +989,14 @@ impl<T: Serialize> Producer<T> {
         run_at_ms: u64,
         delay_secs: u64,
         retry: Option<JobRetryOverride>,
+        name: &str,
     ) -> Result<JobId> {
         let mut job = Job::with_id(id.clone(), payload);
         if retry.is_some() {
             job.retry = retry;
         }
-        let bytes = Bytes::from(rmp_serde::to_vec(&job)?);
+        let payload_bytes = rmp_serde::to_vec(&job)?;
+        let member = encode_delayed_member(name, &payload_bytes);
         let marker_key = dedup_marker_key(self.queue_name.as_ref(), &id);
         let index_key = delayed_index_key(self.queue_name.as_ref(), &id);
         let marker_ttl = delay_secs.saturating_add(DEDUP_MARKER_GRACE_SECS);
@@ -1034,7 +1009,7 @@ impl<T: Serialize> Producer<T> {
             &index_key,
             marker_ttl,
             score,
-            bytes,
+            member,
         )
         .await?;
         // Whether the script returned 1 (newly scheduled) or 0 (duplicate
@@ -1055,8 +1030,9 @@ impl<T: Serialize> Producer<T> {
         let mut encoded: Vec<(JobId, Bytes)> = Vec::with_capacity(items.len());
         for (id, payload) in items {
             let job = Job::with_id(id.clone(), payload);
-            let bytes = Bytes::from(rmp_serde::to_vec(&job)?);
-            encoded.push((id, bytes));
+            let payload_bytes = rmp_serde::to_vec(&job)?;
+            let member = encode_delayed_member("", &payload_bytes);
+            encoded.push((id, member));
         }
         let marker_ttl = delay_secs.saturating_add(DEDUP_MARKER_GRACE_SECS);
         let score = run_at_ms_as_i64(run_at_ms)?;

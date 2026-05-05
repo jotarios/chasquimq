@@ -29,6 +29,7 @@ use crate::redis::commands::{
     evalsha_schedule_repeatable_args, script_load_args,
 };
 use crate::redis::conn::connect;
+use crate::redis::delayed_member::encode_delayed_member;
 use crate::redis::keys::{
     delayed_key, repeat_key, repeat_spec_key, scheduler_lock_key, stream_key,
 };
@@ -346,7 +347,7 @@ where
             // `cadence_next == now_ms` is the on-time case, not catch-up;
             // routing it through `Skip` would silently drop the fire.
             Some(next) if next >= now_ms => {
-                let bytes = encode_fire::<T>(&payload_bytes, spec_key)?;
+                let bytes = encode_fire::<T>(&payload_bytes, spec_key, &stored.job_name)?;
                 fires.push((fire_at_ms as i64, bytes));
                 next
             }
@@ -448,7 +449,7 @@ where
                 // dated at the original `fire_at_ms`. Then advance past
                 // `now_ms` so we don't immediately reprocess on the next
                 // tick.
-                let bytes = encode_fire::<U>(payload_bytes, spec_key)?;
+                let bytes = encode_fire::<U>(payload_bytes, spec_key, &stored.job_name)?;
                 fires.push((fire_at_ms as i64, bytes));
                 Ok(self
                     .resolve_first_future(stored, fire_at_ms, now_ms, cadence_next)
@@ -470,7 +471,7 @@ where
                         );
                         break;
                     }
-                    let bytes = encode_fire::<U>(payload_bytes, spec_key)?;
+                    let bytes = encode_fire::<U>(payload_bytes, spec_key, &stored.job_name)?;
                     fires.push((at as i64, bytes));
                     count += 1;
                     match next_after {
@@ -668,14 +669,19 @@ where
 }
 
 /// Decode the stored payload bytes into `T`, mint a fresh `Job<T>` (new
-/// ULID, fresh `created_at_ms`, zeroed `attempt`), and re-encode for the
-/// wire. Each catch-up fire gets its own ULID so consumers see distinct
-/// jobs.
+/// ULID, fresh `created_at_ms`, zeroed `attempt`), and re-encode as a
+/// slice-3 length-prefixed delayed-ZSET member: `[u32_le name_len][name
+/// utf8][msgpack Job<T>]`. Each catch-up fire gets its own ULID so
+/// consumers see distinct jobs.
 ///
-/// The decode-then-re-encode round trip keeps the wire format identical to
-/// what `Producer::add` emits, so consumers can use a plain `Consumer<T>`
-/// regardless of whether jobs come from one-shot or repeatable producers.
-fn encode_fire<U>(payload_bytes: &[u8], spec_key: &str) -> std::result::Result<Bytes, TickError>
+/// `SCHEDULE_REPEATABLE_SCRIPT` decides whether to XADD now (splits the
+/// prefix and emits `d`/`n`) or ZADD onto the delayed ZSET (writes the
+/// prefixed bytes verbatim — same shape the promoter consumes).
+fn encode_fire<U>(
+    payload_bytes: &[u8],
+    spec_key: &str,
+    job_name: &str,
+) -> std::result::Result<Bytes, TickError>
 where
     U: Serialize + DeserializeOwned,
 {
@@ -688,9 +694,8 @@ where
     };
     let job_id = ulid::Ulid::new().to_string();
     let job = Job::with_id(job_id, payload);
-    rmp_serde::to_vec(&job)
-        .map(Bytes::from)
-        .map_err(|e| TickError::Engine(Error::Encode(e)))
+    let job_bytes = rmp_serde::to_vec(&job).map_err(|e| TickError::Engine(Error::Encode(e)))?;
+    Ok(encode_delayed_member(job_name, &job_bytes))
 }
 
 enum TickError {

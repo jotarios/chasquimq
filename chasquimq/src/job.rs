@@ -129,28 +129,22 @@ pub struct Job<T> {
     /// Set on the read path by the consumer's reader (from the entry's `n`
     /// field). `String::new()` for unnamed jobs.
     ///
-    /// **Where `name` is preserved (slice 1 + PR #56 fixups):**
+    /// **Where `name` is preserved (slice 1 + PR #56 fixups, slice 3):**
     /// - Producer→consumer hot path (`Producer::add_with_options` /
     ///   `add_bulk_with_options` / `add_bulk_named` → `XADD` with `n` →
     ///   `XREADGROUP` parser populates `Job::name`).
+    /// - Delayed adds (`Producer::add_in_with_options` /
+    ///   `add_at_with_options` and friends) — name rides as the slice-3
+    ///   length-prefixed delayed-ZSET member; the promoter strips the
+    ///   prefix and re-emits `n` on the stream entry.
+    /// - Automatic retry-via-delayed-ZSET reschedule (consumer's retry
+    ///   path re-encodes with the original name on the prefix).
+    /// - Repeatable-spec scheduler-fire (`RepeatableSpec::job_name` is
+    ///   threaded onto each fired job's `n` field).
     /// - DLQ relocate (`xadd_dlq_args` carries `n` verbatim from the source
     ///   entry).
     /// - DLQ peek (`Producer::peek_dlq` returns `DlqEntry::name`).
     /// - DLQ replay (`Producer::replay_dlq` re-emits `n` on the new XADD).
-    ///
-    /// **Where `name` is dropped today (slice 4 will close):**
-    /// - Automatic retry-via-delayed-ZSET re-encode. The consumer's retry
-    ///   path re-encodes `Job<T>` with `attempt + 1` and `ZADD`s onto the
-    ///   delayed sorted set; the encoded bytes are the only thing the
-    ///   promoter has, and it `XADD`s without an `n` field. Replay the
-    ///   resulting consumer event and `Job::name == ""` even if the
-    ///   original arrived with a name.
-    /// - Repeatable-spec scheduler-fire. `RepeatableSpec` carries
-    ///   `job_name`, but the scheduler's `XADD` / `ZADD` path doesn't
-    ///   thread it onto the stream entry's `n` field yet.
-    ///
-    /// In both drop cases, the original arrival sees `name`; only re-emits
-    /// after a handler error or a repeatable fire lose it.
     #[serde(default, skip)]
     pub name: String,
 }
