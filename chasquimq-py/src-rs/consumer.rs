@@ -154,8 +154,17 @@ impl Consumer {
         // otherwise `get_running_loop()` fails and the user's coroutine
         // is dropped without ever being awaited.
         let task_locals = Arc::new(TaskLocals::with_running_loop(py)?.copy_context(py)?);
+        let trace_queue = cfg.queue_name.clone();
+        let trace_concurrency = cfg.concurrency;
+        let trace_delayed = cfg.delayed_enabled;
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            tracing::debug!(
+                queue = %trace_queue,
+                concurrency = trace_concurrency,
+                delayed_enabled = trace_delayed,
+                "py consumer entering engine run"
+            );
             let consumer = EngineConsumer::<RawBytes>::new(redis_url, cfg);
             let engine_handler = move |job: EngineJob<RawBytes>| {
                 let h = handler.clone();

@@ -76,6 +76,12 @@ impl Promoter {
     }
 
     pub async fn run(self, shutdown: CancellationToken) -> Result<()> {
+        tracing::debug!(
+            queue = %self.cfg.queue_name,
+            holder_id = %self.cfg.holder_id,
+            poll_ms = self.cfg.poll_interval_ms,
+            "promoter run entry"
+        );
         let client = connect(&self.redis_url).await?;
         // Three cases for the events writer:
         // 1. Shared writer supplied (embedded promoter): clone the `Arc`-shared
@@ -115,6 +121,7 @@ impl Promoter {
         lock_sha: &mut String,
         shutdown: &CancellationToken,
     ) -> Result<()> {
+        tracing::debug!(queue = %self.cfg.queue_name, "promoter loop entry");
         let poll = Duration::from_millis(self.cfg.poll_interval_ms);
         let mut backoff_idx: usize = 0;
         // Track the previous lock outcome so we emit metrics on transitions

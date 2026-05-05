@@ -54,6 +54,12 @@ where
         H: Fn(Job<T>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = std::result::Result<(), HandlerError>> + Send + 'static,
     {
+        tracing::debug!(
+            queue = %self.cfg.queue_name,
+            delayed_enabled = self.cfg.delayed_enabled,
+            events_enabled = self.cfg.events_enabled,
+            "consumer run entry"
+        );
         let reader = connect(&self.redis_url).await?;
         let dlq_writer = connect(&self.redis_url).await?;
         let ack_client = connect(&self.redis_url).await?;
@@ -217,6 +223,7 @@ where
         // `events_enabled + delayed_enabled` opens one events connection
         // instead of two.
         let promoter = Promoter::with_shared_events(self.redis_url.clone(), promoter_cfg, events);
+        tracing::debug!(queue = %self.cfg.queue_name, "consumer spawning embedded promoter");
         Some(tokio::spawn(promoter.run(shutdown)))
     }
 }

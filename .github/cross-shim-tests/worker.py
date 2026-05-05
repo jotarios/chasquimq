@@ -4,11 +4,14 @@ Consumes COUNT jobs from QUEUE. Each payload must be a dict with
 integer ``i`` in [0, COUNT) and string ``tag`` matching EXPECT_TAG.
 Exits 0 on full distinct-id coverage within TIMEOUT_SECS, else 1.
 
+The worker leaves the engine default ``delayed_enabled=True`` regardless
+of the producer's MODE — a worker should drain whatever's available, so
+gating the embedded promoter on a producer-side env var creates a fragile
+two-process coupling (forget MODE on the worker side and the ZSET sits
+forever). This mirrors the Node fixture's approach.
+
 Env vars:
   QUEUE, COUNT — required.
-  MODE             — `immediate` (default) | `delayed`. `delayed` flips
-                      ``delayed_enabled=True`` so the embedded promoter
-                      drains the delayed ZSET into the stream.
   EXPECT_JOB_NAME  — optional. When non-empty, the handler asserts
                       ``job.name == EXPECT_JOB_NAME`` for every job, so
                       a regression that drops `name` on either shim's
@@ -22,7 +25,7 @@ import asyncio
 import os
 import sys
 
-from chasquimq import Job, Queue, Worker
+from chasquimq import Job, Worker
 
 
 async def main() -> int:
@@ -32,11 +35,6 @@ async def main() -> int:
     expect_job_name = os.environ.get("EXPECT_JOB_NAME", "")
     timeout_secs = float(os.environ.get("TIMEOUT_SECS", "30"))
     redis_url = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
-    mode = os.environ.get("MODE", "immediate").lower()
-
-    if mode not in ("immediate", "delayed"):
-        print(f"[py-worker] ERROR: unknown MODE={mode!r}", file=sys.stderr)
-        return 1
 
     seen: set[int] = set()
     done = asyncio.Event()
@@ -68,8 +66,6 @@ async def main() -> int:
         if len(seen) >= count:
             done.set()
 
-    delayed_enabled = mode == "delayed"
-
     worker = Worker(
         queue_name,
         handler,
@@ -77,7 +73,6 @@ async def main() -> int:
         concurrency=8,
         max_attempts=1,
         read_block_ms=200,
-        delayed_enabled=delayed_enabled,
         run_scheduler=False,
     )
 
@@ -113,7 +108,7 @@ async def main() -> int:
 
     print(
         f"[py-worker] OK — drained {count} distinct jobs with "
-        f"tag={expect_tag!r} mode={mode!r} name={expect_job_name!r}"
+        f"tag={expect_tag!r} name={expect_job_name!r}"
     )
     return 0
 
