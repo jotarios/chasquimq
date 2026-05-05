@@ -8,7 +8,7 @@
 
 mod common;
 
-use chasquimq::producer::{Producer, events_key};
+use chasquimq::producer::{AddOptions, Producer, events_key};
 use chasquimq::{Consumer, ConsumerConfig, HandlerError, Job, RetryConfig};
 use fred::clients::Client;
 use fred::interfaces::ClientLike;
@@ -35,6 +35,10 @@ impl EventEntry {
     }
     fn job_id(&self) -> &str {
         self.fields.get("id").map(|s| s.as_str()).unwrap_or("")
+    }
+    /// Slice 5: dispatch `name` from the `n` field. Empty/missing → "".
+    fn dispatch_name(&self) -> &str {
+        self.fields.get("n").map(|s| s.as_str()).unwrap_or("")
     }
     fn attempt(&self) -> Option<u32> {
         self.fields.get("attempt")?.parse().ok()
@@ -791,6 +795,196 @@ async fn embedded_promoter_shares_events_writer_with_consumer() {
         completed.attempt(),
         Some(1),
         "consumer hot path must emit `completed` through the same shared writer"
+    );
+
+    let _: () = admin.quit().await.unwrap();
+}
+
+/// Slice 5: per-job events carry the dispatch `name` (`n` field) so
+/// subscribers can observe job kind without msgpack-decoding payload —
+/// the architectural payoff of picking Option B over Option D in
+/// `docs/name-on-wire-design.md`.
+///
+/// Pin the wire-level contract on the success path: a job added with
+/// `add_with_options(... .with_name("send-email"))` produces `active`
+/// and `completed` events whose `n` field is `"send-email"`. Empty-name
+/// jobs emit no `n` (omitted from the entry — the omit-empty rule is
+/// the same one the main stream's `xadd_args` uses).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires REDIS_URL"]
+async fn events_carry_name_on_success_path() {
+    let admin = admin().await;
+    let queue = "events_name_e1";
+    flush_all(&admin, queue).await;
+
+    let producer: Producer<Sample> = Producer::connect(&redis_url(), producer_cfg(queue))
+        .await
+        .expect("connect producer");
+
+    let named_id = producer
+        .add_with_options(Sample { n: 1 }, AddOptions::new().with_name("send-email"))
+        .await
+        .expect("add named");
+    let unnamed_id = producer.add(Sample { n: 2 }).await.expect("add anonymous");
+
+    let cfg = consumer_cfg(queue, 3);
+    let consumer: Consumer<Sample> = Consumer::new(redis_url(), cfg);
+    let shutdown = CancellationToken::new();
+    let shutdown_h = shutdown.clone();
+    let handle = tokio::spawn(async move {
+        consumer
+            .run(move |_job: Job<Sample>| async move { Ok(()) }, shutdown_h)
+            .await
+    });
+
+    {
+        let admin = admin.clone();
+        let queue = queue.to_string();
+        let named_id = named_id.clone();
+        let unnamed_id = unnamed_id.clone();
+        wait_until(Duration::from_secs(5), move || {
+            let admin = admin.clone();
+            let queue = queue.clone();
+            let named_id = named_id.clone();
+            let unnamed_id = unnamed_id.clone();
+            async move {
+                let evs = read_events(&admin, &queue).await;
+                evs.iter()
+                    .any(|e| e.name() == "completed" && e.job_id() == named_id)
+                    && evs
+                        .iter()
+                        .any(|e| e.name() == "completed" && e.job_id() == unnamed_id)
+            }
+        })
+        .await;
+    }
+
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(10), handle).await;
+
+    let evs = read_events(&admin, queue).await;
+
+    let active_named = find_one(&evs, "active", Some(&named_id));
+    assert_eq!(
+        active_named.dispatch_name(),
+        "send-email",
+        "active event for named job must carry `n=send-email`"
+    );
+    let completed_named = find_one(&evs, "completed", Some(&named_id));
+    assert_eq!(
+        completed_named.dispatch_name(),
+        "send-email",
+        "completed event for named job must carry `n=send-email`"
+    );
+
+    // Empty-name path: `n` is omitted from the entry (omit-empty rule).
+    let active_unnamed = find_one(&evs, "active", Some(&unnamed_id));
+    assert!(
+        !active_unnamed.fields.contains_key("n"),
+        "active event for unnamed job must omit `n` entirely (got fields {:?})",
+        active_unnamed.fields
+    );
+    let completed_unnamed = find_one(&evs, "completed", Some(&unnamed_id));
+    assert!(
+        !completed_unnamed.fields.contains_key("n"),
+        "completed event for unnamed job must omit `n` entirely (got fields {:?})",
+        completed_unnamed.fields
+    );
+
+    let _: () = admin.quit().await.unwrap();
+}
+
+/// Slice 5: the **first-attempt** failed event and the
+/// retry-scheduled event carry `n` because both fire from
+/// `Job<T>`/`RetryRelocate` data the reader populated from the source
+/// stream entry. Subsequent retry-revived attempts come back through a
+/// retry-relocator XADD that doesn't yet preserve `n` (slice 4 closes
+/// that gap), so the post-retry `failed` and `dlq` events render `n`
+/// empty. This test pins what slice 5 *can* deliver and documents the
+/// remaining drop site for slice 4.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires REDIS_URL"]
+async fn events_carry_name_on_first_attempt_and_retry_scheduled() {
+    let admin = admin().await;
+    let queue = "events_name_e2";
+    flush_all(&admin, queue).await;
+
+    let producer: Producer<Sample> = Producer::connect(&redis_url(), producer_cfg(queue))
+        .await
+        .expect("connect producer");
+    let job_id = producer
+        .add_with_options(Sample { n: 1 }, AddOptions::new().with_name("resize-image"))
+        .await
+        .expect("add named");
+
+    // max_attempts=2: one retry between two failures, then DLQ.
+    let cfg = ConsumerConfig {
+        delayed_enabled: true,
+        delayed_poll_interval_ms: 10,
+        ..consumer_cfg(queue, 2)
+    };
+    let consumer: Consumer<Sample> = Consumer::new(redis_url(), cfg);
+    let shutdown = CancellationToken::new();
+    let shutdown_h = shutdown.clone();
+    let handle = tokio::spawn(async move {
+        consumer
+            .run(
+                move |_job: Job<Sample>| async move {
+                    Err(HandlerError::new(std::io::Error::other("nope")))
+                },
+                shutdown_h,
+            )
+            .await
+    });
+
+    {
+        let admin = admin.clone();
+        let queue = queue.to_string();
+        let job_id = job_id.clone();
+        wait_until(Duration::from_secs(10), move || {
+            let admin = admin.clone();
+            let queue = queue.clone();
+            let job_id = job_id.clone();
+            async move {
+                let evs = read_events(&admin, &queue).await;
+                evs.iter()
+                    .any(|e| e.name() == "dlq" && e.job_id() == job_id)
+            }
+        })
+        .await;
+    }
+
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(10), handle).await;
+
+    let evs = read_events(&admin, queue).await;
+
+    // The first-attempt `failed` event carries name (`Job::name` set by
+    // the reader from the source `n` field).
+    let failed_attempt_1: Vec<&EventEntry> = evs
+        .iter()
+        .filter(|e| e.name() == "failed" && e.job_id() == job_id && e.attempt() == Some(1))
+        .collect();
+    assert!(
+        !failed_attempt_1.is_empty(),
+        "expected at least one attempt=1 failed event for {job_id}"
+    );
+    for e in &failed_attempt_1 {
+        assert_eq!(
+            e.dispatch_name(),
+            "resize-image",
+            "first-attempt failed event must carry n=resize-image (got {:?})",
+            e.fields
+        );
+    }
+
+    // The retry-scheduled event carries name (RetryRelocate plumbs it
+    // from the worker's decoded Job<T>).
+    let retry = find_one(&evs, "retry-scheduled", Some(&job_id));
+    assert_eq!(
+        retry.dispatch_name(),
+        "resize-image",
+        "retry-scheduled must carry n=resize-image"
     );
 
     let _: () = admin.quit().await.unwrap();

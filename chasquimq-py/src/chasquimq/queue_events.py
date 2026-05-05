@@ -28,6 +28,11 @@ class QueueEvent:
 
     ``name`` is the engine event identifier (e.g. ``"completed"``).
     ``job_id`` is ``None`` for queue-scoped events (``"drained"``).
+    ``job_name`` is the dispatch name from the engine ``n`` field
+    (slice 5 of name-on-the-wire) — ``""`` when the engine omitted ``n``
+    on the entry (the producer added the job without a name, or the
+    event is queue-scoped). Surfaces job kind without msgpack-decoding
+    payload.
     ``fields`` carries the remaining decoded fields verbatim — values
     are ``str`` for documented fields, raw ``bytes`` for unknown ones.
     Numeric fields like ``attempt`` / ``backoff_ms`` / ``duration_us``
@@ -36,6 +41,7 @@ class QueueEvent:
 
     name: str
     job_id: Optional[str]
+    job_name: str
     fields: dict[str, Any]
 
 
@@ -134,4 +140,8 @@ def _parse_event(fields: dict) -> QueueEvent:
     name = decoded.pop("e", "")
     job_id_raw = decoded.pop("id", "")
     job_id: Optional[str] = job_id_raw if job_id_raw else None
-    return QueueEvent(name=name, job_id=job_id, fields=decoded)
+    # Slice 5: pull `n` out of the field bag and surface as a top-level
+    # `job_name`. The engine omits `n` when the producer set no name, so
+    # missing → empty string (not None) — keeps the type stable.
+    job_name = decoded.pop("n", "")
+    return QueueEvent(name=name, job_id=job_id, job_name=job_name, fields=decoded)

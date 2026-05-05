@@ -86,9 +86,10 @@ pub(crate) async fn run_relocator(
                 let event = DlqRouted {
                     reason: relocate.reason,
                     attempt: relocate.attempt,
+                    name: relocate.name.clone(),
                 };
                 let sink = &*cfg.metrics;
-                metrics::dispatch("dlq_routed", || sink.dlq_routed(event));
+                metrics::dispatch("dlq_routed", move || sink.dlq_routed(event));
                 // Cross-process `dlq` event mirrors the metric. Reader-side
                 // routes (malformed / oversize / decode-fail) carry an
                 // empty payload and an empty job id — the event still
@@ -98,10 +99,16 @@ pub(crate) async fn run_relocator(
                 // as "decode-side reject, no recoverable id". The id is
                 // plumbed in on the `DlqRelocate` so the relocator hot
                 // path doesn't have to msgpack-decode `payload` just to
-                // read the id field.
+                // read the id field. The name is plumbed in the same way
+                // (preserved verbatim from the source entry's `n` field).
                 if cfg.events.is_enabled() {
                     cfg.events
-                        .emit_dlq(&relocate.job_id, relocate.reason.as_str(), relocate.attempt)
+                        .emit_dlq(
+                            &relocate.job_id,
+                            &relocate.name,
+                            relocate.reason.as_str(),
+                            relocate.attempt,
+                        )
                         .await;
                 }
             }

@@ -111,34 +111,39 @@ export class QueueEvents extends EventEmitter {
     for (let i = 0; i + 1 < kv.length; i += 2) f[kv[i]!] = kv[i + 1]!
     const e = f['e']
     const jobId = f['id'] ?? ''
+    // Slice 5 of name-on-the-wire: the engine emits `n` on per-job events
+    // so subscribers can observe job kind without msgpack-decoding payload.
+    // Missing/empty when the producer added the job without a name, or for
+    // queue-scoped events like `drained`.
+    const name = f['n'] ?? ''
 
     switch (e) {
       case 'waiting':
-        this.emit('waiting', { jobId }, eventId)
+        this.emit('waiting', { jobId, name }, eventId)
         break
       case 'active':
-        this.emit('active', { jobId, prev: 'waiting', attempt: parseIntSafe(f['attempt']) }, eventId)
+        this.emit('active', { jobId, name, prev: 'waiting', attempt: parseIntSafe(f['attempt']) }, eventId)
         break
       case 'completed':
-        this.emit('completed', { jobId, attempt: parseIntSafe(f['attempt']), returnvalue: undefined }, eventId)
+        this.emit('completed', { jobId, name, attempt: parseIntSafe(f['attempt']), returnvalue: undefined }, eventId)
         break
       case 'failed':
-        this.emit('failed', { jobId, failedReason: f['reason'] ?? '', attempt: parseIntSafe(f['attempt']) }, eventId)
+        this.emit('failed', { jobId, name, failedReason: f['reason'] ?? '', attempt: parseIntSafe(f['attempt']) }, eventId)
         break
       case 'retry-scheduled':
         // chasquimq-specific extension event; advanced subscribers use this
         // to observe retry scheduling decisions before they fire.
-        this.emit('retry-scheduled', { jobId, attempt: parseIntSafe(f['attempt']), backoffMs: parseIntSafe(f['backoff_ms']) }, eventId)
+        this.emit('retry-scheduled', { jobId, name, attempt: parseIntSafe(f['attempt']), backoffMs: parseIntSafe(f['backoff_ms']) }, eventId)
         break
       case 'delayed':
-        this.emit('delayed', { jobId, delay: parseIntSafe(f['delay_ms']) }, eventId)
+        this.emit('delayed', { jobId, name, delay: parseIntSafe(f['delay_ms']) }, eventId)
         break
       case 'dlq':
         // The engine emits a single `dlq` event; surface both `failed` and
         // `retries-exhausted` for high-level shim users who expect the
         // latter as a separate signal.
-        this.emit('failed', { jobId, failedReason: f['reason'] ?? 'retries-exhausted', attempt: parseIntSafe(f['attempt']) }, eventId)
-        this.emit('retries-exhausted', { jobId, attemptsMade: parseIntSafe(f['attempt']) }, eventId)
+        this.emit('failed', { jobId, name, failedReason: f['reason'] ?? 'retries-exhausted', attempt: parseIntSafe(f['attempt']) }, eventId)
+        this.emit('retries-exhausted', { jobId, name, attemptsMade: parseIntSafe(f['attempt']) }, eventId)
         break
       case 'drained':
         this.emit('drained', eventId)

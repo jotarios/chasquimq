@@ -56,6 +56,7 @@ where
             while let Ok(dispatched) = rx.recv().await {
                 let entry_id = dispatched.entry_id.clone();
                 let job_id = dispatched.job.id.clone();
+                let job_name = dispatched.job.name.clone();
                 // 1-indexed attempt number that's *about* to run. `Job::attempt`
                 // is 0-indexed ("0 runs have happened yet"), so the run we're
                 // about to execute is number `Job::attempt + 1`. Used in both
@@ -68,7 +69,10 @@ where
                 // build a "currently running" view that's correct even for
                 // handlers that take a long time. Best-effort by design — a
                 // failing XADD must not delay the handler.
-                wiring.events.emit_active(&job_id, attempt_index).await;
+                wiring
+                    .events
+                    .emit_active(&job_id, &job_name, attempt_index)
+                    .await;
 
                 let started = Instant::now();
                 let outcome = std::panic::AssertUnwindSafe(handler(dispatched.job))
@@ -89,15 +93,16 @@ where
                     kind,
                     attempt: attempt_index,
                     handler_duration_us: duration_us,
+                    name: job_name.clone(),
                 };
                 let sink = &*wiring.metrics;
-                metrics::dispatch("job_outcome", || sink.job_outcome(event));
+                metrics::dispatch("job_outcome", move || sink.job_outcome(event));
 
                 match outcome {
                     Ok(Ok(())) => {
                         wiring
                             .events
-                            .emit_completed(&job_id, attempt_index, duration_us)
+                            .emit_completed(&job_id, &job_name, attempt_index, duration_us)
                             .await;
                         if wiring.ack_tx.send(entry_id).await.is_err() {
                             break;
@@ -109,7 +114,13 @@ where
                         tracing::warn!(job_id = %job_id, error = %e, attempt = attempt_index, unrecoverable, "handler returned Err");
                         wiring
                             .events
-                            .emit_failed(&job_id, attempt_index, &reason, Some(duration_us))
+                            .emit_failed(
+                                &job_id,
+                                &job_name,
+                                attempt_index,
+                                &reason,
+                                Some(duration_us),
+                            )
                             .await;
                         on_handler_failure(&wiring, entry_id, job_for_retry, unrecoverable).await;
                     }
@@ -119,6 +130,7 @@ where
                             .events
                             .emit_failed(
                                 &job_id,
+                                &job_name,
                                 attempt_index,
                                 "handler panicked",
                                 Some(duration_us),
@@ -228,6 +240,7 @@ async fn on_handler_failure<T: Serialize + Send + 'static>(
         run_at_i64,
         will_run_next,
         backoff,
+        job.name.clone(),
     )
     .await;
 }

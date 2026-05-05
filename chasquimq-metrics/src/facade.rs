@@ -75,27 +75,47 @@ impl MetricsSink for MetricsFacadeSink {
     }
 
     fn job_outcome(&self, outcome: JobOutcome) {
-        histogram!("chasquimq_handler_duration_seconds")
+        // `name` is rendered as a Prometheus / OTel label so operators can
+        // slice handler-duration histograms and failure counters by job kind
+        // without msgpack-decoding payload bytes — the architectural payoff
+        // of putting `name` at the Streams framing layer (Option B in
+        // `docs/name-on-wire-design.md`).
+        histogram!("chasquimq_handler_duration_seconds", "name" => outcome.name.clone())
             .record(outcome.handler_duration_us as f64 / 1_000_000.0);
         match outcome.kind {
             JobOutcomeKind::Ok => {
-                counter!("chasquimq_jobs_completed_total").increment(1);
+                counter!("chasquimq_jobs_completed_total", "name" => outcome.name).increment(1);
             }
             JobOutcomeKind::Err => {
-                counter!("chasquimq_jobs_failed_total", "kind" => "error").increment(1);
+                counter!(
+                    "chasquimq_jobs_failed_total",
+                    "kind" => "error",
+                    "name" => outcome.name,
+                )
+                .increment(1);
             }
             JobOutcomeKind::Panic => {
-                counter!("chasquimq_jobs_failed_total", "kind" => "panic").increment(1);
+                counter!(
+                    "chasquimq_jobs_failed_total",
+                    "kind" => "panic",
+                    "name" => outcome.name,
+                )
+                .increment(1);
             }
         }
     }
 
     fn retry_scheduled(&self, retry: RetryScheduled) {
-        counter!("chasquimq_retries_scheduled_total").increment(1);
+        counter!("chasquimq_retries_scheduled_total", "name" => retry.name).increment(1);
         histogram!("chasquimq_retry_backoff_seconds").record(retry.backoff_ms as f64 / 1_000.0);
     }
 
     fn dlq_routed(&self, dlq: DlqRouted) {
-        counter!("chasquimq_dlq_routed_total", "reason" => dlq.reason.as_str()).increment(1);
+        counter!(
+            "chasquimq_dlq_routed_total",
+            "reason" => dlq.reason.as_str(),
+            "name" => dlq.name,
+        )
+        .increment(1);
     }
 }

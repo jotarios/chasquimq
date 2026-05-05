@@ -430,9 +430,14 @@ async fn emit_waiting_for_promoted(events: &EventsWriter, members: &[Bytes]) {
     if !events.is_enabled() || members.is_empty() {
         return;
     }
+    // Promoter knows only the encoded ZSET member bytes — `name` is not
+    // preserved through the delayed path in v1 (slice 4 closes that gap),
+    // so emit `waiting` with an empty `n`. Subscribers that need name on
+    // the `waiting` transition can reconstruct it from the subsequent
+    // `active` event for the same job id.
     for m in members {
         if let Some(id) = extract_job_id(m) {
-            events.emit_waiting(&id).await;
+            events.emit_waiting(&id, "").await;
         }
     }
 }

@@ -99,44 +99,53 @@ fn queue_labeled_wraps_all_events() {
         kind: JobOutcomeKind::Ok,
         attempt: 1,
         handler_duration_us: 12,
+        name: "send-email".to_string(),
     });
     sink.job_outcome(JobOutcome {
         kind: JobOutcomeKind::Err,
         attempt: 2,
         handler_duration_us: 5,
+        name: "send-email".to_string(),
     });
     sink.job_outcome(JobOutcome {
         kind: JobOutcomeKind::Panic,
         attempt: 1,
         handler_duration_us: 3,
+        name: String::new(),
     });
 
     // Retry
     sink.retry_scheduled(RetryScheduled {
         attempt: 2,
         backoff_ms: 200,
+        name: "send-email".to_string(),
     });
     sink.retry_scheduled(RetryScheduled {
         attempt: 3,
         backoff_ms: 400,
+        name: "send-email".to_string(),
     });
 
     // DLQ — one of each reason variant.
     sink.dlq_routed(DlqRouted {
         reason: DlqReason::RetriesExhausted,
         attempt: 3,
+        name: "send-email".to_string(),
     });
     sink.dlq_routed(DlqRouted {
         reason: DlqReason::DecodeFailed,
         attempt: 0,
+        name: String::new(),
     });
     sink.dlq_routed(DlqRouted {
         reason: DlqReason::Malformed { reason: "test" },
         attempt: 0,
+        name: String::new(),
     });
     sink.dlq_routed(DlqRouted {
         reason: DlqReason::OversizePayload,
         attempt: 0,
+        name: String::new(),
     });
 
     let (counters, _gauges) = collect(&snapshotter);
@@ -178,12 +187,12 @@ fn queue_labeled_wraps_all_events() {
         Some(2),
     );
 
-    // Worker: jobs_completed_total has queue label.
+    // Worker: jobs_completed_total has queue + name labels.
     assert_eq!(
         counter_value(
             &counters,
             "chasquimq_jobs_completed_total",
-            &[("queue", "orders")]
+            &[("queue", "orders"), ("name", "send-email")]
         ),
         Some(1),
     );
@@ -192,44 +201,52 @@ fn queue_labeled_wraps_all_events() {
         counter_value(
             &counters,
             "chasquimq_jobs_failed_total",
-            &[("queue", "orders"), ("kind", "error")]
+            &[
+                ("queue", "orders"),
+                ("kind", "error"),
+                ("name", "send-email")
+            ]
         ),
         Some(1),
     );
+    // The Panic outcome was emitted with an empty name above, so the label
+    // is rendered as an empty string. This pins the contract that empty
+    // name renders as an empty label rather than dropping the metric.
     assert_eq!(
         counter_value(
             &counters,
             "chasquimq_jobs_failed_total",
-            &[("queue", "orders"), ("kind", "panic")]
+            &[("queue", "orders"), ("kind", "panic"), ("name", "")]
         ),
         Some(1),
     );
 
-    // Retry counter has queue label.
+    // Retry counter has queue + name labels.
     assert_eq!(
         counter_value(
             &counters,
             "chasquimq_retries_scheduled_total",
-            &[("queue", "orders")]
+            &[("queue", "orders"), ("name", "send-email")]
         ),
         Some(2),
     );
 
-    // DLQ counter is split by `reason` label, all carrying queue label.
-    for (reason, want) in [
-        ("retries_exhausted", 1),
-        ("decode_failed", 1),
-        ("malformed", 1),
-        ("oversize_payload", 1),
-    ] {
+    // DLQ counter is split by `reason` + `name` labels, all carrying queue.
+    let dlq_cases: &[(&str, &str, u64)] = &[
+        ("retries_exhausted", "send-email", 1),
+        ("decode_failed", "", 1),
+        ("malformed", "", 1),
+        ("oversize_payload", "", 1),
+    ];
+    for (reason, name, want) in dlq_cases {
         assert_eq!(
             counter_value(
                 &counters,
                 "chasquimq_dlq_routed_total",
-                &[("queue", "orders"), ("reason", reason)]
+                &[("queue", "orders"), ("reason", reason), ("name", name)]
             ),
-            Some(want),
-            "missing dlq counter for reason={reason}: {counters:?}"
+            Some(*want),
+            "missing dlq counter for reason={reason} name={name:?}: {counters:?}"
         );
     }
 }

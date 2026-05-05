@@ -12,9 +12,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// Dispatch a sink call, swallowing panics. See module docs.
 ///
 /// `AssertUnwindSafe` is fine here because the closure only borrows
-/// `&dyn MetricsSink` and `Copy` payloads — there's no internal mutable
-/// state that could be observed in a half-mutated form across a panic
-/// boundary.
+/// `&dyn MetricsSink` and moves owned plain-data payloads (no shared
+/// interior-mutable state) — nothing can be observed in a half-mutated
+/// form across a panic boundary.
 pub(crate) fn dispatch<F: FnOnce()>(label: &'static str, f: F) {
     static PANIC_COUNT: AtomicU64 = AtomicU64::new(0);
     if let Err(payload) = std::panic::catch_unwind(AssertUnwindSafe(f)) {
