@@ -29,7 +29,6 @@ import { decode } from '@msgpack/msgpack'
 
 import {
   Consumer as NativeConsumer,
-  Scheduler as NativeScheduler,
   type ConsumerOpts as NativeConsumerOpts,
   type Job as NativeJob,
 } from '../index.js'
@@ -154,8 +153,6 @@ export class Worker<
   readonly opts: WorkerOptions
 
   private native: NativeConsumer
-  private scheduler?: NativeScheduler
-  private schedulerRunPromise?: Promise<void>
   private processor: Processor<DataType, ResultType, NameType>
   private running = false
   private runPromise?: Promise<void>
@@ -184,19 +181,10 @@ export class Worker<
       blockMs: opts.drainDelay ?? 5000,
       maxAttempts: opts.maxStalledCount ?? 3,
       consumerId: opts.name,
+      runScheduler: opts.runScheduler !== false,
+      schedulerTickMs: opts.schedulerTickMs,
     }
     this.native = new NativeConsumer(url, nativeOpts)
-
-    if (opts.runScheduler !== false) {
-      // Embed a scheduler so repeatable / cron specs upserted via
-      // `Queue.add(name, data, { repeat })` fire on this worker process.
-      // Multiple workers cooperate via Redis SET-NX leader election —
-      // only one ticks at a time, and the lock TTL covers leader churn.
-      this.scheduler = new NativeScheduler(url, {
-        queueName: name,
-        tickIntervalMs: opts.schedulerTickMs ?? 1000,
-      })
-    }
 
     if (opts.autorun !== false) {
       // Defer to the next microtask so subscribers can attach listeners
@@ -254,16 +242,6 @@ export class Worker<
       this.emit('error', e)
       throw e
     })
-    if (this.scheduler) {
-      // Run the scheduler concurrently with the consumer; surface its
-      // errors through the same 'error' event so callers don't have to
-      // attach a second listener.
-      this.schedulerRunPromise = this.scheduler.run().catch((err: unknown) => {
-        const e = err instanceof Error ? err : new Error(String(err))
-        this.emit('error', e)
-        throw e
-      })
-    }
     return this.runPromise
   }
 
@@ -274,19 +252,9 @@ export class Worker<
   async close(_force = false): Promise<void> {
     this.emit('closing', '')
     this.native.shutdown()
-    if (this.scheduler) {
-      this.scheduler.shutdown()
-    }
     if (this.runPromise) {
       try {
         await this.runPromise
-      } catch {
-        /* swallow — already surfaced via 'error' */
-      }
-    }
-    if (this.schedulerRunPromise) {
-      try {
-        await this.schedulerRunPromise
       } catch {
         /* swallow — already surfaced via 'error' */
       }

@@ -30,6 +30,7 @@ pub async fn run(redis_url: &str, queue: &str, scale: u32) -> ScenarioReport {
         max_payload_bytes: 1_048_576,
         dlq_inflight: 32,
         delayed_enabled: false,
+        run_scheduler: false,
         ..Default::default()
     };
 

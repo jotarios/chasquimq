@@ -51,6 +51,8 @@ impl Consumer {
         dlq_max_stream_len = None,
         events_enabled = true,
         delayed_enabled = true,
+        run_scheduler = true,
+        scheduler_tick_ms = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -68,6 +70,8 @@ impl Consumer {
         dlq_max_stream_len: Option<i64>,
         events_enabled: bool,
         delayed_enabled: bool,
+        run_scheduler: bool,
+        scheduler_tick_ms: Option<i64>,
     ) -> PyResult<Self> {
         let mut cfg = ConsumerConfig {
             queue_name,
@@ -76,8 +80,17 @@ impl Consumer {
             max_attempts,
             events_enabled,
             delayed_enabled,
+            run_scheduler,
             ..ConsumerConfig::default()
         };
+        if let Some(v) = scheduler_tick_ms {
+            if v < 0 {
+                return Err(PyRuntimeError::new_err(format!(
+                    "scheduler_tick_ms must be non-negative; got {v}"
+                )));
+            }
+            cfg.scheduler.tick_interval_ms = v as u64;
+        }
         if let Some(v) = consumer_id {
             cfg.consumer_id = v;
         }
