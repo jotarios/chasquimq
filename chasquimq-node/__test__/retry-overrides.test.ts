@@ -14,7 +14,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Queue, Worker, UnrecoverableError } from '../dist/index.js'
-import { NativeProducer } from '../index.js'
+import { Producer } from '../index.js'
 
 const REDIS_URL = process.env.REDIS_URL
 const skipIfNoRedis = REDIS_URL ? describe : describe.skip
@@ -148,7 +148,7 @@ skipIfNoRedis('Per-job retry overrides + UnrecoverableError', () => {
     expect(calls).toBe(1)
 
     // Peek the DLQ via the native producer and assert reason.
-    const producer = await NativeProducer.connect(REDIS_URL!, { queueName })
+    const producer = await Producer.connect(REDIS_URL!, { queueName })
     const dlq = await producer.peekDlq(10)
     expect(dlq).toHaveLength(1)
     expect(dlq[0]!.reason).toBe('unrecoverable')
@@ -179,7 +179,7 @@ skipIfNoRedis('Per-job retry overrides + UnrecoverableError', () => {
     await new Promise((r) => setTimeout(r, 500))
     expect(calls).toBe(2)
 
-    const producer = await NativeProducer.connect(REDIS_URL!, { queueName })
+    const producer = await Producer.connect(REDIS_URL!, { queueName })
     const dlq = await producer.peekDlq(10)
     expect(dlq).toHaveLength(1)
     expect(dlq[0]!.reason).toBe('retries_exhausted')
@@ -220,7 +220,7 @@ skipIfNoRedis('Per-job retry overrides + UnrecoverableError', () => {
     // setting opts.id with more than one payload is a footgun (the id
     // would silently apply only to the first job). The engine returns
     // Error::Config; the NAPI binding propagates it via map_engine_err.
-    const producer = await NativeProducer.connect(REDIS_URL!, { queueName })
+    const producer = await Producer.connect(REDIS_URL!, { queueName })
     const buf1 = Buffer.from([0x81, 0xa1, 0x76, 0x01]) // msgpack { v: 1 }
     const buf2 = Buffer.from([0x81, 0xa1, 0x76, 0x02]) // msgpack { v: 2 }
     await expect(

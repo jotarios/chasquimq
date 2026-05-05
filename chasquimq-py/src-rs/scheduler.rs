@@ -1,4 +1,4 @@
-//! `NativeScheduler` — PyO3 wrapper over `chasquimq::Scheduler<RawBytes>`.
+//! `Scheduler` — PyO3 wrapper over `chasquimq::Scheduler<RawBytes>`.
 //!
 //! Mirrors `chasquimq-node/src/scheduler.rs`. Standalone repeatable-job
 //! scheduler. Pinned to `RawBytes` so the binding stays schema-agnostic —
@@ -15,22 +15,22 @@
 //! election on `{chasqui:<queue>}:scheduler:lock`.
 
 use crate::payload::RawBytes;
-use chasquimq::Scheduler;
+use chasquimq::Scheduler as EngineScheduler;
 use chasquimq::config::SchedulerConfig;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-#[pyclass(module = "chasquimq._native", name = "NativeScheduler")]
-pub struct NativeScheduler {
+#[pyclass(module = "chasquimq._native", name = "Scheduler")]
+pub struct Scheduler {
     redis_url: String,
     cfg: SchedulerConfig,
     shutdown: Arc<CancellationToken>,
 }
 
 #[pymethods]
-impl NativeScheduler {
+impl Scheduler {
     #[new]
     #[pyo3(signature = (
         redis_url,
@@ -100,7 +100,7 @@ impl NativeScheduler {
         let cfg = self.cfg.clone();
         let shutdown = (*self.shutdown).clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let scheduler = Scheduler::<RawBytes>::new(redis_url, cfg);
+            let scheduler = EngineScheduler::<RawBytes>::new(redis_url, cfg);
             scheduler
                 .run(shutdown)
                 .await

@@ -1,23 +1,23 @@
-//! `NativeConsumer` — PyO3 wrapper over `chasquimq::Consumer<RawBytes>`.
+//! `Consumer` — PyO3 wrapper over `chasquimq::Consumer<RawBytes>`.
 //!
 //! The hard part is the Python handler bridge: each engine worker, when it
 //! pulls a `Job<RawBytes>` off the stream, hands it across the FFI boundary
-//! to a user-supplied `async def handler(job: NativeJob) -> None`, awaits
+//! to a user-supplied `async def handler(job: Job) -> None`, awaits
 //! the returned coroutine, and translates resolution / exception back into
 //! the engine's `Result<(), HandlerError>` shape. The Python analog of the
 //! Node TSFN is `pyo3_async_runtimes::tokio::into_future`, which converts
 //! a Python awaitable into a `Future` the tokio task can `.await`.
 //!
-//! Shutdown is signal-based: `NativeConsumer::shutdown` cancels a
+//! Shutdown is signal-based: `Consumer::shutdown` cancels a
 //! `CancellationToken` shared with the engine. `run` resolves once the
 //! engine's drain (workers, ack flusher, DLQ relocator, retry relocator,
 //! optional in-process promoter) all settle.
 
-use crate::job::NativeJob;
+use crate::job::Job;
 use crate::payload::RawBytes;
 use chasquimq::config::ConsumerConfig;
-use chasquimq::consumer::Consumer;
-use chasquimq::{HandlerError, Job};
+use chasquimq::consumer::Consumer as EngineConsumer;
+use chasquimq::{HandlerError, Job as EngineJob};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyType};
@@ -25,8 +25,8 @@ use pyo3_async_runtimes::TaskLocals;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-#[pyclass(module = "chasquimq._native", name = "NativeConsumer")]
-pub struct NativeConsumer {
+#[pyclass(module = "chasquimq._native", name = "Consumer")]
+pub struct Consumer {
     redis_url: String,
     cfg: ConsumerConfig,
     shutdown: Arc<CancellationToken>,
@@ -34,7 +34,7 @@ pub struct NativeConsumer {
 }
 
 #[pymethods]
-impl NativeConsumer {
+impl Consumer {
     #[new]
     #[pyo3(signature = (
         redis_url,
@@ -129,7 +129,7 @@ impl NativeConsumer {
 
     /// Run the consumer loop. Resolves once the engine drains.
     ///
-    /// `handler` must be an `async def handler(job: NativeJob) -> None`.
+    /// `handler` must be an `async def handler(job: Job) -> None`.
     /// A coroutine that returns normally → `XACK`. A coroutine that raises
     /// → `HandlerError` (engine retries with backoff up to `max_attempts`,
     /// then DLQ).
@@ -156,15 +156,15 @@ impl NativeConsumer {
         let task_locals = Arc::new(TaskLocals::with_running_loop(py)?.copy_context(py)?);
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let consumer = Consumer::<RawBytes>::new(redis_url, cfg);
-            let engine_handler = move |job: Job<RawBytes>| {
+            let consumer = EngineConsumer::<RawBytes>::new(redis_url, cfg);
+            let engine_handler = move |job: EngineJob<RawBytes>| {
                 let h = handler.clone();
                 let locals = task_locals.clone();
                 let unrecoverable_cls = unrecoverable_cls.clone();
                 async move {
                     let coro_result = Python::attach(|py| -> PyResult<_> {
-                        let native_job = NativeJob::from_engine(job);
-                        let coro = h.call1(py, (native_job,))?;
+                        let job_py = Job::from_engine(job);
+                        let coro = h.call1(py, (job_py,))?;
                         pyo3_async_runtimes::into_future_with_locals(&locals, coro.into_bound(py))
                     });
                     let coro_fut = match coro_result {

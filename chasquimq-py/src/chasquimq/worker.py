@@ -1,8 +1,8 @@
 """High-level :class:`Worker` — runs an asyncio handler against a queue.
 
-Wraps :class:`chasquimq._native.NativeConsumer` with MessagePack
-decoding and a clean shutdown surface. Auto-spawns an embedded
-:class:`chasquimq._native.NativeScheduler` so repeatable / cron specs
+Wraps :class:`chasquimq._native.Consumer` with MessagePack decoding and
+a clean shutdown surface. Auto-spawns an embedded
+:class:`chasquimq._native.Scheduler` so repeatable / cron specs
 upserted via :meth:`Queue.add(..., repeat=...)` actually fire on this
 worker process. Multiple workers cooperate via the engine's existing
 ``SET NX EX`` leader election on ``{chasqui:<queue>}:scheduler:lock`` —
@@ -83,16 +83,16 @@ class Worker:
             consumer_kwargs["max_payload_bytes"] = max_payload_bytes
         if dlq_max_stream_len is not None:
             consumer_kwargs["dlq_max_stream_len"] = dlq_max_stream_len
-        self._consumer = _native.NativeConsumer(
+        self._consumer = _native.Consumer(
             redis_url, queue_name, **consumer_kwargs
         )
 
-        self._scheduler: Optional[_native.NativeScheduler] = None
+        self._scheduler: Optional[_native.Scheduler] = None
         if run_scheduler:
             sched_kwargs: dict[str, Any] = {}
             if scheduler_tick_ms is not None:
                 sched_kwargs["tick_interval_ms"] = scheduler_tick_ms
-            self._scheduler = _native.NativeScheduler(
+            self._scheduler = _native.Scheduler(
                 redis_url, queue_name, **sched_kwargs
             )
 

@@ -1,4 +1,4 @@
-//! `NativeProducer` — async PyO3 wrapper over `chasquimq::Producer<RawBytes>`.
+//! `Producer` — async PyO3 wrapper over `chasquimq::Producer<RawBytes>`.
 //!
 //! Mirrors `chasquimq-node/src/producer.rs` 1:1. JS dicts become PyDicts;
 //! validation patterns (unknown `kind`, non-finite floats, negative ms)
@@ -8,7 +8,7 @@
 use crate::payload::RawBytes;
 use bytes::Bytes;
 use chasquimq::config::ProducerConfig;
-use chasquimq::producer::{AddOptions, Producer};
+use chasquimq::producer::{AddOptions, Producer as EngineProducer};
 use chasquimq::repeat::{MissedFiresPolicy, RepeatPattern, RepeatableSpec};
 use chasquimq::{BackoffKind, BackoffSpec, JobRetryOverride, RepeatableMeta};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -17,13 +17,13 @@ use pyo3::types::{PyBytes, PyDict, PyList};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-#[pyclass(name = "NativeProducer", module = "chasquimq._native")]
-pub struct NativeProducer {
-    inner: Arc<Producer<RawBytes>>,
+#[pyclass(name = "Producer", module = "chasquimq._native")]
+pub struct Producer {
+    inner: Arc<EngineProducer<RawBytes>>,
 }
 
 #[pymethods]
-impl NativeProducer {
+impl Producer {
     #[new]
     #[pyo3(signature = (
         redis_url,
@@ -57,11 +57,12 @@ impl NativeProducer {
         let runtime = pyo3_async_runtimes::tokio::get_runtime();
         let inner = py
             .detach(|| {
-                runtime
-                    .block_on(async move { Producer::<RawBytes>::connect(&redis_url, cfg).await })
+                runtime.block_on(async move {
+                    EngineProducer::<RawBytes>::connect(&redis_url, cfg).await
+                })
             })
             .map_err(map_engine_err)?;
-        Ok(NativeProducer {
+        Ok(Producer {
             inner: Arc::new(inner),
         })
     }

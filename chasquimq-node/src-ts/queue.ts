@@ -7,11 +7,11 @@
 // surface; this keeps the public types stable while we iterate.
 
 import {
-  NativeProducer,
-  type NativeProducerOpts,
-  type NativeAddOptions,
-  type NativeBackoffSpec,
-  type NativeJobRetryOverride,
+  Producer as NativeProducer,
+  type ProducerOpts as NativeProducerOpts,
+  type AddOptions as NativeAddOptions,
+  type BackoffSpec as NativeBackoffSpec,
+  type JobRetryOverride as NativeJobRetryOverride,
 } from '../index.js'
 import type {
   BackoffOptions,

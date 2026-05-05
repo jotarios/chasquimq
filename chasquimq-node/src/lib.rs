@@ -1,8 +1,8 @@
 #![deny(clippy::all)]
-//! N-API bindings for ChasquiMQ. Exposes `NativeProducer`, `NativeConsumer`,
-//! and `NativePromoter` to JS as the lower-level engine API. The
-//! high-level `Queue` / `Worker` / `Job` shim sits *on top* of these classes
-//! and lives in TypeScript — it is **not** part of this crate.
+//! N-API bindings for ChasquiMQ. Exposes `Producer`, `Consumer`, and
+//! `Promoter` to JS as the lower-level engine API. The high-level
+//! `Queue` / `Worker` / `Job` shim sits *on top* of these classes and
+//! lives in TypeScript — it is **not** part of this crate.
 //!
 //! See `docs/phase3-napi-design.md` for the load-bearing decisions:
 //! - §4: opaque-Buffer payload (Option A)
@@ -16,14 +16,14 @@ mod promoter;
 mod repeat;
 mod scheduler;
 
-pub use consumer::{NativeConsumer, NativeConsumerOpts, NativeJob, NativeRetryOpts};
+pub use consumer::{Consumer, ConsumerOpts, Job, RetryOpts};
 pub use payload::RawBytes;
-pub use producer::{NativeDlqEntry, NativeProducer, NativeProducerOpts};
-pub use promoter::{NativePromoter, NativePromoterOpts};
-pub use repeat::{
-    NativeMissedFiresPolicy, NativeRepeatPattern, NativeRepeatableMeta, NativeRepeatableSpec,
+pub use producer::{
+    AddOptions, BackoffSpec, DlqEntry, JobRetryOverride, NamedPayload, Producer, ProducerOpts,
 };
-pub use scheduler::{NativeScheduler, NativeSchedulerOpts};
+pub use promoter::{Promoter, PromoterOpts};
+pub use repeat::{MissedFiresPolicy, RepeatPattern, RepeatableMeta, RepeatableSpec};
+pub use scheduler::{Scheduler, SchedulerOpts};
 
 use napi_derive::napi;
 
@@ -58,7 +58,7 @@ mod tests {
     ///
     /// The JS high-level shim will:
     /// 1. msgpack-encode `UserData` to a `Buffer` via `@msgpack/msgpack`
-    /// 2. hand the `Buffer` to `NativeProducer.add(buf)`
+    /// 2. hand the `Buffer` to `Producer.add(buf)`
     /// 3. the binding wraps it as `Job<RawBytes(buf)>` and msgpack-encodes
     ///    that whole envelope before XADD'ing.
     ///

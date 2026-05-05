@@ -1,10 +1,10 @@
 """High-level :class:`Queue` — the asyncio-friendly producer entry point.
 
-Wraps :class:`chasquimq._native.NativeProducer` with MessagePack
-encoding and Pythonic option translation. The wire format mirrors the
-Node shim exactly — payloads are msgpack-encoded user data only (no
-``(name, data)`` tuple), so a Python producer and a Node worker (or
-vice versa) drain the same Redis stream without translation.
+Wraps :class:`chasquimq._native.Producer` with MessagePack encoding and
+Pythonic option translation. The wire format mirrors the Node shim
+exactly — payloads are msgpack-encoded user data only (no ``(name,
+data)`` tuple), so a Python producer and a Node worker (or vice versa)
+drain the same Redis stream without translation.
 """
 
 from __future__ import annotations
@@ -62,20 +62,20 @@ class Queue:
         self._redis_url = redis_url
         self._max_stream_len = max_stream_len
         self._max_delay_secs = max_delay_secs
-        self._producer: Optional[_native.NativeProducer] = None
+        self._producer: Optional[_native.Producer] = None
 
     @property
     def name(self) -> str:
         return self._name
 
-    def _get_producer(self) -> _native.NativeProducer:
+    def _get_producer(self) -> _native.Producer:
         if self._producer is None:
             kwargs: dict[str, Any] = {}
             if self._max_stream_len is not None:
                 kwargs["max_stream_len"] = self._max_stream_len
             if self._max_delay_secs is not None:
                 kwargs["max_delay_secs"] = self._max_delay_secs
-            self._producer = _native.NativeProducer(
+            self._producer = _native.Producer(
                 self._redis_url, self._name, **kwargs
             )
         return self._producer
@@ -149,10 +149,9 @@ class Queue:
 
         Each entry is a dict with keys ``name``, ``data`` and optional
         ``delay`` / ``attempts`` / ``backoff`` / ``job_id``. When all
-        entries lack per-job overrides the call routes through
-        :meth:`NativeProducer.add_bulk_named` (per-entry names) for
-        pipelining; otherwise the bulk degrades to a per-entry
-        :meth:`add` loop.
+        entries lack per-job overrides the call routes through the
+        underlying ``add_bulk_named`` (per-entry names) for pipelining;
+        otherwise the bulk degrades to a per-entry :meth:`add` loop.
         """
         if not jobs:
             return []

@@ -16,9 +16,9 @@ fn version() -> &'static str {
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
-    m.add_class::<producer::NativeProducer>()?;
-    m.add_class::<consumer::NativeConsumer>()?;
-    m.add_class::<scheduler::NativeScheduler>()?;
-    m.add_class::<job::NativeJob>()?;
+    m.add_class::<producer::Producer>()?;
+    m.add_class::<consumer::Consumer>()?;
+    m.add_class::<scheduler::Scheduler>()?;
+    m.add_class::<job::Job>()?;
     Ok(())
 }

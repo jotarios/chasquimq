@@ -1,7 +1,7 @@
 /**
  * High-level `Worker` shim for chasquimq.
  *
- * Wraps the native `NativeConsumer` (NAPI binding over the Rust engine)
+ * Wraps the native `Consumer` (NAPI binding over the Rust engine)
  * with an `EventEmitter`-flavored API: a user-supplied `Processor`
  * function runs once per delivered job, the MessagePack payload is
  * decoded into a typed `Job`, and lifecycle events fire at the
@@ -28,10 +28,10 @@ import { EventEmitter } from 'node:events'
 import { decode } from '@msgpack/msgpack'
 
 import {
-  NativeConsumer,
-  NativeScheduler,
-  type NativeConsumerOpts,
-  type NativeJob,
+  Consumer as NativeConsumer,
+  Scheduler as NativeScheduler,
+  type ConsumerOpts as NativeConsumerOpts,
+  type Job as NativeJob,
 } from '../index.js'
 import { Job } from './job.js'
 import type { ConnectionOptions, JobsOptions } from './types.js'
@@ -68,14 +68,14 @@ export interface WorkerOptions {
 
   /**
    * Polling block timeout (ms) on the underlying `XREADGROUP` call.
-   * Maps to `NativeConsumerOpts.blockMs`. Higher values reduce idle
-   * Redis CPU; lower values shorten shutdown drain.
+   * Maps to `ConsumerOpts.blockMs`. Higher values reduce idle Redis CPU;
+   * lower values shorten shutdown drain.
    */
   drainDelay?: number
 
   /**
    * Maximum total attempts per job (initial + retries). Maps to
-   * `NativeConsumerOpts.maxAttempts`.
+   * `ConsumerOpts.maxAttempts`.
    */
   maxStalledCount?: number
 
@@ -102,7 +102,7 @@ export interface WorkerOptions {
   name?: string
 
   /**
-   * Auto-spawn an embedded {@link NativeScheduler} alongside the consumer
+   * Auto-spawn an embedded native `Scheduler` alongside the consumer
    * so repeatable / cron specs upserted via `Queue.add(name, data,
    * { repeat })` actually fire on this worker process.
    *

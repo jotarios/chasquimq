@@ -11,13 +11,7 @@ import logging as _logging
 
 _logging.getLogger("chasquimq").addHandler(_logging.NullHandler())
 
-from ._native import (
-    NativeConsumer,
-    NativeJob,
-    NativeProducer,
-    NativeScheduler,
-    version,
-)
+from ._native import version
 from .errors import NotSupportedError, UnrecoverableError
 from .job import Job
 from .queue import Queue
@@ -30,10 +24,6 @@ __all__ = [
     "BackoffSpec",
     "Handler",
     "Job",
-    "NativeConsumer",
-    "NativeJob",
-    "NativeProducer",
-    "NativeScheduler",
     "NotSupportedError",
     "Queue",
     "QueueEvent",

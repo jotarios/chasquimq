@@ -2,7 +2,7 @@ from typing import Any, Awaitable, Callable, Optional, Sequence
 
 def version() -> str: ...
 
-class NativeJob:
+class Job:
     @property
     def id(self) -> str: ...
     @property
@@ -14,7 +14,7 @@ class NativeJob:
     @property
     def attempt(self) -> int: ...
 
-class NativeProducer:
+class Producer:
     def __init__(
         self,
         redis_url: str,
@@ -62,7 +62,7 @@ class NativeProducer:
     ) -> Awaitable[list[dict[str, Any]]]: ...
     def remove_repeatable_by_key(self, key: str) -> Awaitable[bool]: ...
 
-class NativeConsumer:
+class Consumer:
     def __init__(
         self,
         redis_url: str,
@@ -81,11 +81,11 @@ class NativeConsumer:
         delayed_enabled: bool = True,
     ) -> None: ...
     def run(
-        self, handler: Callable[[NativeJob], Awaitable[Any]]
+        self, handler: Callable[[Job], Awaitable[Any]]
     ) -> Awaitable[None]: ...
     def shutdown(self) -> None: ...
 
-class NativeScheduler:
+class Scheduler:
     def __init__(
         self,
         redis_url: str,
