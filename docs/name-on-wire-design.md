@@ -1,7 +1,9 @@
 # Design — `name` on the wire (v1.0 decision)
 
-Status: design draft. No implementation. The recommendation in §4 is one
-option; the human picks before any code lands.
+Status: **shipped** as a post-Phase-4 polish slice. See §8 below for the
+slice mapping and merged PRs. The recommendation in §4 (Option B for
+streams; B-b length-prefix for ZSET members in slice 3) was the
+implemented path.
 
 `Queue.add(name, data, options?)` accepts `name` then drops it before
 `XADD`. Workers see `job.name = ""`. Pre-1.0 we can change the wire
@@ -169,3 +171,46 @@ an order of magnitude more release-management work.
 - **DLQ.** `xadd_dlq_args`
   ([`commands.rs:389-411`](../chasquimq/src/redis/commands.rs)) should
   preserve `name` alongside the original payload.
+
+## 8. Status: shipped
+
+The migration plan in §5 was followed without changes. The slice mapping
+to merged PRs:
+
+- **Slice 1 (engine, streams) — PR #56.** `Job<T>::name` (`#[serde(skip)]`
+  on the engine envelope, framing-layer metadata only); separate `n`
+  field on stream entries via `XADD ... d <bytes> n <utf8-name>`;
+  `AddOptions::name`, `Producer::add_with_options`,
+  `Producer::add_bulk_named`; `DlqEntry::name`; `replay_dlq` preserves
+  `n` end-to-end. Wire-breaking but tolerated by old consumers (parser
+  walks `[k, v, ...]` and ignores unknowns).
+- **Slice 2 (shims) — PR #57.** `Queue.add(name, data)` plumbs `name`
+  through both shims; `Job.name` on the worker side; `add_bulk_named`
+  shim API. The Python `_encoding.py` contract docstring and the Node
+  `Queue.add` `console.warn` were both removed.
+- **Slice 3 (engine, delayed + repeatable) — PR #59.** ZSET member
+  encoding became `name_len:u32_le + name_utf8 + msgpack_payload`
+  (Option B-b in §4). `PROMOTE_SCRIPT` and
+  `SCHEDULE_REPEATABLE_SCRIPT` parse the prefix. Delayed adds,
+  retry-via-delayed-ZSET, and repeatable scheduler-fire all preserve
+  `name`. The slice-1-fixup `reject_name_on_delayed_path` guards were
+  removed.
+- **Slice 4 (cross-shim contract test extension) — PR #61.** The
+  cross-shim CI fixtures (`producer.{py,ts}` / `worker.{py,ts}`) gained
+  `JOB_NAME` / `EXPECT_JOB_NAME` env vars and now assert `name`
+  round-trip across all four phases (Node↔Node, Py↔Py, Node→Py,
+  Py→Node). Slice-2's `is_delayed` skip was removed.
+- **Slice 5 (events + MetricsSink + CLI) — PR #58.** Events stream and
+  `MetricsSink::JobOutcome / RetryScheduled / DlqRouted` carry `name`.
+  `chasqui events` renders the column. `QueueEvents` shim subscribers
+  see `event.name` (Node) / `event.job_name` (Python). Prometheus / OTel
+  adapters add a `name` label.
+
+Bench guard passed (no diff in `chasquimq/` or `chasquimq-bench/` since
+the Phase 2 final beyond the new fields; see
+[`benchmarks/phase4-bench-guard.md`](../benchmarks/phase4-bench-guard.md)).
+The §7 open questions resolved in flight: 64 KiB cap on the name length;
+`Option<String>` at the engine surface, `""` at the shim boundary;
+repeatable jobs thread `RepeatableSpec.job_name` into `n` automatically;
+events stream and CLI carry `name` per slice 5; DLQ preserves `name` per
+slice 1.
