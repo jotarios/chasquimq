@@ -92,15 +92,10 @@ export class Queue<
 
     const isDelayed = !!(merged.delay && merged.delay > 0)
     const retryOverride = buildRetryOverride(merged)
-    // Engine guard rejects non-empty `AddOptions::name` on the delayed path
-    // (`add_in_with_options` / `add_at_with_options`) until `n` is wired
-    // through the delayed-ZSET → promote → XADD path; only thread `name`
-    // on the immediate XADD.
-    const nameForOpts = isDelayed ? undefined : (name as string)
     const nativeOpts = buildNativeAddOptions(
       merged.jobId,
       retryOverride,
-      nameForOpts,
+      name as string,
     )
 
     const buf = encodePayload(data)

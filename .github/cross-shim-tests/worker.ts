@@ -3,6 +3,10 @@
 // Mirrors `worker.py`: drains COUNT distinct jobs from QUEUE, asserts
 // each payload is `{ i: int in [0, COUNT), tag: EXPECT_TAG }`, and
 // exits 0 on full coverage within TIMEOUT_SECS, else 1.
+//
+// EXPECT_JOB_NAME — optional. When non-empty, the handler asserts
+// `job.name === EXPECT_JOB_NAME` so a regression that drops `name`
+// on either shim's wire path is caught here.
 
 import { Worker } from '../../chasquimq-node/dist/index.js'
 
@@ -10,6 +14,7 @@ async function main(): Promise<number> {
   const queueName = requireEnv('QUEUE')
   const count = Number(requireEnv('COUNT'))
   const expectTag = process.env.EXPECT_TAG ?? 'node'
+  const expectJobName = process.env.EXPECT_JOB_NAME ?? ''
   const timeoutSecs = Number(process.env.TIMEOUT_SECS ?? '30')
   const redisUrl = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379'
 
@@ -37,6 +42,11 @@ async function main(): Promise<number> {
       }
       if (tag !== expectTag) {
         errors.push(`tag mismatch: got ${JSON.stringify(tag)}, want '${expectTag}'`)
+        resolveDone()
+        return
+      }
+      if (expectJobName && job.name !== expectJobName) {
+        errors.push(`name mismatch: got '${job.name}', want '${expectJobName}'`)
         resolveDone()
         return
       }
@@ -92,7 +102,7 @@ async function main(): Promise<number> {
   }
 
   console.log(
-    `[node-worker] OK — drained ${count} distinct jobs with tag='${expectTag}'`,
+    `[node-worker] OK — drained ${count} distinct jobs with tag='${expectTag}' name='${expectJobName}'`,
   )
   return 0
 }

@@ -10,7 +10,10 @@ Env vars:
   COUNT       — required, number of jobs.
   MODE        — `immediate` (default) | `delayed`. `delayed` exercises the ZSET
                  wire format via a 100ms delay on every job.
-  TAG, JOB_NAME, REDIS_URL — optional.
+  JOB_NAME    — optional. When non-empty, jobs are enqueued with this name
+                 (paired with EXPECT_JOB_NAME on the worker side to assert
+                 name round-trips through the wire format).
+  TAG, REDIS_URL — optional.
 """
 
 from __future__ import annotations
@@ -30,7 +33,7 @@ DELAYED_MS = 100
 async def main() -> int:
     queue_name = os.environ["QUEUE"]
     count = int(os.environ["COUNT"])
-    job_name = os.environ.get("JOB_NAME", "cross-shim")
+    job_name = os.environ.get("JOB_NAME", "")
     tag = os.environ.get("TAG", "py")
     redis_url = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
     mode = os.environ.get("MODE", "immediate").lower()
@@ -51,7 +54,7 @@ async def main() -> int:
 
     print(
         f"[py-producer] enqueued {count} jobs to {queue_name!r} "
-        f"with tag={tag!r} mode={mode!r}"
+        f"with tag={tag!r} mode={mode!r} name={job_name!r}"
     )
     return 0
 

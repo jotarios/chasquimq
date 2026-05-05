@@ -6,9 +6,13 @@ Exits 0 on full distinct-id coverage within TIMEOUT_SECS, else 1.
 
 Env vars:
   QUEUE, COUNT — required.
-  MODE         — `immediate` (default) | `delayed`. `delayed` flips
-                  ``delayed_enabled=True`` so the embedded promoter
-                  drains the delayed ZSET into the stream.
+  MODE             — `immediate` (default) | `delayed`. `delayed` flips
+                      ``delayed_enabled=True`` so the embedded promoter
+                      drains the delayed ZSET into the stream.
+  EXPECT_JOB_NAME  — optional. When non-empty, the handler asserts
+                      ``job.name == EXPECT_JOB_NAME`` for every job, so
+                      a regression that drops `name` on either shim's
+                      wire path is caught here.
   EXPECT_TAG, TIMEOUT_SECS, REDIS_URL — optional.
 """
 
@@ -25,6 +29,7 @@ async def main() -> int:
     queue_name = os.environ["QUEUE"]
     count = int(os.environ["COUNT"])
     expect_tag = os.environ.get("EXPECT_TAG", "py")
+    expect_job_name = os.environ.get("EXPECT_JOB_NAME", "")
     timeout_secs = float(os.environ.get("TIMEOUT_SECS", "30"))
     redis_url = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
     mode = os.environ.get("MODE", "immediate").lower()
@@ -51,6 +56,12 @@ async def main() -> int:
             return
         if tag != expect_tag:
             errors.append(f"tag mismatch: got {tag!r}, want {expect_tag!r}")
+            done.set()
+            return
+        if expect_job_name and job.name != expect_job_name:
+            errors.append(
+                f"name mismatch: got {job.name!r}, want {expect_job_name!r}"
+            )
             done.set()
             return
         seen.add(i)
@@ -102,7 +113,7 @@ async def main() -> int:
 
     print(
         f"[py-worker] OK — drained {count} distinct jobs with "
-        f"tag={expect_tag!r} mode={mode!r}"
+        f"tag={expect_tag!r} mode={mode!r} name={expect_job_name!r}"
     )
     return 0
 
