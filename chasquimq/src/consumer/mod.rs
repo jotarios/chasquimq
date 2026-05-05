@@ -4,7 +4,7 @@ mod retry;
 mod worker;
 
 use crate::ack::{AckFlusherConfig, run_ack_flusher};
-use crate::config::{ConsumerConfig, PromoterConfig};
+use crate::config::{ConsumerConfig, PromoterConfig, SchedulerConfig};
 use crate::error::{HandlerError, Result};
 use crate::events::EventsWriter;
 use crate::job::Job;
@@ -13,6 +13,7 @@ use crate::redis::conn::connect;
 use crate::redis::group::ensure_group;
 use crate::redis::keys::{delayed_key, dlq_key, stream_key};
 use crate::redis::parse::StreamEntryId;
+use crate::scheduler::Scheduler;
 use dlq::{DlqRelocatorConfig, run_relocator};
 use reader::{ReadState, reader_loop};
 use retry::{RetryRelocatorConfig, run_retry_relocator};
@@ -134,6 +135,7 @@ where
         ));
 
         let promoter_handle = self.spawn_promoter(shutdown.clone(), events.clone());
+        let scheduler_handle = self.spawn_scheduler::<T>(shutdown.clone());
 
         let wiring = WorkerWiring {
             ack_tx: ack_tx.clone(),
@@ -170,6 +172,22 @@ where
             },
             None => Ok(()),
         };
+
+        // Scheduler errors do not propagate up: a transient EVAL miss or a
+        // misconfigured spec shouldn't bring down the consumer (which still
+        // has the reader / workers / DLQ pipeline running). Log and move
+        // on, mirroring how a panic in a single handler is contained.
+        if let Some(h) = scheduler_handle {
+            match h.await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    tracing::error!(error = %e, "embedded scheduler stopped with error");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "scheduler join error");
+                }
+            }
+        }
 
         drain_workers(
             workers,
@@ -225,5 +243,24 @@ where
         let promoter = Promoter::with_shared_events(self.redis_url.clone(), promoter_cfg, events);
         tracing::debug!(queue = %self.cfg.queue_name, "consumer spawning embedded promoter");
         Some(tokio::spawn(promoter.run(shutdown)))
+    }
+
+    fn spawn_scheduler<U>(
+        &self,
+        shutdown: CancellationToken,
+    ) -> Option<tokio::task::JoinHandle<Result<()>>>
+    where
+        U: Serialize + DeserializeOwned + Send + 'static,
+    {
+        if !self.cfg.run_scheduler {
+            return None;
+        }
+        let scheduler_cfg = SchedulerConfig {
+            queue_name: self.cfg.queue_name.clone(),
+            metrics: self.cfg.metrics.clone(),
+            ..self.cfg.scheduler.clone()
+        };
+        let scheduler = Scheduler::<U>::new(self.redis_url.clone(), scheduler_cfg);
+        Some(tokio::spawn(scheduler.run(shutdown)))
     }
 }

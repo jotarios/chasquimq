@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 import uuid
 from datetime import timedelta
@@ -642,49 +641,3 @@ def test_worker_default_concurrency_is_100() -> None:
 
     sig = inspect.signature(Worker.__init__)
     assert sig.parameters["concurrency"].default == 100
-
-
-@pytest.mark.asyncio
-async def test_worker_scheduler_error_is_logged(
-    redis_url: str,
-    queue_name: str,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    async def handler(job: Job) -> None:
-        return None
-
-    worker = Worker(
-        queue_name,
-        handler,
-        redis_url=redis_url,
-        concurrency=1,
-        read_block_ms=100,
-        delayed_enabled=False,
-        run_scheduler=False,
-    )
-
-    class _BoomScheduler:
-        async def run(self) -> None:
-            raise RuntimeError("redis unreachable on startup")
-
-        def shutdown(self) -> None:
-            pass
-
-    worker._scheduler = _BoomScheduler()  # type: ignore[assignment]
-
-    caplog.set_level(logging.WARNING, logger="chasquimq.worker")
-
-    run_task = asyncio.create_task(worker.run())
-    await asyncio.sleep(0.2)
-    await worker.close()
-    await asyncio.wait_for(run_task, timeout=5.0)
-
-    matching = [
-        r
-        for r in caplog.records
-        if "scheduler stopped with error" in r.getMessage()
-        and "redis unreachable on startup" in r.getMessage()
-    ]
-    assert matching, (
-        f"expected scheduler-error warning; saw: {[r.getMessage() for r in caplog.records]}"
-    )

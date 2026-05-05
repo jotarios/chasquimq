@@ -222,6 +222,11 @@ fn consumer_cfg(queue: &str, consumer_id: &str) -> ConsumerConfig {
         delayed_lock_ttl_secs: 5,
         delayed_enabled: true,
         concurrency: 8,
+        // These tests pair a consumer with a *standalone* scheduler and
+        // measure the standalone scheduler's behavior; disable the
+        // newly auto-embedded scheduler so it doesn't compete for the
+        // leader-election lock with a slower default tick.
+        run_scheduler: false,
         ..Default::default()
     }
 }
@@ -1048,6 +1053,88 @@ async fn catchup_no_op_when_on_time() {
     assert_eq!(
         n, 1,
         "on-time path under FireAll must still fire exactly limit=1 job; saw {n}"
+    );
+
+    let _: () = admin.quit().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires REDIS_URL"]
+async fn consumer_auto_embeds_scheduler() {
+    // Pins the slice's load-bearing assertion: with `run_scheduler = true`
+    // (the new default), `Consumer::run` fires repeatable jobs on its own
+    // — no separately spawned `Scheduler`. The shim code that used to
+    // hand-spawn `Scheduler` alongside the consumer can rely on this.
+    let admin = admin().await;
+    let queue = "repeat_consumer_embeds";
+    flush_all(&admin, queue).await;
+
+    let producer: Producer<Sample> = Producer::connect(&redis_url(), producer_cfg(queue))
+        .await
+        .expect("connect producer");
+
+    let counter = Arc::new(AtomicUsize::new(0));
+    let shutdown = CancellationToken::new();
+
+    // Build a consumer config that explicitly opts into the embedded
+    // scheduler with a tight tick so the test observes ≥3 fires within a
+    // short window.
+    let mut cfg = consumer_cfg(queue, "c-embed");
+    cfg.run_scheduler = true;
+    cfg.scheduler = SchedulerConfig {
+        queue_name: queue.to_string(),
+        tick_interval_ms: 50,
+        batch: 64,
+        max_stream_len: 100_000,
+        lock_ttl_secs: 5,
+        holder_id: "s-embed".to_string(),
+        ..Default::default()
+    };
+    let consumer: Consumer<Sample> = Consumer::new(redis_url(), cfg);
+    let counter_clone = counter.clone();
+    let shutdown_clone = shutdown.clone();
+    let h_consumer = tokio::spawn(async move {
+        consumer
+            .run(
+                move |_job| {
+                    let counter = counter_clone.clone();
+                    async move {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    }
+                },
+                shutdown_clone,
+            )
+            .await
+    });
+
+    producer
+        .upsert_repeatable(RepeatableSpec {
+            key: String::new(),
+            job_name: "tick".into(),
+            pattern: RepeatPattern::Every { interval_ms: 100 },
+            payload: Sample { n: 0 },
+            limit: None,
+            start_after_ms: None,
+            end_before_ms: None,
+            missed_fires: Default::default(),
+        })
+        .await
+        .expect("upsert");
+
+    wait_until(Duration::from_millis(2000), || {
+        let counter = counter.clone();
+        async move { counter.load(Ordering::SeqCst) >= 3 }
+    })
+    .await;
+
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), h_consumer).await;
+
+    assert!(
+        counter.load(Ordering::SeqCst) >= 3,
+        "embedded scheduler must fire repeatable specs; saw {} fires",
+        counter.load(Ordering::SeqCst)
     );
 
     let _: () = admin.quit().await.unwrap();

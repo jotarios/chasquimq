@@ -46,6 +46,8 @@ pub struct ConsumerOpts {
     pub max_payload_bytes: Option<u32>,
     pub retry: Option<RetryOpts>,
     pub delayed_enabled: Option<bool>,
+    pub run_scheduler: Option<bool>,
+    pub scheduler_tick_ms: Option<i64>,
 }
 
 #[napi(object)]
@@ -217,6 +219,14 @@ fn build_consumer_config(opts: Option<ConsumerOpts>) -> ConsumerConfig {
         }
         if let Some(v) = o.delayed_enabled {
             cfg.delayed_enabled = v;
+        }
+        if let Some(v) = o.run_scheduler {
+            cfg.run_scheduler = v;
+        }
+        if let Some(v) = o.scheduler_tick_ms {
+            if v >= 0 {
+                cfg.scheduler.tick_interval_ms = v as u64;
+            }
         }
         if let Some(r) = o.retry {
             let mut rc = RetryConfig::default();

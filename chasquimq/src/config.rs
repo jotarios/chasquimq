@@ -70,6 +70,23 @@ pub struct ConsumerConfig {
     /// approximate (the `~`) so Redis does it cheaply; expect actual length
     /// to oscillate up to a few hundred entries above the cap.
     pub events_max_stream_len: u64,
+    /// Whether `Consumer::run` auto-spawns an embedded [`crate::Scheduler`]
+    /// task alongside the reader / promoter / relocators. Mirrors
+    /// `delayed_enabled` for the [`crate::Promoter`]: a worker process that
+    /// loads the consumer also gets repeatable / cron firing for free,
+    /// without the user managing a second task. Default `true`. Set to
+    /// `false` for deployments that run a separate scheduler process —
+    /// the standalone [`crate::Scheduler`] API is unaffected. Multiple
+    /// in-process schedulers cooperate via the engine's existing leader
+    /// election (`SET NX EX` on `{chasqui:<queue>}:scheduler:lock`).
+    pub run_scheduler: bool,
+    /// Configuration for the embedded scheduler when `run_scheduler` is
+    /// `true`. The `queue_name` field is overridden from
+    /// `ConsumerConfig::queue_name` at spawn time; everything else
+    /// (`tick_interval_ms`, `batch`, `max_stream_len`, `lock_ttl_secs`,
+    /// `holder_id`, `metrics`) is forwarded as-is. Defaults to
+    /// [`SchedulerConfig::default`].
+    pub scheduler: SchedulerConfig,
     /// Forwarded to the inline promoter the consumer spawns when
     /// `delayed_enabled` is true. Defaults to [`crate::metrics::NoopSink`].
     pub metrics: std::sync::Arc<dyn crate::metrics::MetricsSink>,
@@ -101,6 +118,8 @@ impl std::fmt::Debug for ConsumerConfig {
             .field("delayed_lock_ttl_secs", &self.delayed_lock_ttl_secs)
             .field("events_enabled", &self.events_enabled)
             .field("events_max_stream_len", &self.events_max_stream_len)
+            .field("run_scheduler", &self.run_scheduler)
+            .field("scheduler", &self.scheduler)
             .field("metrics", &"<dyn MetricsSink>")
             .finish()
     }
@@ -132,6 +151,8 @@ impl Default for ConsumerConfig {
             delayed_lock_ttl_secs: 5,
             events_enabled: true,
             events_max_stream_len: 100_000,
+            run_scheduler: true,
+            scheduler: SchedulerConfig::default(),
             metrics: crate::metrics::noop_sink(),
         }
     }
