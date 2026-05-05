@@ -109,13 +109,7 @@ class Queue:
 
         delay_ms = _coerce_delay_ms(delay)
         absolute_ms = _coerce_absolute_ms(delay)
-        is_delayed = absolute_ms is not None or (delay_ms is not None and delay_ms > 0)
-        # Engine guard rejects non-empty `AddOptions::name` on `add_in_with_options`
-        # / `add_at_with_options` until the slice that wires `n` through the
-        # delayed path lands; pass the name only on the immediate XADD.
-        opts = _build_add_options(
-            job_id, attempts, backoff, name=None if is_delayed else name
-        )
+        opts = _build_add_options(job_id, attempts, backoff, name=name)
         payload = encode_payload(data)
         producer = self._get_producer()
 

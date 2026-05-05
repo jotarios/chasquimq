@@ -9,7 +9,10 @@
 //   COUNT       — required, number of jobs.
 //   MODE        — 'immediate' (default) | 'delayed'. 'delayed' adds a 100ms
 //                  delay per job to exercise the ZSET wire format.
-//   TAG, JOB_NAME, REDIS_URL — optional.
+//   JOB_NAME    — optional. When non-empty, jobs are enqueued with this name
+//                  (paired with EXPECT_JOB_NAME on the worker side to assert
+//                  name round-trips through the wire format).
+//   TAG, REDIS_URL — optional.
 
 import { Queue } from '../../chasquimq-node/dist/index.js'
 
@@ -18,7 +21,7 @@ const DELAYED_MS = 100
 async function main(): Promise<number> {
   const queueName = requireEnv('QUEUE')
   const count = Number(requireEnv('COUNT'))
-  const jobName = process.env.JOB_NAME ?? 'cross-shim'
+  const jobName = process.env.JOB_NAME ?? ''
   const tag = process.env.TAG ?? 'node'
   const redisUrl = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379'
   const mode = (process.env.MODE ?? 'immediate').toLowerCase()
@@ -43,7 +46,7 @@ async function main(): Promise<number> {
 
   console.log(
     `[node-producer] enqueued ${count} jobs to '${queueName}' ` +
-      `with tag='${tag}' mode='${mode}'`,
+      `with tag='${tag}' mode='${mode}' name='${jobName}'`,
   )
   return 0
 }
