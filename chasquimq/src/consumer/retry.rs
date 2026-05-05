@@ -45,6 +45,11 @@ pub(crate) struct RetryRelocate {
     pub attempt: u32,
     /// Backoff that was applied at enqueue time. Carried for the metric.
     pub backoff_ms: u64,
+    /// Dispatch name plumbed from the worker's already-decoded `Job<T>`.
+    /// Carried so the `retry-scheduled` events-stream emit and the
+    /// `RetryScheduled` metric tag can surface job kind without re-decoding
+    /// `job_bytes`. Empty for jobs that had no `n` field on the wire.
+    pub name: String,
 }
 
 pub(crate) struct RetryRelocatorConfig {
@@ -55,6 +60,9 @@ pub(crate) struct RetryRelocatorConfig {
     pub events: EventsWriter,
 }
 
+// crate-internal helper: every field below corresponds to a `RetryRelocate`
+// member plumbed verbatim, so a struct-arg refactor would be cosmetic only.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn enqueue(
     tx: &mpsc::Sender<RetryRelocate>,
     job_id: String,
@@ -63,6 +71,7 @@ pub(crate) async fn enqueue(
     run_at_ms: i64,
     attempt: u32,
     backoff_ms: u64,
+    name: String,
 ) {
     if tx
         .send(RetryRelocate {
@@ -72,6 +81,7 @@ pub(crate) async fn enqueue(
             run_at_ms,
             attempt,
             backoff_ms,
+            name,
         })
         .await
         .is_err()
@@ -98,18 +108,20 @@ pub(crate) async fn run_retry_relocator(
                 let event = RetryScheduled {
                     attempt: relocate.attempt,
                     backoff_ms: relocate.backoff_ms,
+                    name: relocate.name.clone(),
                 };
                 let sink = &*cfg.metrics;
-                metrics::dispatch("retry_scheduled", || sink.retry_scheduled(event));
+                metrics::dispatch("retry_scheduled", move || sink.retry_scheduled(event));
                 // Mirror the MetricsSink gating: only emit on the actual
-                // reschedule, never on a lost XACKDEL race. The job id is
-                // plumbed in on the `RetryRelocate` so the relocator hot
-                // path doesn't have to msgpack-decode `job_bytes` just to
-                // read the id field.
+                // reschedule, never on a lost XACKDEL race. The job id and
+                // name are plumbed in on the `RetryRelocate` so the
+                // relocator hot path doesn't have to msgpack-decode
+                // `job_bytes` just to read those fields.
                 if cfg.events.is_enabled() {
                     cfg.events
                         .emit_retry_scheduled(
                             &relocate.job_id,
+                            &relocate.name,
                             relocate.attempt,
                             relocate.backoff_ms,
                         )
@@ -562,6 +574,7 @@ mod tests {
             1_700_000_000_500,
             3,
             500,
+            "send-email".to_string(),
         )
         .await;
         let received = rx.recv().await.expect("relocate sent");
@@ -570,5 +583,6 @@ mod tests {
         assert_eq!(received.run_at_ms, 1_700_000_000_500);
         assert_eq!(received.attempt, 3);
         assert_eq!(received.backoff_ms, 500);
+        assert_eq!(received.name, "send-email");
     }
 }

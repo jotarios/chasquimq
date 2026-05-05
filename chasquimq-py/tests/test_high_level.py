@@ -433,6 +433,78 @@ async def test_queue_events_stream_observes_completed_event(
 
 
 @pytest.mark.asyncio
+async def test_queue_events_surface_dispatch_name_field(
+    redis_url: str, queue_name: str, redis_client
+) -> None:
+    """Slice 5 of name-on-the-wire: ``QueueEvent.job_name`` carries the
+    engine ``n`` field. We XADD into the events stream directly so the
+    test pins the wire-format contract independently of the engine
+    integration path (the high-level ``Queue.add`` still drops ``name``
+    in v1; that's slice 2's scope).
+    """
+    stream_key = f"{{chasqui:{queue_name}}}:events"
+    events = QueueEvents(
+        queue_name, redis_url=redis_url, block_ms=500, last_event_id="0"
+    )
+
+    seen: list[tuple[str, str | None, str]] = []
+
+    async def collect() -> None:
+        async for ev in events:
+            seen.append((ev.name, ev.job_id, ev.job_name))
+            if len(seen) >= 3:
+                return
+
+    collect_task = asyncio.create_task(collect())
+    try:
+        # Give the subscriber a beat to enter its first XREAD-BLOCK.
+        await asyncio.sleep(0.1)
+
+        ts = "1700000000000"
+        await redis_client.xadd(
+            stream_key,
+            {
+                "e": "active",
+                "id": "job-named-1",
+                "ts": ts,
+                "n": "send-email",
+                "attempt": "1",
+            },
+        )
+        await redis_client.xadd(
+            stream_key,
+            {
+                "e": "completed",
+                "id": "job-named-1",
+                "ts": ts,
+                "n": "send-email",
+                "attempt": "1",
+                "duration_us": "500",
+            },
+        )
+        # No `n` field on the wire → empty string on the subscriber side
+        # (omit-empty rule mirrored from the engine).
+        await redis_client.xadd(
+            stream_key,
+            {
+                "e": "completed",
+                "id": "job-anonymous-1",
+                "ts": ts,
+                "attempt": "1",
+                "duration_us": "500",
+            },
+        )
+
+        await asyncio.wait_for(collect_task, timeout=10.0)
+    finally:
+        await events.close()
+
+    assert ("active", "job-named-1", "send-email") in seen
+    assert ("completed", "job-named-1", "send-email") in seen
+    assert ("completed", "job-anonymous-1", "") in seen
+
+
+@pytest.mark.asyncio
 async def test_worker_runs_embedded_scheduler_for_repeatable(
     redis_url: str, queue_name: str
 ) -> None:

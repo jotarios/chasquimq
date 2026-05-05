@@ -105,7 +105,16 @@ pub struct ReaderBatch {
 }
 
 /// Outcome of a single handler invocation.
-#[derive(Debug, Clone, Copy)]
+///
+/// `name` carries the job's dispatch name (the `n` field on the source
+/// stream entry). Adapters typically render this as a `name="..."`
+/// Prometheus / OTel label so operators can histogram handler duration by
+/// job kind without msgpack-decoding payload bytes — this is the primary
+/// observability payoff of putting `name` at the Streams framing layer
+/// (Option B in `docs/name-on-wire-design.md`). Empty for jobs without a
+/// name on the wire; adapters should render an empty label rather than
+/// dropping the metric.
+#[derive(Debug, Clone)]
 pub struct JobOutcome {
     pub kind: JobOutcomeKind,
     /// 1-indexed attempt number that just ran. The first invocation is `1`,
@@ -122,6 +131,9 @@ pub struct JobOutcome {
     /// converting to a Prometheus histogram should render as seconds
     /// (`microseconds * 1e-6`) to match Prometheus convention.
     pub handler_duration_us: u64,
+    /// Dispatch name from the source stream entry's `n` field. Empty for
+    /// jobs that arrived without a name. See struct-level docs.
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,7 +148,7 @@ pub enum JobOutcomeKind {
 /// `RETRY_RESCHEDULE_SCRIPT` returned `1`). When the script returns `0`
 /// (XACKDEL race lost — entry was already removed by a concurrent path),
 /// no event fires.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct RetryScheduled {
     /// 1-indexed attempt number the rescheduled job will run as. Matches
     /// the `attempt` operators see on the eventual [`JobOutcome`] for the
@@ -147,11 +159,14 @@ pub struct RetryScheduled {
     /// Useful as a histogram to confirm exponential backoff is doing
     /// what `RetryConfig` says it should.
     pub backoff_ms: u64,
+    /// Dispatch name from the source stream entry's `n` field. See
+    /// [`JobOutcome::name`] for the rationale on why this is on the metric.
+    pub name: String,
 }
 
 /// Emitted after the DLQ relocator has atomically moved an entry to the
 /// DLQ stream and acked it from the main group.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct DlqRouted {
     pub reason: DlqReason,
     /// For worker-side routes (handler exhausted retries), the attempt
@@ -159,6 +174,10 @@ pub struct DlqRouted {
     /// decode-fail / retries-exhausted-on-arrival), `0` for the first
     /// three, and the carried attempt count for the last.
     pub attempt: u32,
+    /// Dispatch name from the source stream entry's `n` field. Empty for
+    /// reader-side routes where the entry was malformed or had no `n` to
+    /// begin with. See [`JobOutcome::name`] for the rationale.
+    pub name: String,
 }
 
 /// Why an entry ended up in the DLQ. Lives in the metrics module because it

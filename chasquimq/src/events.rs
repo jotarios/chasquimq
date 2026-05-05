@@ -26,21 +26,27 @@
 //! # Schema (event names and fields)
 //!
 //! All events carry `e`, `id` (UTF-8 strings), and `ts` (unix-ms decimal).
-//! Event-specific fields:
+//! Per-job events also carry `n` (the dispatch name; empty → field omitted),
+//! same convention as the main stream's `n` field. Event-specific fields:
 //!
 //! | event              | fields                                     |
 //! |--------------------|--------------------------------------------|
-//! | `waiting`          | (none)                                     |
-//! | `active`           | `attempt`                                  |
-//! | `completed`        | `attempt`, `duration_us`                   |
-//! | `failed`           | `attempt`, `reason`, `duration_us` (opt)   |
-//! | `retry-scheduled`  | `attempt` (next attempt), `backoff_ms`     |
-//! | `delayed`          | `delay_ms`                                 |
-//! | `dlq`              | `attempt`, `reason`                        |
-//! | `drained`          | (no `id` — emitted with `id=""`)           |
+//! | `waiting`          | `n` (opt)                                  |
+//! | `active`           | `attempt`, `n` (opt)                       |
+//! | `completed`        | `attempt`, `duration_us`, `n` (opt)        |
+//! | `failed`           | `attempt`, `reason`, `duration_us` (opt), `n` (opt) |
+//! | `retry-scheduled`  | `attempt` (next attempt), `backoff_ms`, `n` (opt) |
+//! | `delayed`          | `delay_ms`, `n` (opt)                      |
+//! | `dlq`              | `attempt`, `reason`, `n` (opt)             |
+//! | `drained`          | (no `id`/`n` — emitted with `id=""`)       |
 //!
 //! `attempt` is 1-indexed (matches `JobOutcome.attempt`). Numeric values are
-//! always decimal strings.
+//! always decimal strings. The `n` field is the slice-5 payoff: subscribers
+//! see job kind without msgpack-decoding payload bytes (the architectural
+//! justification for picking Option B over Option D in
+//! `docs/name-on-wire-design.md`). Empty name → `n` is omitted entirely
+//! (same byte-saving rule as the main stream, see
+//! [`crate::redis::commands::xadd_args`]).
 
 use crate::job::now_ms;
 use crate::redis::keys::events_key;
@@ -102,23 +108,31 @@ impl EventsWriter {
 
     /// Emit a `waiting` event (a delayed job was just promoted into the
     /// stream and is now eligible for `XREADGROUP`).
-    pub(crate) async fn emit_waiting(&self, id: &str) {
-        self.xadd("waiting", id, &[]).await;
+    pub(crate) async fn emit_waiting(&self, id: &str, name: &str) {
+        self.xadd("waiting", id, name, &[]).await;
     }
 
     /// Emit an `active` event (handler is about to run).
-    pub(crate) async fn emit_active(&self, id: &str, attempt: u32) {
+    pub(crate) async fn emit_active(&self, id: &str, name: &str, attempt: u32) {
         let attempt_s = attempt.to_string();
-        self.xadd("active", id, &[("attempt", &attempt_s)]).await;
+        self.xadd("active", id, name, &[("attempt", &attempt_s)])
+            .await;
     }
 
     /// Emit a `completed` event (handler returned `Ok`).
-    pub(crate) async fn emit_completed(&self, id: &str, attempt: u32, duration_us: u64) {
+    pub(crate) async fn emit_completed(
+        &self,
+        id: &str,
+        name: &str,
+        attempt: u32,
+        duration_us: u64,
+    ) {
         let attempt_s = attempt.to_string();
         let duration_s = duration_us.to_string();
         self.xadd(
             "completed",
             id,
+            name,
             &[("attempt", &attempt_s), ("duration_us", &duration_s)],
         )
         .await;
@@ -131,6 +145,7 @@ impl EventsWriter {
     pub(crate) async fn emit_failed(
         &self,
         id: &str,
+        name: &str,
         attempt: u32,
         reason: &str,
         duration_us: Option<u64>,
@@ -142,6 +157,7 @@ impl EventsWriter {
                 self.xadd(
                     "failed",
                     id,
+                    name,
                     &[
                         ("attempt", &attempt_s),
                         ("reason", reason),
@@ -151,8 +167,13 @@ impl EventsWriter {
                 .await;
             }
             None => {
-                self.xadd("failed", id, &[("attempt", &attempt_s), ("reason", reason)])
-                    .await;
+                self.xadd(
+                    "failed",
+                    id,
+                    name,
+                    &[("attempt", &attempt_s), ("reason", reason)],
+                )
+                .await;
             }
         }
     }
@@ -160,12 +181,19 @@ impl EventsWriter {
     /// Emit a `retry-scheduled` event (the retry relocator atomically
     /// rescheduled this job; `attempt` is the run number the retry will
     /// execute as).
-    pub(crate) async fn emit_retry_scheduled(&self, id: &str, attempt: u32, backoff_ms: u64) {
+    pub(crate) async fn emit_retry_scheduled(
+        &self,
+        id: &str,
+        name: &str,
+        attempt: u32,
+        backoff_ms: u64,
+    ) {
         let attempt_s = attempt.to_string();
         let backoff_s = backoff_ms.to_string();
         self.xadd(
             "retry-scheduled",
             id,
+            name,
             &[("attempt", &attempt_s), ("backoff_ms", &backoff_s)],
         )
         .await;
@@ -177,27 +205,33 @@ impl EventsWriter {
     /// so a future caller (or a Node binding that wants to mirror BullMQ's
     /// `delayed` event) can opt in without re-plumbing the writer.
     #[allow(dead_code)]
-    pub(crate) async fn emit_delayed(&self, id: &str, delay_ms: u64) {
+    pub(crate) async fn emit_delayed(&self, id: &str, name: &str, delay_ms: u64) {
         let delay_s = delay_ms.to_string();
-        self.xadd("delayed", id, &[("delay_ms", &delay_s)]).await;
+        self.xadd("delayed", id, name, &[("delay_ms", &delay_s)])
+            .await;
     }
 
     /// Emit a `dlq` event after a successful DLQ relocate.
-    pub(crate) async fn emit_dlq(&self, id: &str, reason: &str, attempt: u32) {
+    pub(crate) async fn emit_dlq(&self, id: &str, name: &str, reason: &str, attempt: u32) {
         let attempt_s = attempt.to_string();
-        self.xadd("dlq", id, &[("attempt", &attempt_s), ("reason", reason)])
-            .await;
+        self.xadd(
+            "dlq",
+            id,
+            name,
+            &[("attempt", &attempt_s), ("reason", reason)],
+        )
+        .await;
     }
 
     /// Emit a `drained` event (the consumer just observed an empty
     /// `XREADGROUP`). Caller should rate-limit so this only fires on the
     /// full -> empty transition, not every empty poll.
     pub(crate) async fn emit_drained(&self) {
-        // No job id — use empty string so the wire format stays uniform.
-        self.xadd("drained", "", &[]).await;
+        // No job id and no name — drained is queue-scoped, not per-job.
+        self.xadd("drained", "", "", &[]).await;
     }
 
-    async fn xadd(&self, event_name: &str, id: &str, extra: &[(&str, &str)]) {
+    async fn xadd(&self, event_name: &str, id: &str, name: &str, extra: &[(&str, &str)]) {
         let (client, stream_key, max_stream_len) = match &self.inner {
             Inner::Disabled => return,
             Inner::Enabled {
@@ -209,8 +243,9 @@ impl EventsWriter {
 
         let now = now_ms();
         // Capacity: stream key + MAXLEN ~ <cap> + * + e/id/ts (3 pairs = 6
-        // values) + extras (2 per pair). Slight over-alloc is fine.
-        let mut args: Vec<Value> = Vec::with_capacity(8 + 6 + extra.len() * 2);
+        // values) + optional n (2 values) + extras (2 per pair). Slight
+        // over-alloc is fine.
+        let mut args: Vec<Value> = Vec::with_capacity(8 + 6 + 2 + extra.len() * 2);
         args.push(Value::from(stream_key.as_ref()));
         args.push(Value::from("MAXLEN"));
         args.push(Value::from("~"));
@@ -222,6 +257,12 @@ impl EventsWriter {
         args.push(Value::from(id));
         args.push(Value::from("ts"));
         args.push(Value::from(now.to_string()));
+        // Empty name: omit the field entirely (zero bytes on the wire). Same
+        // convention as the main stream's `n`.
+        if !name.is_empty() {
+            args.push(Value::from("n"));
+            args.push(Value::from(name));
+        }
         for (k, v) in extra {
             args.push(Value::from(*k));
             args.push(Value::from(*v));

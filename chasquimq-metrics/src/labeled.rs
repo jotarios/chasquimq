@@ -88,19 +88,30 @@ impl<S: MetricsSink> MetricsSink for QueueLabeled<S> {
         // Render as seconds (Prometheus convention) so adapter buckets line up
         // with standard handler-duration dashboards. Engine event keeps micros
         // for honest precision; the conversion happens here at the adapter
-        // boundary.
-        histogram!("chasquimq_handler_duration_seconds", "queue" => self.queue.clone())
-            .record(outcome.handler_duration_us as f64 / 1_000_000.0);
+        // boundary. `name` is added as a label so operators can slice metrics
+        // by job kind without msgpack-decoding payload bytes — the
+        // observability payoff of slice 5.
+        histogram!(
+            "chasquimq_handler_duration_seconds",
+            "queue" => self.queue.clone(),
+            "name" => outcome.name.clone(),
+        )
+        .record(outcome.handler_duration_us as f64 / 1_000_000.0);
         match outcome.kind {
             JobOutcomeKind::Ok => {
-                counter!("chasquimq_jobs_completed_total", "queue" => self.queue.clone())
-                    .increment(1);
+                counter!(
+                    "chasquimq_jobs_completed_total",
+                    "queue" => self.queue.clone(),
+                    "name" => outcome.name.clone(),
+                )
+                .increment(1);
             }
             JobOutcomeKind::Err => {
                 counter!(
                     "chasquimq_jobs_failed_total",
                     "queue" => self.queue.clone(),
                     "kind" => "error",
+                    "name" => outcome.name.clone(),
                 )
                 .increment(1);
             }
@@ -109,6 +120,7 @@ impl<S: MetricsSink> MetricsSink for QueueLabeled<S> {
                     "chasquimq_jobs_failed_total",
                     "queue" => self.queue.clone(),
                     "kind" => "panic",
+                    "name" => outcome.name.clone(),
                 )
                 .increment(1);
             }
@@ -117,12 +129,21 @@ impl<S: MetricsSink> MetricsSink for QueueLabeled<S> {
     }
 
     fn retry_scheduled(&self, retry: RetryScheduled) {
-        counter!("chasquimq_retries_scheduled_total", "queue" => self.queue.clone()).increment(1);
+        counter!(
+            "chasquimq_retries_scheduled_total",
+            "queue" => self.queue.clone(),
+            "name" => retry.name.clone(),
+        )
+        .increment(1);
         // Render as seconds (Prometheus convention), matching
         // `chasquimq_handler_duration_seconds`. Engine event keeps ms because
         // it's what `RetryConfig` is configured in.
-        histogram!("chasquimq_retry_backoff_seconds", "queue" => self.queue.clone())
-            .record(retry.backoff_ms as f64 / 1_000.0);
+        histogram!(
+            "chasquimq_retry_backoff_seconds",
+            "queue" => self.queue.clone(),
+            "name" => retry.name.clone(),
+        )
+        .record(retry.backoff_ms as f64 / 1_000.0);
         self.inner.retry_scheduled(retry);
     }
 
@@ -131,6 +152,7 @@ impl<S: MetricsSink> MetricsSink for QueueLabeled<S> {
             "chasquimq_dlq_routed_total",
             "queue" => self.queue.clone(),
             "reason" => dlq.reason.as_str(),
+            "name" => dlq.name.clone(),
         )
         .increment(1);
         self.inner.dlq_routed(dlq);

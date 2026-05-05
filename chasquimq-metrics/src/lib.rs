@@ -44,15 +44,19 @@
 //! |---|---|---|
 //! | `chasquimq_consumer_batch_size` | histogram | Entries returned by a non-empty `XREADGROUP` |
 //! | `chasquimq_consumer_reclaimed_total` | counter | Entries reclaimed via `CLAIM` (delivery_count > 1) |
-//! | `chasquimq_jobs_completed_total` | counter | Handler invocations that returned `Ok` |
-//! | `chasquimq_jobs_failed_total{kind=...}` | counter | Handler invocations that returned `Err` (`error`) or panicked (`panic`) |
-//! | `chasquimq_handler_duration_seconds` | histogram | Wall-clock per handler invocation (Prometheus convention) |
-//! | `chasquimq_retries_scheduled_total` | counter | Retries that were actually rescheduled (script gate fired) |
+//! | `chasquimq_jobs_completed_total{name=...}` | counter | Handler invocations that returned `Ok` |
+//! | `chasquimq_jobs_failed_total{kind=...,name=...}` | counter | Handler invocations that returned `Err` (`error`) or panicked (`panic`) |
+//! | `chasquimq_handler_duration_seconds{name=...}` | histogram | Wall-clock per handler invocation (Prometheus convention) |
+//! | `chasquimq_retries_scheduled_total{name=...}` | counter | Retries that were actually rescheduled (script gate fired) |
 //! | `chasquimq_retry_backoff_seconds` | histogram | Backoff applied per retry (Prometheus convention) |
-//! | `chasquimq_dlq_routed_total{reason=...}` | counter | DLQ relocations by reason (`retries_exhausted` / `decode_failed` / `malformed` / `oversize_payload`) |
+//! | `chasquimq_dlq_routed_total{reason=...,name=...}` | counter | DLQ relocations by reason (`retries_exhausted` / `decode_failed` / `malformed` / `oversize_payload`) |
 //!
-//! Histogram bucket configuration (e.g. for `chasquimq_handler_duration_seconds`)
-//! is recorder-side: tune via your Prometheus / OTel exporter, not here.
+//! Per-job metrics carry a `name` label sourced from the source stream
+//! entry's `n` field (slice 5 of name-on-the-wire). Empty name renders as
+//! an empty label rather than dropping the metric — pin one expectation in
+//! the recorder rather than two. Histogram bucket configuration (e.g. for
+//! `chasquimq_handler_duration_seconds`) is recorder-side: tune via your
+//! Prometheus / OTel exporter, not here.
 //!
 //! # Adding labels
 //!

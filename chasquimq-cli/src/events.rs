@@ -120,15 +120,19 @@ fn value_to_string(v: &Value) -> Option<String> {
 fn print_entry(stream_id: &str, fields: &BTreeMap<String, String>) {
     let event_name = fields.get("e").map(String::as_str).unwrap_or("(unknown)");
     let job_id = fields.get("id").cloned().unwrap_or_default();
+    let dispatch_name = fields.get("n").cloned().unwrap_or_default();
     let ts_iso = fields
         .get("ts")
         .and_then(|s| s.parse::<i64>().ok())
         .map(format_iso8601)
         .unwrap_or_else(|| "-".to_string());
 
+    // Promote `name` (engine `n` field) to a fixed column right after
+    // `id` so the per-event job kind is visually obvious — slice 5 of
+    // name-on-the-wire makes this readable without msgpack-decoding.
     let mut extras: Vec<String> = Vec::new();
     for (k, v) in fields {
-        if matches!(k.as_str(), "e" | "id" | "ts") {
+        if matches!(k.as_str(), "e" | "id" | "ts" | "n") {
             continue;
         }
         extras.push(format!("{k}={}", truncate(v)));
@@ -138,12 +142,17 @@ fn print_entry(stream_id: &str, fields: &BTreeMap<String, String>) {
     } else {
         truncate(&job_id)
     };
+    let name_cell = if dispatch_name.is_empty() {
+        "-".to_string()
+    } else {
+        truncate(&dispatch_name)
+    };
     let suffix = if extras.is_empty() {
         String::new()
     } else {
         format!(" {}", extras.join(" "))
     };
-    println!("{ts_iso} {stream_id} {event_name} id={job_id_cell}{suffix}");
+    println!("{ts_iso} {stream_id} {event_name} id={job_id_cell} name={name_cell}{suffix}");
 }
 
 fn format_iso8601(unix_ms: i64) -> String {
