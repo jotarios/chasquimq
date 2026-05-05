@@ -1,4 +1,4 @@
-//! `NativeConsumer` — N-API wrapper over `chasquimq::Consumer<RawBytes>`.
+//! `Consumer` — N-API wrapper over `chasquimq::Consumer<RawBytes>`.
 //!
 //! The hard part is the JS handler bridge: each engine worker, when it
 //! pulls a `Job<RawBytes>` off the stream, hands it across the libuv
@@ -6,7 +6,7 @@
 //! `Promise<void>`, and translates resolution/rejection back into the
 //! engine's `Result<(), HandlerError>` shape.
 //!
-//! Shutdown is signal-based: `NativeConsumer::shutdown` cancels a
+//! Shutdown is signal-based: `Consumer::shutdown` cancels a
 //! `CancellationToken` shared with the engine. `run` resolves once the
 //! engine's drain (workers, ack flusher, DLQ relocator, retry relocator,
 //! optional in-process promoter) all settle.
@@ -14,8 +14,8 @@
 use crate::payload::RawBytes;
 use crate::producer::map_engine_err;
 use chasquimq::config::{ConsumerConfig, RetryConfig};
-use chasquimq::consumer::Consumer;
-use chasquimq::{HandlerError, Job};
+use chasquimq::consumer::Consumer as EngineConsumer;
+use chasquimq::{HandlerError, Job as EngineJob};
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ErrorStrategy, ThreadsafeFunction, UnknownReturnValue};
 use napi_derive::napi;
@@ -23,7 +23,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 #[napi(object)]
-pub struct NativeRetryOpts {
+pub struct RetryOpts {
     pub initial_backoff_ms: Option<i64>,
     pub max_backoff_ms: Option<i64>,
     pub multiplier: Option<f64>,
@@ -31,7 +31,7 @@ pub struct NativeRetryOpts {
 }
 
 #[napi(object)]
-pub struct NativeConsumerOpts {
+pub struct ConsumerOpts {
     pub queue_name: Option<String>,
     pub group: Option<String>,
     pub consumer_id: Option<String>,
@@ -44,12 +44,12 @@ pub struct NativeConsumerOpts {
     pub ack_idle_ms: Option<i64>,
     pub shutdown_deadline_secs: Option<i64>,
     pub max_payload_bytes: Option<u32>,
-    pub retry: Option<NativeRetryOpts>,
+    pub retry: Option<RetryOpts>,
     pub delayed_enabled: Option<bool>,
 }
 
 #[napi(object)]
-pub struct NativeJob {
+pub struct Job {
     pub id: String,
     /// Dispatch name from the source stream entry's `n` field. Empty when
     /// the entry had no `n` (legacy producers, delayed-path re-encodes,
@@ -65,16 +65,16 @@ pub struct NativeJob {
 }
 
 #[napi]
-pub struct NativeConsumer {
+pub struct Consumer {
     redis_url: String,
     cfg: ConsumerConfig,
     shutdown: Arc<CancellationToken>,
 }
 
 #[napi]
-impl NativeConsumer {
+impl Consumer {
     #[napi(constructor)]
-    pub fn new(redis_url: String, opts: Option<NativeConsumerOpts>) -> napi::Result<Self> {
+    pub fn new(redis_url: String, opts: Option<ConsumerOpts>) -> napi::Result<Self> {
         let cfg = build_consumer_config(opts);
         Ok(Self {
             redis_url,
@@ -85,7 +85,7 @@ impl NativeConsumer {
 
     /// Run the consumer loop. Resolves once the engine drains.
     ///
-    /// `handler` is a JS `(job: NativeJob) => Promise<void>`. A resolved
+    /// `handler` is a JS `(job: Job) => Promise<void>`. A resolved
     /// promise → `XACK`. A rejected promise → `HandlerError` (engine
     /// retries with backoff up to `maxAttempts`, then DLQ).
     ///
@@ -99,26 +99,26 @@ impl NativeConsumer {
     /// `"<name>: <message>"`. We match the prefix `"UnrecoverableError"`
     /// followed by either `:` (the standard `Error.toString()` form) or
     /// end-of-string (an `UnrecoverableError` thrown with no message).
-    #[napi(ts_args_type = "handler: (job: NativeJob) => Promise<void>")]
+    #[napi(ts_args_type = "handler: (job: Job) => Promise<void>")]
     pub async fn run(
         &self,
         // `ErrorStrategy::Fatal` — the JS handler is invoked with **only**
         // the job arg, *not* a Node-style `(err, job) => ...`. Conversion
         // failures from Rust to JS values would `panic!`, but our
-        // `NativeJob` is a plain struct of strings / Buffer / numbers, so
+        // `Job` is a plain struct of strings / Buffer / numbers, so
         // there is no realistic conversion-failure path. The default
         // (`CalleeHandled`) would prepend a `null` error arg and break
         // the natural `(job) => Promise<void>` signature this whole
         // binding is designed around.
-        handler: ThreadsafeFunction<NativeJob, ErrorStrategy::Fatal>,
+        handler: ThreadsafeFunction<Job, ErrorStrategy::Fatal>,
     ) -> napi::Result<()> {
-        let consumer = Consumer::<RawBytes>::new(self.redis_url.clone(), self.cfg.clone());
+        let consumer = EngineConsumer::<RawBytes>::new(self.redis_url.clone(), self.cfg.clone());
         let shutdown = (*self.shutdown).clone();
         let tsfn = Arc::new(handler);
 
         consumer
             .run(
-                move |job: Job<RawBytes>| {
+                move |job: EngineJob<RawBytes>| {
                     let tsfn = tsfn.clone();
                     async move {
                         // One copy at the FFI boundary (engine `Bytes` →
@@ -126,7 +126,7 @@ impl NativeConsumer {
                         // `docs/phase3-napi-design.md` §4 — the
                         // throughput-path price for keeping the binding
                         // schema-agnostic.
-                        let js_job = NativeJob {
+                        let js_job = Job {
                             id: job.id,
                             name: job.name,
                             payload: Buffer::from(job.payload.0.to_vec()),
@@ -168,7 +168,7 @@ impl NativeConsumer {
     }
 }
 
-fn build_consumer_config(opts: Option<NativeConsumerOpts>) -> ConsumerConfig {
+fn build_consumer_config(opts: Option<ConsumerOpts>) -> ConsumerConfig {
     let mut cfg = ConsumerConfig::default();
     if let Some(o) = opts {
         if let Some(v) = o.queue_name {

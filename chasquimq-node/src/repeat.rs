@@ -14,7 +14,7 @@ use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
 
 #[napi(object)]
-pub struct NativeRepeatPattern {
+pub struct RepeatPattern {
     /// `"cron"` or `"every"`.
     pub kind: String,
     /// Cron expression. Required when `kind == "cron"`. Ignored otherwise.
@@ -29,7 +29,7 @@ pub struct NativeRepeatPattern {
 }
 
 #[napi(object)]
-pub struct NativeMissedFiresPolicy {
+pub struct MissedFiresPolicy {
     /// `"skip"` (default), `"fire-once"`, or `"fire-all"`.
     pub kind: String,
     /// Required when `kind == "fire-all"`. Ignored otherwise. `u32` is
@@ -38,26 +38,26 @@ pub struct NativeMissedFiresPolicy {
 }
 
 #[napi(object)]
-pub struct NativeRepeatableSpec {
+pub struct RepeatableSpec {
     /// Stable spec key. Empty / missing → engine derives one as
     /// `<jobName>::<patternSignature>`.
     pub key: Option<String>,
     pub job_name: String,
-    pub pattern: NativeRepeatPattern,
+    pub pattern: RepeatPattern,
     /// Opaque (msgpack-encoded by the high-level shim, but the binding
     /// doesn't care) payload bytes. Same convention as `add()`.
     pub payload: Buffer,
     pub limit: Option<f64>,
     pub start_after_ms: Option<f64>,
     pub end_before_ms: Option<f64>,
-    pub missed_fires: Option<NativeMissedFiresPolicy>,
+    pub missed_fires: Option<MissedFiresPolicy>,
 }
 
 #[napi(object)]
-pub struct NativeRepeatableMeta {
+pub struct RepeatableMeta {
     pub key: String,
     pub job_name: String,
-    pub pattern: NativeRepeatPattern,
+    pub pattern: RepeatPattern,
     pub next_fire_ms: f64,
     pub limit: Option<f64>,
     pub start_after_ms: Option<f64>,

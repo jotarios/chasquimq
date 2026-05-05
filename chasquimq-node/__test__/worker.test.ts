@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { encode } from '@msgpack/msgpack'
 import { Queue, Worker, NotSupportedError } from '../dist/index.js'
-import { NativeProducer, NativeConsumer } from '../index.js'
+import { Producer, Consumer } from '../index.js'
 
 const REDIS_URL = process.env.REDIS_URL
 const skipIfNoRedis = REDIS_URL ? describe : describe.skip
@@ -173,7 +173,7 @@ skipIfNoRedis('Worker integration', () => {
     expect(failedSpy).toHaveBeenCalled()
 
     // Verify it landed in DLQ. We need a producer to peek.
-    const producer = await NativeProducer.connect(parseConnUrl(REDIS_URL!), {
+    const producer = await Producer.connect(parseConnUrl(REDIS_URL!), {
       queueName,
     })
     const dlq = await producer.peekDlq(10)
@@ -185,12 +185,12 @@ skipIfNoRedis('Worker integration', () => {
     // a typed option, so drive the native consumer directly here. We
     // pin a small deadline (2s) so the test is bounded.
     const localQueue = `qmq-shutdown-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-    const producer = await NativeProducer.connect(parseConnUrl(REDIS_URL!), {
+    const producer = await Producer.connect(parseConnUrl(REDIS_URL!), {
       queueName: localQueue,
     })
     await producer.add(Buffer.from(encode({ never: 'settle' })))
 
-    const consumer = new NativeConsumer(parseConnUrl(REDIS_URL!), {
+    const consumer = new Consumer(parseConnUrl(REDIS_URL!), {
       queueName: localQueue,
       group: 'g',
       consumerId: `c-${process.pid}`,

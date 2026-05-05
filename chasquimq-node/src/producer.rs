@@ -1,4 +1,4 @@
-//! `NativeProducer` — thin N-API wrapper over `chasquimq::Producer<RawBytes>`.
+//! `Producer` — thin N-API wrapper over `chasquimq::Producer<RawBytes>`.
 //!
 //! Every method shape mirrors the engine 1:1; the only translation work is
 //! `Buffer` <-> `Bytes` and the millisecond / `Duration` plumbing. We use
@@ -8,21 +8,24 @@
 //! "schedule N seconds from now" call.
 
 use crate::payload::RawBytes;
-use crate::repeat::{
-    NativeMissedFiresPolicy, NativeRepeatPattern, NativeRepeatableMeta, NativeRepeatableSpec,
-};
+use crate::repeat::{MissedFiresPolicy, RepeatPattern, RepeatableMeta, RepeatableSpec};
 use bytes::Bytes;
 use chasquimq::config::ProducerConfig;
-use chasquimq::producer::{AddOptions, Producer};
-use chasquimq::repeat::{MissedFiresPolicy, RepeatPattern, RepeatableSpec};
-use chasquimq::{BackoffKind, BackoffSpec, JobRetryOverride};
+use chasquimq::producer::{AddOptions as EngineAddOptions, Producer as EngineProducer};
+use chasquimq::repeat::{
+    MissedFiresPolicy as EngineMissedFiresPolicy, RepeatPattern as EngineRepeatPattern,
+    RepeatableSpec as EngineRepeatableSpec,
+};
+use chasquimq::{
+    BackoffKind, BackoffSpec as EngineBackoffSpec, JobRetryOverride as EngineJobRetryOverride,
+};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[napi(object)]
-pub struct NativeProducerOpts {
+pub struct ProducerOpts {
     pub queue_name: Option<String>,
     pub pool_size: Option<u32>,
     /// Cap on `XADD MAXLEN ~`. Default matches the engine: 1_000_000.
@@ -33,7 +36,7 @@ pub struct NativeProducerOpts {
 }
 
 #[napi(object)]
-pub struct NativeDlqEntry {
+pub struct DlqEntry {
     pub dlq_id: String,
     pub source_id: String,
     pub reason: String,
@@ -45,14 +48,14 @@ pub struct NativeDlqEntry {
     pub name: String,
 }
 
-/// Per-job backoff override carried in [`NativeJobRetryOverride::backoff`].
+/// Per-job backoff override carried in [`JobRetryOverride::backoff`].
 ///
 /// Mirrors `chasquimq::BackoffSpec` 1:1. `kind` is the backoff strategy
 /// — `"fixed"` or `"exponential"` — anything else is rejected with an
 /// `Error` at the FFI boundary so a typo in JS doesn't silently route
 /// through the engine's `BackoffKind::Unknown` forward-compat sink.
 #[napi(object)]
-pub struct NativeBackoffSpec {
+pub struct BackoffSpec {
     /// `"fixed"` | `"exponential"`. Mirrors `BackoffKind` lowercase tags.
     pub kind: String,
     /// Base delay in milliseconds (`f64` so JS can pass plain `number`s
@@ -64,15 +67,15 @@ pub struct NativeBackoffSpec {
     pub jitter_ms: Option<f64>,
 }
 
-/// Per-job retry override carried in [`NativeAddOptions::retry`].
+/// Per-job retry override carried in [`AddOptions::retry`].
 ///
 /// Mirrors `chasquimq::JobRetryOverride`. When `max_attempts` and / or
 /// `backoff` are set, they override the queue-wide `ConsumerConfig`
 /// values for this specific job.
 #[napi(object)]
-pub struct NativeJobRetryOverride {
+pub struct JobRetryOverride {
     pub max_attempts: Option<u32>,
-    pub backoff: Option<NativeBackoffSpec>,
+    pub backoff: Option<BackoffSpec>,
 }
 
 /// Options for the `*_with_options` family of producer methods.
@@ -83,38 +86,35 @@ pub struct NativeJobRetryOverride {
 /// name surfaced to the worker via the stream entry's `n` field
 /// (capped at 256 bytes by the engine).
 #[napi(object)]
-pub struct NativeAddOptions {
+pub struct AddOptions {
     pub id: Option<String>,
-    pub retry: Option<NativeJobRetryOverride>,
+    pub retry: Option<JobRetryOverride>,
     pub name: Option<String>,
 }
 
-/// Per-entry pair for [`NativeProducer::add_bulk_named`].
+/// Per-entry pair for [`Producer::add_bulk_named`].
 #[napi(object)]
-pub struct NativeNamedPayload {
+pub struct NamedPayload {
     pub name: String,
     pub payload: Buffer,
 }
 
 #[napi]
-pub struct NativeProducer {
-    inner: Arc<Producer<RawBytes>>,
+pub struct Producer {
+    inner: Arc<EngineProducer<RawBytes>>,
 }
 
 #[napi]
-impl NativeProducer {
+impl Producer {
     /// Connect a producer pool against `redisUrl`. Async because the
     /// underlying `fred::Pool::connect` is async.
     #[napi(factory)]
-    pub async fn connect(
-        redis_url: String,
-        opts: Option<NativeProducerOpts>,
-    ) -> napi::Result<NativeProducer> {
+    pub async fn connect(redis_url: String, opts: Option<ProducerOpts>) -> napi::Result<Producer> {
         let cfg = build_producer_config(opts);
-        let inner = Producer::<RawBytes>::connect(&redis_url, cfg)
+        let inner = EngineProducer::<RawBytes>::connect(&redis_url, cfg)
             .await
             .map_err(map_engine_err)?;
-        Ok(NativeProducer {
+        Ok(Producer {
             inner: Arc::new(inner),
         })
     }
@@ -213,14 +213,14 @@ impl NativeProducer {
             .map_err(map_engine_err)
     }
 
-    /// Like `add`, but accepts a [`NativeAddOptions`] carrying an optional
+    /// Like `add`, but accepts a [`AddOptions`] carrying an optional
     /// stable id and / or per-job retry override. Maps to
     /// `Producer::add_with_options` on the engine.
     #[napi]
     pub async fn add_with_options(
         &self,
         payload: Buffer,
-        opts: NativeAddOptions,
+        opts: AddOptions,
     ) -> napi::Result<String> {
         let bytes = buffer_to_bytes(&payload);
         let engine_opts = to_engine_add_options(opts)?;
@@ -230,7 +230,7 @@ impl NativeProducer {
             .map_err(map_engine_err)
     }
 
-    /// Like `addIn`, but accepts a [`NativeAddOptions`]. When `opts.id`
+    /// Like `addIn`, but accepts a [`AddOptions`]. When `opts.id`
     /// is set, routes through the idempotent delayed-schedule path
     /// (same dedup-marker semantics as `addInWithId`). The retry
     /// override always rides inside the encoded `Job<T>`.
@@ -239,7 +239,7 @@ impl NativeProducer {
         &self,
         delay_ms: i64,
         payload: Buffer,
-        opts: NativeAddOptions,
+        opts: AddOptions,
     ) -> napi::Result<String> {
         let bytes = buffer_to_bytes(&payload);
         let dur = ms_to_duration(delay_ms)?;
@@ -250,14 +250,14 @@ impl NativeProducer {
             .map_err(map_engine_err)
     }
 
-    /// Like `addAt`, but accepts a [`NativeAddOptions`]. Same dedup /
+    /// Like `addAt`, but accepts a [`AddOptions`]. Same dedup /
     /// retry-carry model as [`Self::add_in_with_options`].
     #[napi]
     pub async fn add_at_with_options(
         &self,
         run_at_ms: i64,
         payload: Buffer,
-        opts: NativeAddOptions,
+        opts: AddOptions,
     ) -> napi::Result<String> {
         let bytes = buffer_to_bytes(&payload);
         let when = ms_to_systemtime(run_at_ms)?;
@@ -276,7 +276,7 @@ impl NativeProducer {
     pub async fn add_bulk_with_options(
         &self,
         payloads: Vec<Buffer>,
-        opts: NativeAddOptions,
+        opts: AddOptions,
     ) -> napi::Result<Vec<String>> {
         let raw: Vec<RawBytes> = payloads
             .iter()
@@ -294,10 +294,7 @@ impl NativeProducer {
     /// field. Each name is validated against the engine's 256-byte cap before
     /// any XADD is issued; an oversize name fails the whole call atomically.
     #[napi]
-    pub async fn add_bulk_named(
-        &self,
-        items: Vec<NativeNamedPayload>,
-    ) -> napi::Result<Vec<String>> {
+    pub async fn add_bulk_named(&self, items: Vec<NamedPayload>) -> napi::Result<Vec<String>> {
         let pairs: Vec<(String, RawBytes)> = items
             .into_iter()
             .map(|it| (it.name, RawBytes(buffer_to_bytes(&it.payload))))
@@ -322,7 +319,7 @@ impl NativeProducer {
     }
 
     #[napi]
-    pub async fn peek_dlq(&self, limit: u32) -> napi::Result<Vec<NativeDlqEntry>> {
+    pub async fn peek_dlq(&self, limit: u32) -> napi::Result<Vec<DlqEntry>> {
         let entries = self
             .inner
             .peek_dlq(limit as usize)
@@ -330,7 +327,7 @@ impl NativeProducer {
             .map_err(map_engine_err)?;
         Ok(entries
             .into_iter()
-            .map(|e| NativeDlqEntry {
+            .map(|e| DlqEntry {
                 dlq_id: e.dlq_id,
                 source_id: e.source_id,
                 reason: e.reason,
@@ -358,7 +355,7 @@ impl NativeProducer {
     /// Re-upserting with the same key overwrites the spec and re-anchors the
     /// next fire time.
     #[napi]
-    pub async fn upsert_repeatable(&self, spec: NativeRepeatableSpec) -> napi::Result<String> {
+    pub async fn upsert_repeatable(&self, spec: RepeatableSpec) -> napi::Result<String> {
         let engine_spec = native_spec_into_engine(spec)?;
         self.inner
             .upsert_repeatable(engine_spec)
@@ -368,9 +365,9 @@ impl NativeProducer {
 
     /// List repeatable specs ordered by next fire time, ascending. Returns
     /// up to `limit` entries. Pass a generous `limit` for full inventory —
-    /// payloads are intentionally **not** included (see [`NativeRepeatableMeta`]).
+    /// payloads are intentionally **not** included (see [`RepeatableMeta`]).
     #[napi]
-    pub async fn list_repeatable(&self, limit: u32) -> napi::Result<Vec<NativeRepeatableMeta>> {
+    pub async fn list_repeatable(&self, limit: u32) -> napi::Result<Vec<RepeatableMeta>> {
         let metas = self
             .inner
             .list_repeatable(limit as usize)
@@ -410,7 +407,7 @@ impl NativeProducer {
     }
 }
 
-fn build_producer_config(opts: Option<NativeProducerOpts>) -> ProducerConfig {
+fn build_producer_config(opts: Option<ProducerOpts>) -> ProducerConfig {
     let mut cfg = ProducerConfig::default();
     if let Some(o) = opts {
         if let Some(q) = o.queue_name {
@@ -463,13 +460,13 @@ pub(crate) fn map_engine_err(e: chasquimq::Error) -> napi::Error {
     napi::Error::from_reason(format!("{e}"))
 }
 
-fn native_pattern_into_engine(p: NativeRepeatPattern) -> napi::Result<RepeatPattern> {
+fn native_pattern_into_engine(p: RepeatPattern) -> napi::Result<EngineRepeatPattern> {
     match p.kind.as_str() {
         "cron" => {
             let expression = p.expression.ok_or_else(|| {
                 napi::Error::from_reason("cron pattern requires `expression` (e.g. \"0 2 * * *\")")
             })?;
-            Ok(RepeatPattern::Cron {
+            Ok(EngineRepeatPattern::Cron {
                 expression,
                 tz: p.tz,
             })
@@ -487,7 +484,7 @@ fn native_pattern_into_engine(p: NativeRepeatPattern) -> napi::Result<RepeatPatt
                     "intervalMs must be > 0; got {interval_ms}"
                 )));
             }
-            Ok(RepeatPattern::Every {
+            Ok(EngineRepeatPattern::Every {
                 interval_ms: f64_to_u64(interval_ms, "intervalMs")?,
             })
         }
@@ -497,15 +494,15 @@ fn native_pattern_into_engine(p: NativeRepeatPattern) -> napi::Result<RepeatPatt
     }
 }
 
-fn engine_pattern_into_native(p: RepeatPattern) -> NativeRepeatPattern {
+fn engine_pattern_into_native(p: EngineRepeatPattern) -> RepeatPattern {
     match p {
-        RepeatPattern::Cron { expression, tz } => NativeRepeatPattern {
+        EngineRepeatPattern::Cron { expression, tz } => RepeatPattern {
             kind: "cron".to_string(),
             expression: Some(expression),
             tz,
             interval_ms: None,
         },
-        RepeatPattern::Every { interval_ms } => NativeRepeatPattern {
+        EngineRepeatPattern::Every { interval_ms } => RepeatPattern {
             kind: "every".to_string(),
             expression: None,
             tz: None,
@@ -514,11 +511,11 @@ fn engine_pattern_into_native(p: RepeatPattern) -> NativeRepeatPattern {
     }
 }
 
-fn native_missed_fires_into_engine(p: NativeMissedFiresPolicy) -> napi::Result<MissedFiresPolicy> {
+fn native_missed_fires_into_engine(p: MissedFiresPolicy) -> napi::Result<EngineMissedFiresPolicy> {
     match p.kind.as_str() {
-        "skip" => Ok(MissedFiresPolicy::Skip),
-        "fire-once" => Ok(MissedFiresPolicy::FireOnce),
-        "fire-all" => Ok(MissedFiresPolicy::FireAll {
+        "skip" => Ok(EngineMissedFiresPolicy::Skip),
+        "fire-once" => Ok(EngineMissedFiresPolicy::FireOnce),
+        "fire-all" => Ok(EngineMissedFiresPolicy::FireAll {
             // Default cap matches the engine's typical-cron-catch-up budget;
             // callers wanting unbounded replay must pass `maxCatchup` explicitly.
             // `u32` field — already bounded by the NAPI value type.
@@ -530,13 +527,13 @@ fn native_missed_fires_into_engine(p: NativeMissedFiresPolicy) -> napi::Result<M
     }
 }
 
-fn native_spec_into_engine(spec: NativeRepeatableSpec) -> napi::Result<RepeatableSpec<RawBytes>> {
+fn native_spec_into_engine(spec: RepeatableSpec) -> napi::Result<EngineRepeatableSpec<RawBytes>> {
     let pattern = native_pattern_into_engine(spec.pattern)?;
     let missed_fires = match spec.missed_fires {
-        None => MissedFiresPolicy::default(),
+        None => EngineMissedFiresPolicy::default(),
         Some(p) => native_missed_fires_into_engine(p)?,
     };
-    Ok(RepeatableSpec {
+    Ok(EngineRepeatableSpec {
         key: spec.key.unwrap_or_default(),
         job_name: spec.job_name,
         pattern,
@@ -548,8 +545,8 @@ fn native_spec_into_engine(spec: NativeRepeatableSpec) -> napi::Result<Repeatabl
     })
 }
 
-fn engine_meta_into_native(m: chasquimq::RepeatableMeta) -> NativeRepeatableMeta {
-    NativeRepeatableMeta {
+fn engine_meta_into_native(m: chasquimq::RepeatableMeta) -> RepeatableMeta {
+    RepeatableMeta {
         key: m.key,
         job_name: m.job_name,
         pattern: engine_pattern_into_native(m.pattern),
@@ -586,14 +583,14 @@ fn f64_to_u64(n: f64, field: &str) -> napi::Result<u64> {
     Ok(n as u64)
 }
 
-/// Translate a `NativeBackoffSpec` (JS-side, `f64` numbers, string `kind`)
+/// Translate a `BackoffSpec` (JS-side, `f64` numbers, string `kind`)
 /// into the engine's `BackoffSpec`. Unknown `kind` values are rejected
 /// at the FFI boundary so a typo in JS surfaces as an Error rather than
 /// silently routing through `BackoffKind::Unknown`'s exponential
 /// fallback. Numeric fields go through `f64_to_u64` (errors on
 /// non-finite / negative / out-of-range values) so a `-100ms` slip is
 /// surfaced rather than silently clamped.
-fn to_engine_backoff(spec: NativeBackoffSpec) -> napi::Result<BackoffSpec> {
+fn to_engine_backoff(spec: BackoffSpec) -> napi::Result<EngineBackoffSpec> {
     let kind = match spec.kind.as_str() {
         "fixed" => BackoffKind::Fixed,
         "exponential" => BackoffKind::Exponential,
@@ -603,7 +600,7 @@ fn to_engine_backoff(spec: NativeBackoffSpec) -> napi::Result<BackoffSpec> {
             )));
         }
     };
-    Ok(BackoffSpec {
+    Ok(EngineBackoffSpec {
         kind,
         delay_ms: f64_to_u64(spec.delay_ms, "backoff.delayMs")?,
         max_delay_ms: spec
@@ -618,13 +615,13 @@ fn to_engine_backoff(spec: NativeBackoffSpec) -> napi::Result<BackoffSpec> {
     })
 }
 
-fn to_engine_add_options(opts: NativeAddOptions) -> napi::Result<AddOptions> {
-    let mut ao = AddOptions::new();
+fn to_engine_add_options(opts: AddOptions) -> napi::Result<EngineAddOptions> {
+    let mut ao = EngineAddOptions::new();
     if let Some(id) = opts.id {
         ao = ao.with_id(id);
     }
     if let Some(retry) = opts.retry {
-        let mut over = JobRetryOverride {
+        let mut over = EngineJobRetryOverride {
             max_attempts: retry.max_attempts,
             backoff: None,
         };

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { encode } from '@msgpack/msgpack'
 import { Queue, NotSupportedError } from '../dist/index.js'
-import { NativeProducer, NativeConsumer } from '../index.js'
+import { Producer, Consumer } from '../index.js'
 
 const REDIS_URL = process.env.REDIS_URL
 const skipIfNoRedis = REDIS_URL ? describe : describe.skip
@@ -96,7 +96,7 @@ skipIfNoRedis('Queue integration', () => {
   it('addInBulk schedules 100 delayed jobs that all fire', async () => {
     const N = 100
     const localQueue = `qmq-bulk-d-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-    const producer = await NativeProducer.connect(REDIS_URL!, { queueName: localQueue })
+    const producer = await Producer.connect(REDIS_URL!, { queueName: localQueue })
 
     const payloads = Array.from({ length: N }, (_, i) =>
       Buffer.from(encode({ idx: i })),
@@ -105,7 +105,7 @@ skipIfNoRedis('Queue integration', () => {
     expect(ids).toHaveLength(N)
 
     let counter = 0
-    const consumer = new NativeConsumer(REDIS_URL!, {
+    const consumer = new Consumer(REDIS_URL!, {
       queueName: localQueue,
       group: 'g',
       consumerId: `c-${process.pid}`,

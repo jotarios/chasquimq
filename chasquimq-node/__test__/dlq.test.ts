@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { encode, decode } from '@msgpack/msgpack'
-import { NativeProducer, NativeConsumer } from '../index.js'
+import { Producer, Consumer } from '../index.js'
 
 // peekDlq / replayDlq are exposed on the native producer but not on the
 // high-level Queue shim. These tests exercise them directly — same
@@ -22,13 +22,13 @@ async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs: n
 
 d('peekDlq + replayDlq', () => {
   let queueName: string
-  let producer: NativeProducer
-  let consumer: NativeConsumer | undefined
+  let producer: Producer
+  let consumer: Consumer | undefined
   let runP: Promise<void> | undefined
 
   beforeEach(async () => {
     queueName = `qmq-dlq-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-    producer = await NativeProducer.connect(REDIS_URL, { queueName })
+    producer = await Producer.connect(REDIS_URL, { queueName })
   })
 
   afterEach(async () => {
@@ -46,7 +46,7 @@ d('peekDlq + replayDlq', () => {
     let succeededPayload: unknown = null
     let succeededId: string | null = null
 
-    consumer = new NativeConsumer(REDIS_URL, {
+    consumer = new Consumer(REDIS_URL, {
       queueName,
       group: 'g',
       consumerId: `c-${process.pid}`,

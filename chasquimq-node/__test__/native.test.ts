@@ -5,13 +5,12 @@ import { encode, decode } from '@msgpack/msgpack'
 // the package. The `exports` map in `package.json` resolves the parent
 // path's `./native` entry to the generated `index.js` / `index.d.ts`
 // produced by `napi build`. The bare `'..'` import (no subpath) now
-// resolves to `./dist/index.js` — the high-level shim — which doesn't
-// expose the `Native*` classes.
+// resolves to `./dist/index.js` — the high-level shim.
 import {
-  NativeProducer,
-  NativeConsumer,
-  NativePromoter,
-  type NativeJob,
+  Producer,
+  Consumer,
+  Promoter,
+  type Job,
 } from '../index.js'
 
 const REDIS_URL = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379'
@@ -22,16 +21,16 @@ const HAS_REDIS = Boolean(process.env.REDIS_URL)
 // REDIS_URL"]` convention.
 const d = HAS_REDIS ? describe : describe.skip
 
-d('NativeProducer + NativeConsumer round-trip', () => {
+d('Producer + Consumer round-trip', () => {
   it('produces a job and the consumer handler receives the same payload', async () => {
     const queueName = `native-rt-${Date.now()}-${Math.floor(Math.random() * 1e6)}`
-    const producer = await NativeProducer.connect(REDIS_URL, { queueName })
+    const producer = await Producer.connect(REDIS_URL, { queueName })
 
     const data = { hello: 'world', n: 42, nested: { ok: true } }
     const id = await producer.add(Buffer.from(encode(data)))
     expect(id).toMatch(/^[0-9A-HJKMNP-TV-Z]{26}$/) // ULID
 
-    const consumer = new NativeConsumer(REDIS_URL, {
+    const consumer = new Consumer(REDIS_URL, {
       queueName,
       group: 'g',
       consumerId: `c-${process.pid}`,
@@ -41,7 +40,7 @@ d('NativeProducer + NativeConsumer round-trip', () => {
       delayedEnabled: false,
     })
 
-    const seen: NativeJob[] = []
+    const seen: Job[] = []
     let resolveSeen: () => void
     const handlerSettled = new Promise<void>((r) => (resolveSeen = r))
 
@@ -81,17 +80,17 @@ d('NativeProducer + NativeConsumer round-trip', () => {
 
   it('promotes a delayed job', async () => {
     const queueName = `native-delayed-${Date.now()}-${Math.floor(Math.random() * 1e6)}`
-    const producer = await NativeProducer.connect(REDIS_URL, { queueName })
+    const producer = await Producer.connect(REDIS_URL, { queueName })
 
     const payload = Buffer.from(encode({ msg: 'delayed' }))
     const id = await producer.addIn(50, payload)
 
     // Standalone promoter — exercise that path explicitly. The consumer
     // below has `delayedEnabled: false` so promotion isn't double-driven.
-    const promoter = new NativePromoter(REDIS_URL, { queueName, pollIntervalMs: 25 })
+    const promoter = new Promoter(REDIS_URL, { queueName, pollIntervalMs: 25 })
     const promP = promoter.run()
 
-    const consumer = new NativeConsumer(REDIS_URL, {
+    const consumer = new Consumer(REDIS_URL, {
       queueName,
       group: 'g',
       consumerId: `c-${process.pid}`,
@@ -100,7 +99,7 @@ d('NativeProducer + NativeConsumer round-trip', () => {
       delayedEnabled: false,
     })
 
-    let seen: NativeJob | null = null
+    let seen: Job | null = null
     let resolveSeen: () => void
     const settled = new Promise<void>((r) => (resolveSeen = r))
 
@@ -125,11 +124,11 @@ d('NativeProducer + NativeConsumer round-trip', () => {
 
   it('routes a JS handler rejection through the retry then DLQ path', async () => {
     const queueName = `native-fail-${Date.now()}-${Math.floor(Math.random() * 1e6)}`
-    const producer = await NativeProducer.connect(REDIS_URL, { queueName })
+    const producer = await Producer.connect(REDIS_URL, { queueName })
 
     await producer.add(Buffer.from(encode({ should: 'fail' })))
 
-    const consumer = new NativeConsumer(REDIS_URL, {
+    const consumer = new Consumer(REDIS_URL, {
       queueName,
       group: 'g',
       consumerId: `c-${process.pid}`,
@@ -175,9 +174,9 @@ d('NativeProducer + NativeConsumer round-trip', () => {
 })
 
 // This always runs — it doesn't need Redis.
-describe('NativeProducer key getters', () => {
+describe('Producer key getters', () => {
   it.skipIf(!HAS_REDIS)('produces queue-derived key strings', async () => {
-    const producer = await NativeProducer.connect(REDIS_URL, {
+    const producer = await Producer.connect(REDIS_URL, {
       queueName: 'getter-test',
     })
     expect(producer.streamKey()).toContain('getter-test')

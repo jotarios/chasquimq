@@ -1,16 +1,16 @@
-//! `NativeJob` — Python class handed to the user-supplied async handler.
+//! `Job` — Python class handed to the user-supplied async handler.
 //!
 //! Built once per delivery on the tokio task that pulled the entry off the
 //! Redis stream; the GIL is acquired briefly to construct it, then dropped
 //! before the handler coroutine is awaited.
 
 use crate::payload::RawBytes;
-use chasquimq::Job;
+use chasquimq::Job as EngineJob;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
-#[pyclass(module = "chasquimq._native", name = "NativeJob", frozen)]
-pub struct NativeJob {
+#[pyclass(module = "chasquimq._native", name = "Job", frozen)]
+pub struct Job {
     id: String,
     name: String,
     payload: Vec<u8>,
@@ -18,8 +18,8 @@ pub struct NativeJob {
     attempt: u32,
 }
 
-impl NativeJob {
-    pub fn from_engine(job: Job<RawBytes>) -> Self {
+impl Job {
+    pub fn from_engine(job: EngineJob<RawBytes>) -> Self {
         Self {
             id: job.id,
             name: job.name,
@@ -31,7 +31,7 @@ impl NativeJob {
 }
 
 #[pymethods]
-impl NativeJob {
+impl Job {
     #[getter]
     fn id(&self) -> &str {
         &self.id
@@ -59,7 +59,7 @@ impl NativeJob {
 
     fn __repr__(&self) -> String {
         format!(
-            "NativeJob(id={:?}, name={:?}, attempt={}, created_at_ms={}, payload_len={})",
+            "Job(id={:?}, name={:?}, attempt={}, created_at_ms={}, payload_len={})",
             self.id,
             self.name,
             self.attempt,

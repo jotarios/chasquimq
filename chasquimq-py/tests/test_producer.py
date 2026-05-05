@@ -3,7 +3,7 @@ import time
 import msgpack
 import pytest
 
-from chasquimq import NativeProducer
+from chasquimq._native import Producer
 
 from conftest import (
     delayed_key_for,
@@ -20,7 +20,7 @@ pytestmark = pytest.mark.usefixtures("cleanup_keys")
 async def test_add_returns_id_and_writes_to_stream(
     redis_url: str, queue_name: str, redis_client
 ) -> None:
-    producer = NativeProducer(redis_url, queue_name)
+    producer = Producer(redis_url, queue_name)
     payload = msgpack.packb({"hello": "world"})
     job_id = await producer.add(payload)
     assert isinstance(job_id, str) and job_id
@@ -33,7 +33,7 @@ async def test_add_returns_id_and_writes_to_stream(
 async def test_add_in_zadds_to_delayed_set(
     redis_url: str, queue_name: str, redis_client
 ) -> None:
-    producer = NativeProducer(redis_url, queue_name)
+    producer = Producer(redis_url, queue_name)
     payload = msgpack.packb({"x": 1})
     job_id = await producer.add_in(60_000, payload)
     assert isinstance(job_id, str) and job_id
@@ -46,7 +46,7 @@ async def test_add_in_zadds_to_delayed_set(
 async def test_add_with_options_explicit_id_is_idempotent(
     redis_url: str, queue_name: str, redis_client
 ) -> None:
-    producer = NativeProducer(redis_url, queue_name)
+    producer = Producer(redis_url, queue_name)
     payload = msgpack.packb({"k": "v"})
     explicit_id = "stable-id-1"
 
@@ -67,7 +67,7 @@ async def test_add_with_options_explicit_id_is_idempotent(
 async def test_retry_override_round_trips_in_payload(
     redis_url: str, queue_name: str, redis_client
 ) -> None:
-    producer = NativeProducer(redis_url, queue_name)
+    producer = Producer(redis_url, queue_name)
     inner = msgpack.packb({"task": "send-email"})
     job_id = await producer.add_with_options(
         inner,
@@ -105,7 +105,7 @@ async def test_retry_override_round_trips_in_payload(
 async def test_cancel_delayed_round_trip(
     redis_url: str, queue_name: str, redis_client
 ) -> None:
-    producer = NativeProducer(redis_url, queue_name)
+    producer = Producer(redis_url, queue_name)
     payload = msgpack.packb({"k": 1})
     job_id = await producer.add_in_with_options(
         45_000, payload, {"id": "cancel-me"}
@@ -125,7 +125,7 @@ async def test_cancel_delayed_round_trip(
 async def test_add_bulk_writes_n_entries(
     redis_url: str, queue_name: str, redis_client
 ) -> None:
-    producer = NativeProducer(redis_url, queue_name)
+    producer = Producer(redis_url, queue_name)
     payloads = [msgpack.packb({"i": i}) for i in range(7)]
     ids = await producer.add_bulk(payloads)
     assert len(ids) == 7
@@ -138,7 +138,7 @@ async def test_add_bulk_writes_n_entries(
 async def test_peek_dlq_and_replay_dlq_round_trip(
     redis_url: str, queue_name: str, redis_client
 ) -> None:
-    producer = NativeProducer(redis_url, queue_name)
+    producer = Producer(redis_url, queue_name)
     user_payload = msgpack.packb({"task": "broken"})
     job_id = "dlq-job-1"
     created_ms = int(time.time() * 1000)
@@ -173,7 +173,7 @@ async def test_peek_dlq_and_replay_dlq_round_trip(
 async def test_upsert_list_remove_repeatable(
     redis_url: str, queue_name: str, redis_client
 ) -> None:
-    producer = NativeProducer(redis_url, queue_name)
+    producer = Producer(redis_url, queue_name)
     payload = msgpack.packb({"job": "send-digest"})
     spec = {
         "job_name": "send-digest",
@@ -204,7 +204,7 @@ async def test_upsert_list_remove_repeatable(
 async def test_unknown_backoff_kind_is_rejected(
     redis_url: str, queue_name: str
 ) -> None:
-    producer = NativeProducer(redis_url, queue_name)
+    producer = Producer(redis_url, queue_name)
     payload = msgpack.packb({})
     with pytest.raises(ValueError) as ei:
         await producer.add_with_options(
@@ -223,7 +223,7 @@ async def test_unknown_backoff_kind_is_rejected(
 async def test_unknown_pattern_kind_is_rejected(
     redis_url: str, queue_name: str
 ) -> None:
-    producer = NativeProducer(redis_url, queue_name)
+    producer = Producer(redis_url, queue_name)
     payload = msgpack.packb({})
     with pytest.raises(ValueError) as ei:
         await producer.upsert_repeatable(
@@ -240,7 +240,7 @@ async def test_unknown_pattern_kind_is_rejected(
 async def test_zero_interval_every_is_rejected(
     redis_url: str, queue_name: str
 ) -> None:
-    producer = NativeProducer(redis_url, queue_name)
+    producer = Producer(redis_url, queue_name)
     payload = msgpack.packb({})
     with pytest.raises(ValueError):
         await producer.upsert_repeatable(

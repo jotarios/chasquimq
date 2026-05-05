@@ -1,10 +1,10 @@
-"""Integration tests for `NativeConsumer` against a live Redis 8.6.
+"""Integration tests for the native ``Consumer`` against a live Redis 8.6.
 
 Each test:
 1. Pushes a job onto the queue's stream by hand-encoding the engine's `Job<T>`
    msgpack envelope (the producer binding lands in slice A2 — to keep this
    test self-contained, we encode here).
-2. Spins up a `NativeConsumer.run(handler)` task on the asyncio loop.
+2. Spins up a ``Consumer.run(handler)`` task on the asyncio loop.
 3. Asserts on Redis state (XLEN, DLQ XLEN, attempt count) after the handler
    runs.
 """
@@ -21,7 +21,8 @@ import msgpack
 import pytest
 import redis.asyncio as aioredis
 
-from chasquimq import NativeConsumer, NativeJob, UnrecoverableError
+from chasquimq import UnrecoverableError
+from chasquimq._native import Consumer, Job
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
 
@@ -111,7 +112,7 @@ async def _xlen(redis_client: aioredis.Redis, key: str) -> int:
 @pytest.mark.asyncio
 async def test_handler_success_acks_job(redis_client, queue_name):
     await _flush_queue(redis_client, queue_name)
-    consumer = NativeConsumer(
+    consumer = Consumer(
         REDIS_URL,
         queue_name,
         concurrency=1,
@@ -121,10 +122,10 @@ async def test_handler_success_acks_job(redis_client, queue_name):
         delayed_enabled=False,
     )
 
-    received: List[NativeJob] = []
+    received: List[Job] = []
     done = asyncio.Event()
 
-    async def handler(job: NativeJob) -> None:
+    async def handler(job: Job) -> None:
         received.append(job)
         done.set()
 
@@ -152,7 +153,7 @@ async def test_handler_success_acks_job(redis_client, queue_name):
 @pytest.mark.asyncio
 async def test_handler_returns_quickly_does_not_double_ack(redis_client, queue_name):
     await _flush_queue(redis_client, queue_name)
-    consumer = NativeConsumer(
+    consumer = Consumer(
         REDIS_URL,
         queue_name,
         concurrency=1,
@@ -164,7 +165,7 @@ async def test_handler_returns_quickly_does_not_double_ack(redis_client, queue_n
     call_count = 0
     done = asyncio.Event()
 
-    async def handler(job: NativeJob) -> None:
+    async def handler(job: Job) -> None:
         nonlocal call_count
         call_count += 1
         done.set()
@@ -192,7 +193,7 @@ async def test_handler_returns_quickly_does_not_double_ack(redis_client, queue_n
 @pytest.mark.asyncio
 async def test_handler_raises_generic_exception_retries(redis_client, queue_name):
     await _flush_queue(redis_client, queue_name)
-    consumer = NativeConsumer(
+    consumer = Consumer(
         REDIS_URL,
         queue_name,
         concurrency=1,
@@ -204,7 +205,7 @@ async def test_handler_raises_generic_exception_retries(redis_client, queue_name
     attempts: List[int] = []
     seen_two = asyncio.Event()
 
-    async def handler(job: NativeJob) -> None:
+    async def handler(job: Job) -> None:
         attempts.append(job.attempt)
         if len(attempts) >= 2:
             seen_two.set()
@@ -230,7 +231,7 @@ async def test_handler_raises_generic_exception_retries(redis_client, queue_name
 @pytest.mark.asyncio
 async def test_handler_raises_unrecoverable_routes_to_dlq(redis_client, queue_name):
     await _flush_queue(redis_client, queue_name)
-    consumer = NativeConsumer(
+    consumer = Consumer(
         REDIS_URL,
         queue_name,
         concurrency=1,
@@ -242,7 +243,7 @@ async def test_handler_raises_unrecoverable_routes_to_dlq(redis_client, queue_na
 
     invocations: List[int] = []
 
-    async def handler(job: NativeJob) -> None:
+    async def handler(job: Job) -> None:
         invocations.append(job.attempt)
         raise UnrecoverableError("poison pill")
 
@@ -277,7 +278,7 @@ async def test_handler_raises_unrecoverable_subclass_routes_to_dlq(
     redis_client, queue_name
 ):
     await _flush_queue(redis_client, queue_name)
-    consumer = NativeConsumer(
+    consumer = Consumer(
         REDIS_URL,
         queue_name,
         concurrency=1,
@@ -291,7 +292,7 @@ async def test_handler_raises_unrecoverable_subclass_routes_to_dlq(
 
     invocations: List[int] = []
 
-    async def handler(job: NativeJob) -> None:
+    async def handler(job: Job) -> None:
         invocations.append(job.attempt)
         raise PoisonPill("subclass poison pill")
 
@@ -329,7 +330,7 @@ async def test_handler_raises_unrelated_unrecoverable_named_class_retries(
     incorrectly. Post-MRO-walk, the unrelated class must take the recoverable
     retry path."""
     await _flush_queue(redis_client, queue_name)
-    consumer = NativeConsumer(
+    consumer = Consumer(
         REDIS_URL,
         queue_name,
         concurrency=1,
@@ -345,7 +346,7 @@ async def test_handler_raises_unrelated_unrecoverable_named_class_retries(
     invocations: List[int] = []
     seen_two = asyncio.Event()
 
-    async def handler(job: NativeJob) -> None:
+    async def handler(job: Job) -> None:
         invocations.append(job.attempt)
         if len(invocations) >= 2:
             seen_two.set()
@@ -390,7 +391,7 @@ async def test_handler_raises_unrelated_unrecoverable_named_class_retries(
 @pytest.mark.asyncio
 async def test_shutdown_from_another_task_ends_run_promptly(redis_client, queue_name):
     await _flush_queue(redis_client, queue_name)
-    consumer = NativeConsumer(
+    consumer = Consumer(
         REDIS_URL,
         queue_name,
         concurrency=1,
@@ -399,7 +400,7 @@ async def test_shutdown_from_another_task_ends_run_promptly(redis_client, queue_
         delayed_enabled=False,
     )
 
-    async def handler(job: NativeJob) -> None:
+    async def handler(job: Job) -> None:
         return None
 
     run_task = asyncio.ensure_future(consumer.run(handler))

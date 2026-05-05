@@ -10,7 +10,7 @@
 //!
 //! This is **Option A** of the Phase 3 design: the JS high-level shim
 //! msgpack-encodes its user data to a `Buffer`, hands the buffer to
-//! `NativeProducer.add(buf)`, and the native binding embeds those bytes as
+//! `Producer.add(buf)`, and the native binding embeds those bytes as
 //! the `payload` slot of the `Job` envelope. The two wire-format invariants
 //! that follow:
 //!

@@ -1,19 +1,19 @@
-//! `NativePromoter` — N-API wrapper over `chasquimq::Promoter`.
+//! `Promoter` — N-API wrapper over `chasquimq::Promoter`.
 //!
 //! Standalone delayed-job promoter, used when the consumer is configured
 //! with `delayedEnabled: false` and the deployment runs the promoter as a
 //! separate process (or sidecar). Same `run` / `shutdown` shape as
-//! `NativeConsumer`.
+//! `Consumer`.
 
 use crate::producer::map_engine_err;
-use chasquimq::Promoter;
+use chasquimq::Promoter as EnginePromoter;
 use chasquimq::config::PromoterConfig;
 use napi_derive::napi;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 #[napi(object)]
-pub struct NativePromoterOpts {
+pub struct PromoterOpts {
     pub queue_name: Option<String>,
     pub poll_interval_ms: Option<i64>,
     pub promote_batch: Option<u32>,
@@ -23,16 +23,16 @@ pub struct NativePromoterOpts {
 }
 
 #[napi]
-pub struct NativePromoter {
+pub struct Promoter {
     redis_url: String,
     cfg: PromoterConfig,
     shutdown: Arc<CancellationToken>,
 }
 
 #[napi]
-impl NativePromoter {
+impl Promoter {
     #[napi(constructor)]
-    pub fn new(redis_url: String, opts: Option<NativePromoterOpts>) -> napi::Result<Self> {
+    pub fn new(redis_url: String, opts: Option<PromoterOpts>) -> napi::Result<Self> {
         let cfg = build_promoter_config(opts);
         Ok(Self {
             redis_url,
@@ -44,7 +44,7 @@ impl NativePromoter {
     /// Run the promoter loop until `shutdown()` is called.
     #[napi]
     pub async fn run(&self) -> napi::Result<()> {
-        let promoter = Promoter::new(self.redis_url.clone(), self.cfg.clone());
+        let promoter = EnginePromoter::new(self.redis_url.clone(), self.cfg.clone());
         let shutdown = (*self.shutdown).clone();
         promoter.run(shutdown).await.map_err(map_engine_err)
     }
@@ -57,7 +57,7 @@ impl NativePromoter {
     }
 }
 
-fn build_promoter_config(opts: Option<NativePromoterOpts>) -> PromoterConfig {
+fn build_promoter_config(opts: Option<PromoterOpts>) -> PromoterConfig {
     let mut cfg = PromoterConfig::default();
     if let Some(o) = opts {
         if let Some(v) = o.queue_name {

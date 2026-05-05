@@ -1,13 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { encode } from '@msgpack/msgpack'
 import {
-  NativeProducer,
-  NativeConsumer,
-  NativePromoter,
+  Producer,
+  Consumer,
+  Promoter,
 } from '../index.js'
 
 // The high-level shim doesn't expose cancelDelayed / cancelDelayedBulk
-// or peekDlq / replayDlq, but the underlying NativeProducer does. These
+// or peekDlq / replayDlq, but the underlying native Producer does. These
 // tests reach into the native binding directly — same convention as
 // `native.test.ts`.
 
@@ -18,15 +18,15 @@ const d = HAS_REDIS ? describe : describe.skip
 
 d('cancelDelayed / cancelDelayedBulk', () => {
   let queueName: string
-  let producer: NativeProducer
-  let consumer: NativeConsumer | undefined
-  let promoter: NativePromoter | undefined
+  let producer: Producer
+  let consumer: Consumer | undefined
+  let promoter: Promoter | undefined
   let runP: Promise<void> | undefined
   let promP: Promise<void> | undefined
 
   beforeEach(async () => {
     queueName = `qmq-cancel-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-    producer = await NativeProducer.connect(REDIS_URL, { queueName })
+    producer = await Producer.connect(REDIS_URL, { queueName })
   })
 
   afterEach(async () => {
@@ -55,7 +55,7 @@ d('cancelDelayed / cancelDelayedBulk', () => {
     expect(removed).toBe(true)
 
     let counter = 0
-    consumer = new NativeConsumer(REDIS_URL, {
+    consumer = new Consumer(REDIS_URL, {
       queueName,
       group: 'g',
       consumerId: `c-${process.pid}`,
@@ -92,7 +92,7 @@ d('cancelDelayed / cancelDelayedBulk', () => {
     const jobId = `racing-${Date.now()}`
     let counter = 0
 
-    consumer = new NativeConsumer(REDIS_URL, {
+    consumer = new Consumer(REDIS_URL, {
       queueName,
       group: 'g',
       consumerId: `c-${process.pid}`,
