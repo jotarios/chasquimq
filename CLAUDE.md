@@ -18,7 +18,6 @@ Phase 4 is **complete** per the [PRD](prd/prd.md) — Python workers process job
 
 **Known issues / deferred.**
 
-- `dlq_peek_and_replay_preserve_name` integration test is flaky in CI; skipped via `CHASQUIMQ_SKIP_FLAKY=1` env var in `.github/workflows/ci.yml` with an early-return inside the test (PR #60). Investigation summary recorded under task #48; root cause deferred long-term. All other engine integration tests are green; this is the single current flake.
 - CI hardening (PR #65): cross-shim phase steps got per-phase IDs and `if: failure() && steps.phaseN.outcome == 'failure'` gates; failure dumps `tee` to `/tmp/phaseN-redis-state.log` and upload as artifacts. Worth knowing about when debugging cross-shim failures.
 
 Key files for context:

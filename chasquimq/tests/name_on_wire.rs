@@ -17,7 +17,6 @@ use fred::types::{ClusterHash, CustomCommand, Value};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
@@ -311,12 +310,46 @@ fn dlq_round_trip_consumer_cfg(queue: &str, consumer_id: &str) -> ConsumerConfig
     }
 }
 
+/// Poll `XLEN <dlq>` until it reports at least `expected` entries.
+///
+/// This is the system-of-record check: the relocator is async wrt the
+/// handler's return, and the DLQ entry only exists once the relocator's
+/// XADD+XACKDEL pipeline has landed in Redis. Any test that gates on the
+/// in-memory handler counter will race the relocator under host load.
+async fn wait_dlq_depth(admin: &Client, queue: &str, expected: usize) {
+    let dlq = dlq_key(queue);
+    let admin_h = admin.clone();
+    let expected_i64 = i64::try_from(expected).unwrap_or(i64::MAX);
+    wait_until(Duration::from_secs(15), move || {
+        let admin_h = admin_h.clone();
+        let dlq = dlq.clone();
+        async move {
+            let res: Value = admin_h
+                .custom(
+                    CustomCommand::new_static("XLEN", ClusterHash::FirstKey, false),
+                    vec![Value::from(dlq.as_str())],
+                )
+                .await
+                .expect("XLEN dlq");
+            matches!(res, Value::Integer(n) if n >= expected_i64)
+        }
+    })
+    .await;
+}
+
 /// Drive a consumer that fails every job with a recoverable handler error,
-/// returning after `expected` failures land. With `max_attempts=1`, each
-/// failure routes straight to the DLQ.
-async fn drive_failing_consumer(queue: &str, consumer_id: &str, expected: usize) {
-    let count = Arc::new(AtomicUsize::new(0));
-    let count_h = count.clone();
+/// returning after `expected` failures have landed in the DLQ. With
+/// `max_attempts=1`, each failure routes straight to the DLQ.
+///
+/// The wait condition is deterministic on Redis state — `XLEN <dlq> >=
+/// expected` — not on the in-memory handler counter. The handler counter
+/// trips as soon as the closure runs, but the DlqRelocate event still has
+/// to traverse the worker→mpsc→relocator path and complete an XADD+XACKDEL
+/// pipeline. On a contended host those steps take long enough that gating
+/// shutdown on the handler counter races the relocator and the DLQ entry
+/// can be lost on shutdown drain. Polling XLEN closes that race: by the
+/// time we cancel, Redis has already accepted the entry.
+async fn drive_failing_consumer(admin: &Client, queue: &str, consumer_id: &str, expected: usize) {
     let consumer: Consumer<Sample> =
         Consumer::new(redis_url(), dlq_round_trip_consumer_cfg(queue, consumer_id));
     let shutdown = CancellationToken::new();
@@ -324,49 +357,44 @@ async fn drive_failing_consumer(queue: &str, consumer_id: &str, expected: usize)
     let join = tokio::spawn(async move {
         consumer
             .run(
-                move |_job: Job<Sample>| {
-                    let count = count_h.clone();
-                    async move {
-                        count.fetch_add(1, Ordering::SeqCst);
-                        Err::<(), _>(HandlerError::new(std::io::Error::other("fail-on-purpose")))
-                    }
+                move |_job: Job<Sample>| async move {
+                    Err::<(), _>(HandlerError::new(std::io::Error::other("fail-on-purpose")))
                 },
                 shutdown_clone,
             )
             .await
     });
 
-    let count_check = count.clone();
-    wait_until(Duration::from_secs(15), move || {
-        let count = count_check.clone();
-        async move { count.load(Ordering::SeqCst) >= expected }
-    })
-    .await;
+    wait_dlq_depth(admin, queue, expected).await;
 
-    // Give the DLQ relocator a beat to flush before shutdown.
-    tokio::time::sleep(Duration::from_millis(200)).await;
     shutdown.cancel();
     let _ = tokio::time::timeout(Duration::from_secs(10), join).await;
+
+    // Race-closer: the reader's last XREADGROUP at shutdown may still be
+    // server-side-blocked on Redis with `BLOCK <block_ms> ... >`. Even
+    // though the local future was dropped on `shutdown.cancel()`, Redis
+    // holds the BLOCK until either timeout expiry or TCP close. If a
+    // new entry XADDs onto the stream during that window — for example a
+    // subsequent `replay_dlq` from this same test — Redis serves the
+    // still-blocked call, assigning the entry to *this* consumer's
+    // pending list and advancing the group's `last-delivered-id` past
+    // the new entry. A second consumer in the same group then sees
+    // `>` deliver nothing and the test deadlocks.
+    //
+    // Wait one full BLOCK window plus padding so any in-flight call
+    // definitely times out before the next test step issues an XADD.
+    // This sleep is the deterministic race-closer for the flake tracked
+    // under task #48.
+    let block_ms = dlq_round_trip_consumer_cfg("_", "_").block_ms;
+    tokio::time::sleep(Duration::from_millis(block_ms.saturating_mul(2).max(150))).await;
 }
 
 /// Fix 2 + Fix 3 round trip: producer adds a named job → consumer fails it →
 /// `peek_dlq` returns `name` populated → `replay_dlq` re-emits with `n` →
 /// a second consumer drain sees the original `Job::name`.
-///
-/// **Known flaky** — observably correct behavior but races against the
-/// `dlq_handle.await` shutdown drain on contended hosts. Reproducible
-/// locally ~50% of solo runs against a fresh redis. Tracked in task #47.
-/// Skipped in CI via `CHASQUIMQ_SKIP_FLAKY` until a deterministic
-/// XLEN-based wait can be wired through the consumer wiring (the test
-/// today polls the in-memory handler counter, which sees the handler
-/// return before the relocator has finished its XADD+XACKDEL pipeline).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires REDIS_URL"]
 async fn dlq_peek_and_replay_preserve_name() {
-    if std::env::var("CHASQUIMQ_SKIP_FLAKY").is_ok() {
-        eprintln!("dlq_peek_and_replay_preserve_name: skipped (CHASQUIMQ_SKIP_FLAKY set)");
-        return;
-    }
     let admin = admin().await;
     let queue = "name_dlq_round_trip";
     flush_all(&admin, queue).await;
@@ -379,28 +407,10 @@ async fn dlq_peek_and_replay_preserve_name() {
         .await
         .expect("named add");
 
-    // Drive one failing handler invocation → DLQ.
-    drive_failing_consumer(queue, "name_dlq_c1", 1).await;
-
-    // Wait for the DLQ entry to land — the relocator is async wrt the handler
-    // return.
-    let dlq = dlq_key(queue);
-    let admin_h = admin.clone();
-    wait_until(Duration::from_secs(10), move || {
-        let admin_h = admin_h.clone();
-        let dlq = dlq.clone();
-        async move {
-            let res: Value = admin_h
-                .custom(
-                    CustomCommand::new_static("XLEN", ClusterHash::FirstKey, false),
-                    vec![Value::from(dlq.as_str())],
-                )
-                .await
-                .expect("XLEN dlq");
-            matches!(res, Value::Integer(n) if n >= 1)
-        }
-    })
-    .await;
+    // Drive one failing handler invocation → DLQ. `drive_failing_consumer`
+    // gates its own shutdown on `XLEN <dlq> >= 1`, so by the time it
+    // returns the DLQ entry has already been XADD'd + XACKDEL'd.
+    drive_failing_consumer(&admin, queue, "name_dlq_c1", 1).await;
 
     // Fix 2: peek_dlq surfaces name.
     let entries = producer.peek_dlq(10).await.expect("peek_dlq");
