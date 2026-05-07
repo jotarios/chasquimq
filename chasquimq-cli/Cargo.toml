@@ -11,6 +11,12 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+# cargo-dist override: include this crate in the release manifest even
+# though publish = false hides it from crates.io. The CLI binary ships
+# via cargo-dist + GitHub Releases on `git tag v*`.
+[package.metadata.dist]
+dist = true
+
 [[bin]]
 name = "chasqui"
 path = "src/main.rs"
