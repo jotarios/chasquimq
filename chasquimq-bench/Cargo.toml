@@ -1,6 +1,6 @@
 [package]
 name = "chasquimq-bench"
-version = "1.0.0"
+version = "1.0.1"
 description = "Benchmark harness for ChasquiMQ, mirroring bullmq-bench."
 edition.workspace = true
 license.workspace = true

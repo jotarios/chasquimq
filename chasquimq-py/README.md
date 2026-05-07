@@ -2,80 +2,107 @@
 
 Python bindings for [ChasquiMQ](https://github.com/jotarios/chasquimq) — the fastest open-source message broker for Redis. The Rust engine pulls jobs; Python `asyncio` handlers process them.
 
-> **Status:** Phase 4, slice A4 (high-level shim). Public API is pre-1.0 and may change.
+> **Status:** 1.0. abi3 wheels for Python 3.9+ on Linux (x86_64 + aarch64), macOS (x86_64 + aarch64), Windows (x86_64).
 
-## Layout
-
-- `src-rs/` — PyO3 Rust bindings, compiled as the `chasquimq._native` extension module.
-- `src/chasquimq/` — Python shim (the `src layout`); re-exports the native classes (`Producer` / `Consumer` / `Scheduler`) and the high-level surface (`Queue` / `Worker` / `Job` / `QueueEvents`) from one flat namespace.
-- `tests/` — pytest harness.
-
-## Build
+## Install
 
 ```bash
-cd chasquimq-py
-maturin develop          # editable install into the active venv
-pytest tests/            # smoke + integration tests (needs Redis 8.6+)
-maturin build --release  # wheels under target/wheels/
+pip install chasquimq
 ```
 
 ## Quickstart
 
 ```python
 import asyncio
+from chasquimq import Queue, Worker, Job, BackoffSpec, UnrecoverableError
 
-from chasquimq import Queue, Worker, Job, RepeatPattern
 
-
-async def send_email(job: Job) -> None:
-    print(f"sending {job.data}")
+async def send_email(job: Job) -> dict:
+    to = job.data["to"]
+    print(f"sending to {to} (attempt {job.attempts_made + 1})")
+    if "@unrecoverable" in to:
+        raise UnrecoverableError(f"hard bounce: {to}")
+    return {"sent_at": time.time(), "to": to}
 
 
 async def main() -> None:
-    queue = Queue("emails")
+    async with Queue("emails") as queue, \
+               Worker("emails", send_email, store_results=True) as worker:
 
-    # Enqueue a one-shot job.
-    await queue.add("send-email", {"to": "ada@example.com"})
+        # Plain enqueue.
+        await queue.add("welcome", {"to": "ada@example.com"})
 
-    # Enqueue a recurring job (fires every 60s on this worker process).
-    await queue.add(
-        "daily-digest",
-        {"who": "all"},
-        repeat=RepeatPattern.every(60_000),
-    )
+        # Stable jobId — second call with the same id is a no-op (idempotent).
+        await queue.add_unique(
+            "welcome", {"to": "alice@example.com"},
+            job_id="welcome:alice",
+        )
 
-    # `concurrency` defaults to 100; tune it to your handler's I/O profile.
-    worker = Worker("emails", send_email)
-    try:
+        # Per-job retry with exponential backoff.
+        await queue.add(
+            "welcome", {"to": "grace@flaky.example"},
+            attempts=3,
+            backoff=BackoffSpec.exponential(100, multiplier=2.0, max_ms=10_000),
+        )
+
+        # Delayed enqueue (in milliseconds; for `timedelta` use delay= instead).
+        await queue.add("welcome", {"to": "ka@later.example"}, delay_ms=2_000)
+
+        # Block on a single job's result, with timeout.
+        job = await queue.add("welcome", {"to": "ada@example.com"})
+        result = await job.wait_for_result(timeout=30.0)
+        print(result)
+
+        # Drain the worker.
         await worker.run()
-    finally:
-        await worker.close()
-        await queue.close()
 
 
 asyncio.run(main())
 ```
 
+## What's in the box
+
+| Surface | What it does |
+|---|---|
+| `Queue` | Producer + queue inspection. `add` / `add_bulk` / `add_unique` / `get_job_result` / `peek_dlq` / `replay_dlq` / `cancel_delayed` / `get_repeatable_jobs` / `remove_repeatable_by_key`. Async context manager. |
+| `Worker` | Consumer pool. asyncio-first dispatch, opt-in result storage (`store_results=True`), graceful shutdown. Async context manager. |
+| `Job` | Frozen dataclass returned by `Queue.add`. Has `id`, `name`, `data`, `attempts_made`, `wait_for_result(timeout=)`. |
+| `QueueEvents` | Asyncio iterator over the engine events stream. Cross-process pub/sub for `completed` / `failed` / `dlq` / `retry-scheduled` / `delayed`. |
+| `BackoffSpec` | Builders: `.fixed(delay_ms)` / `.exponential(initial_ms, multiplier, max_ms, jitter_ms)`. |
+| `RepeatPattern` | Builders: `.cron(expr, tz=)` / `.every(interval_ms)`. DST-aware via IANA tz names. |
+| `MissedFiresPolicy` | `.skip()` / `.fire_once()` / `.fire_all(max_catchup)` for cron catch-up after scheduler downtime. |
+| `UnrecoverableError` | Raise from your handler to bypass retries and route the job directly to DLQ. |
+
 ## Power-user surface
 
-Native engine handles are re-exported from the same top-level package — no
-private `_native` import needed:
+The native engine handles ship from the same top-level package:
 
 ```python
 from chasquimq import Producer, Consumer, Scheduler
 ```
 
-The high-level `Job` dataclass wins the unqualified `Job` name; if you need
-the native value type, import it explicitly:
+The high-level `Job` dataclass owns the unqualified `Job` name; if you need the native value-type, import it explicitly:
 
 ```python
 from chasquimq._native import Job as NativeJob
 ```
 
+## Build from source
+
+```bash
+cd chasquimq-py
+python -m venv .venv && source .venv/bin/activate
+pip install maturin
+maturin develop          # editable install
+pytest tests/            # smoke + integration tests (requires Redis 8.6+)
+maturin build --release  # wheels under target/wheels/
+```
+
 ## See also
 
-- [Main repo README](https://github.com/jotarios/chasquimq#readme)
-- [Phase 4 design doc](../docs/phase4-pyo3-design.md)
+- [Main repo README](https://github.com/jotarios/chasquimq#readme) — pitch, headline numbers, feature comparison
+- [Engine internals](https://github.com/jotarios/chasquimq/blob/main/docs/engine.md) — retry semantics, delayed jobs, result backends, observability
+- [Phase 4 design doc](https://github.com/jotarios/chasquimq/blob/main/docs/phase4-pyo3-design.md) — the PyO3 binding architecture
 
 ## License
 

@@ -1,6 +1,13 @@
 # Contributing to ChasquiMQ
 
-Thanks for the interest. ChasquiMQ is **Phase 4 complete** — the API surface is small and intentionally pre-1.0. Phase 1 (producer, consumer pool, batched acks, DLQ, graceful shutdown) shipped; Phase 2 added delayed jobs, exponential retry backoff, DLQ inspect/replay tooling, full observability across the promoter and the consumer hot path, idempotent delayed scheduling (`add_in_with_id` / `add_at_with_id` / `add_in_bulk_with_ids`), and cancellation (`cancel_delayed` / `cancel_delayed_bulk`); Phase 3 shipped Node.js bindings via NAPI-RS — high-level shim (`Queue` / `Worker` / `Job` / `QueueEvents`), per-job retries, repeatable / cron jobs (DST-aware via `chrono-tz`), and `UnrecoverableError` short-circuit to DLQ; Phase 4 ships Python bindings via PyO3 with the same surface plus the `chasqui` CLI for queue inspection (`inspect` / `dlq peek/replay` / `repeatable list/remove` / `watch` / `events`). Post-Phase-4 polish landed name-on-wire (separate `n` field on stream entries; preserved across delayed / repeatable / DLQ / events / shims; design doc [`docs/name-on-wire-design.md`](docs/name-on-wire-design.md)) and moved the `Scheduler` auto-spawn into the engine `Consumer`. Design docs: [Node](docs/phase3-napi-design.md) / [Python](docs/phase4-pyo3-design.md). Expect breaking changes through 1.0; flag them with `!` + a `BREAKING CHANGE:` footer.
+Thanks for the interest. ChasquiMQ is **1.0** — the public API is stable. The four shipped surfaces:
+
+- **Engine** (`chasquimq` crate on crates.io): Rust `Producer` / `Consumer` / `Promoter` / `Scheduler`, delayed jobs, exponential retry backoff, DLQ inspect/replay, full `MetricsSink` observability, idempotent delayed scheduling, cancellation, opt-in result backends.
+- **Node.js** (`chasquimq` on npm): high-level `Queue` / `Worker` / `Job` / `QueueEvents` shim plus the unwrapped engine bindings. Per-job retries, repeatable / cron (DST-aware), `addUnique`, `getJobResult` / `Job.waitForResult`, `Symbol.asyncDispose`. Native binaries for 5 platforms.
+- **Python** (`chasquimq` on PyPI): asyncio-first `Queue` / `Worker` / `Job` / `QueueEvents` shim with the same surface. abi3 wheels for 5 platforms.
+- **CLI** (`chasqui` binary, ships via cargo-dist + GitHub Releases): `inspect` / `watch` / `events` / `dlq peek/replay` / `repeatable list/remove`.
+
+Design docs: [`docs/engine.md`](docs/engine.md) (engine internals), [`docs/history.md`](docs/history.md) (slice-by-slice engineering history), [`docs/name-on-wire-design.md`](docs/name-on-wire-design.md), [`docs/phase3-napi-design.md`](docs/phase3-napi-design.md), [`docs/phase4-pyo3-design.md`](docs/phase4-pyo3-design.md). Post-1.0 breaking changes follow semver — bump the major.
 
 ## Before you start
 
@@ -196,7 +203,7 @@ This repo has four CI workflows:
 | [`ci.yml`](.github/workflows/ci.yml) | All pushes to `main` + every PR | Engine: rustfmt, clippy `-D warnings`, full `cargo test` against Redis 8.6.2 |
 | [`node-ci.yml`](.github/workflows/node-ci.yml) | Pushes / PRs touching `chasquimq-node/`, `chasquimq/`, or the workflow itself | Multi-platform NAPI build matrix, vitest against Redis 8.6.2, gated npm publish on `chore(release):` |
 | [`py-ci.yml`](.github/workflows/py-ci.yml) | Pushes / PRs touching `chasquimq-py/`, `chasquimq/`, or the workflow itself | Multi-platform `abi3` wheel build (maturin-action), pytest against Redis 8.6.2, gated PyPI publish (Trusted Publishing) on `chore(release):` |
-| [`release.yml`](.github/workflows/release.yml) (CLI Release) | Git tag matching `**[0-9]+.[0-9]+.[0-9]+*` (e.g., `chasquimq-cli-v0.1.0`) | Multi-platform `chasqui` binary builds via [`cargo dist`](https://opensource.axo.dev/cargo-dist/), shell + powershell installers, attached to a GitHub Release |
+| [`release.yml`](.github/workflows/release.yml) (CLI Release) | Git tag matching `**[0-9]+.[0-9]+.[0-9]+*` (e.g., `chasquimq-cli-v1.0.0`) | Multi-platform `chasqui` binary builds via [`cargo dist`](https://opensource.axo.dev/cargo-dist/), shell + powershell installers, attached to a GitHub Release |
 
 Two release models live in the same repo. The Node and Python publishes are commit-message gated on `main`; the CLI publish is **tag-driven** via `cargo dist`, so it doesn't watch `chore(release):`. See [Releasing chasquimq-cli](#releasing-chasquimq-cli) below for the tag form.
 
@@ -214,7 +221,7 @@ To cut a release:
    ```
 3. The [`CLI Release`](.github/workflows/release.yml) workflow runs on the tag push, builds all five platform tarballs (plus the shell/powershell installers and a source tarball), and creates a GitHub Release with the artifacts attached.
 
-Tag form: cargo-dist parses `<package-name>-v<version>` as a singular-package release. `chasquimq-cli-v0.1.0` releases only the CLI. (A bare `v0.1.0` tag would also work today since the CLI is the only `dist`-able crate in the workspace, but pinning to the namespaced form keeps the release scope unambiguous if more bin crates land later.)
+Tag form: cargo-dist parses `<package-name>-v<version>` as a singular-package release. `chasquimq-cli-v1.0.0` releases only the CLI. (A bare `v1.0.0` tag would also work today since the CLI is the only `dist`-able crate in the workspace, but pinning to the namespaced form keeps the release scope unambiguous if more bin crates land later.)
 
 Local validation before tagging:
 
