@@ -3,7 +3,7 @@ import time
 import msgpack
 import pytest
 
-from chasquimq._native import Producer
+from chasquimq import Producer
 
 from conftest import (
     delayed_key_for,
