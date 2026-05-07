@@ -27,8 +27,9 @@ from chasquimq import Queue
 
 
 async def _wait_for_result(queue: Queue, job_id: str, timeout_s: float):
-    deadline = asyncio.get_event_loop().time() + timeout_s
-    while asyncio.get_event_loop().time() < deadline:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    while loop.time() < deadline:
         result = await queue.get_job_result(job_id)
         if result is not None:
             return result
