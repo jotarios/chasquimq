@@ -30,6 +30,7 @@ export { Worker } from './worker.js'
 export type { Processor, WorkerOptions } from './worker.js'
 export { QueueEvents } from './queue-events.js'
 export type { QueueEventsOptions } from './queue-events.js'
+export { BackoffSpec } from './backoff.js'
 export * from './types.js'
 export * from './errors.js'
 export { encodePayload, decodePayload } from './encoding.js'
@@ -47,7 +48,7 @@ export type {
   SchedulerOpts,
   RetryOpts,
   AddOptions,
-  BackoffSpec,
+  BackoffSpec as NativeBackoffSpec,
   DlqEntry,
   JobRetryOverride,
   NamedPayload,

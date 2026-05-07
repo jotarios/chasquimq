@@ -33,10 +33,15 @@ class QueueEvent:
     on the entry (the producer added the job without a name, or the
     event is queue-scoped). Surfaces job kind without msgpack-decoding
     payload.
-    ``fields`` carries the remaining decoded fields verbatim — values
-    are ``str`` for documented fields, raw ``bytes`` for unknown ones.
-    Numeric fields like ``attempt`` / ``backoff_ms`` / ``duration_us``
-    arrive as decimal strings; cast on demand.
+    ``fields`` carries the remaining decoded fields verbatim. Numeric
+    fields documented by the engine schema (``attempt`` / ``backoff_ms``
+    / ``delay_ms`` / ``duration_us`` / ``ts``) are decoded into ``int``
+    at parse time so subscribers don't have to remember which fields
+    need an explicit cast — this mirrors the Node shim's
+    ``parseIntSafe`` in ``queue-events.ts``. A malformed entry whose
+    value can't be parsed as ``int`` silently falls back to the raw
+    string so the iterator never crashes on an unexpected event shape.
+    Other fields stay as ``str`` (or raw ``bytes`` for unknown keys).
     """
 
     name: str
@@ -131,11 +136,31 @@ def _to_str(v: Any) -> str:
     return str(v)
 
 
+# Numeric event fields the engine emits as decimal strings. Coerce these
+# into ``int`` at parse time so subscribers don't have to remember which
+# fields need ``int(...)``. Mirrors the Node shim's ``parseIntSafe`` use
+# in ``queue-events.ts`` — a non-numeric value silently falls back to the
+# raw string so a malformed entry never crashes the iterator.
+_NUMERIC_EVENT_FIELDS: frozenset[str] = frozenset(
+    {"attempt", "backoff_ms", "delay_ms", "duration_us", "ts"}
+)
+
+
+def _maybe_int(s: str) -> Any:
+    try:
+        return int(s)
+    except (TypeError, ValueError):
+        return s
+
+
 def _parse_event(fields: dict) -> QueueEvent:
     decoded: dict[str, Any] = {}
     for k, v in fields.items():
         ks = _to_str(k)
-        decoded[ks] = _to_str(v) if isinstance(v, (bytes, bytearray)) else v
+        vs = _to_str(v) if isinstance(v, (bytes, bytearray)) else v
+        if ks in _NUMERIC_EVENT_FIELDS and isinstance(vs, str):
+            vs = _maybe_int(vs)
+        decoded[ks] = vs
 
     name = decoded.pop("e", "")
     job_id_raw = decoded.pop("id", "")

@@ -1,3 +1,4 @@
+import './_dispose-polyfill.js'
 import { EventEmitter } from 'node:events'
 import IORedis, { type RedisOptions } from 'ioredis'
 
@@ -17,7 +18,9 @@ export class QueueEvents extends EventEmitter {
   private client: IORedis
   private streamKey: string
   private running = false
+  private closed = false
   private runPromise?: Promise<void>
+  private closePromise?: Promise<void>
   private blockingTimeoutMs: number
 
   constructor(name: string, opts: QueueEventsOptions) {
@@ -94,16 +97,38 @@ export class QueueEvents extends EventEmitter {
   }
 
   async close(): Promise<void> {
+    // Idempotent + concurrency-safe: a second concurrent caller awaits
+    // the in-flight close instead of returning before cleanup finishes.
+    if (this.closePromise) return this.closePromise
+    this.closed = true
     this.running = false
-    if (this.runPromise) {
-      // Wait for the current XREAD BLOCK to time out, then exit. Cap at
-      // blockingTimeoutMs + 1s so close() doesn't hang forever.
-      await Promise.race([
-        this.runPromise,
-        sleep(this.blockingTimeoutMs + 1000),
-      ])
-    }
-    await this.client.quit().catch(() => {})
+    this.closePromise = (async () => {
+      if (this.runPromise) {
+        // Wait for the current XREAD BLOCK to time out, then exit. Cap at
+        // blockingTimeoutMs + 1s so close() doesn't hang forever.
+        await Promise.race([
+          this.runPromise,
+          sleep(this.blockingTimeoutMs + 1000),
+        ])
+      }
+      await this.client.quit().catch(() => {})
+    })()
+    return this.closePromise
+  }
+
+  /**
+   * `await using` integration (TypeScript 5.2+). Routes through
+   * {@link QueueEvents.close}.
+   */
+  async [Symbol.asyncDispose](): Promise<void> {
+    await this.close()
+  }
+
+  /**
+   * `true` after the first {@link QueueEvents.close} call.
+   */
+  get isClosed(): boolean {
+    return this.closed
   }
 
   private dispatchEntry(eventId: string, kv: string[]): void {
@@ -139,11 +164,17 @@ export class QueueEvents extends EventEmitter {
         this.emit('delayed', { jobId, name, delay: parseIntSafe(f['delay_ms']) }, eventId)
         break
       case 'dlq':
-        // The engine emits a single `dlq` event; surface both `failed` and
-        // `retries-exhausted` for high-level shim users who expect the
-        // latter as a separate signal.
-        this.emit('failed', { jobId, name, failedReason: f['reason'] ?? 'retries-exhausted', attempt: parseIntSafe(f['attempt']) }, eventId)
-        this.emit('retries-exhausted', { jobId, name, attemptsMade: parseIntSafe(f['attempt']) }, eventId)
+        // The engine already emitted a `failed` event from the worker
+        // before relocating to the DLQ — fanning out a second synthetic
+        // `failed` here would double-fire on every UnrecoverableError /
+        // retries-exhausted path. Surface only the chasquimq-specific
+        // `retries-exhausted` channel so subscribers that wired off it
+        // (high-level shim convention) keep working.
+        this.emit('retries-exhausted', { jobId, name, attemptsMade: parseIntSafe(f['attempt']), reason: f['reason'] ?? '' }, eventId)
+        // Forward the raw `dlq` event too — power-users (and the test-
+        // app monitor) subscribe to it directly to observe the engine's
+        // routing decision (retries_exhausted vs unrecoverable).
+        this.emit('dlq', { jobId, name, reason: f['reason'] ?? '', attempt: parseIntSafe(f['attempt']) }, eventId)
         break
       case 'drained':
         this.emit('drained', eventId)

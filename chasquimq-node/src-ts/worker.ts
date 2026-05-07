@@ -24,6 +24,7 @@
  *   - `stalled` / `drained` events (the engine's events stream lands in
  *     a later slice).
  */
+import './_dispose-polyfill.js'
 import { EventEmitter } from 'node:events'
 import { decode } from '@msgpack/msgpack'
 
@@ -174,6 +175,7 @@ export class Worker<
   private native: NativeConsumer
   private processor: Processor<DataType, ResultType, NameType>
   private running = false
+  private closed = false
   private runPromise?: Promise<void>
 
   constructor(
@@ -281,8 +283,22 @@ export class Worker<
   /**
    * Shut down the worker. Best-effort: the engine drains its in-flight
    * handlers up to its configured shutdown deadline, then resolves.
+   *
+   * Idempotent — calling `close()` more than once awaits the in-flight
+   * drain instead of re-shutting-down.
    */
   async close(_force = false): Promise<void> {
+    if (this.closed) {
+      if (this.runPromise) {
+        try {
+          await this.runPromise
+        } catch {
+          /* swallow — already surfaced via 'error' */
+        }
+      }
+      return
+    }
+    this.closed = true
     this.emit('closing', '')
     this.native.shutdown()
     if (this.runPromise) {
@@ -294,6 +310,22 @@ export class Worker<
     }
     this.running = false
     this.emit('closed')
+  }
+
+  /**
+   * `await using` integration (TypeScript 5.2+). Routes through
+   * {@link Worker.close}; mirrors Python's `async with` / `__aexit__`.
+   */
+  async [Symbol.asyncDispose](): Promise<void> {
+    await this.close()
+  }
+
+  /**
+   * `true` after the first {@link Worker.close} call. Mirrors
+   * `Worker.is_closed` on the Python shim.
+   */
+  get isClosed(): boolean {
+    return this.closed
   }
 
   /**

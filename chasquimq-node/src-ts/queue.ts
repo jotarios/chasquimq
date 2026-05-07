@@ -6,11 +6,13 @@
 // `NotSupportedError` until a future slice exposes the matching engine
 // surface; this keeps the public types stable while we iterate.
 
+import "./_dispose-polyfill.js";
 import {
   Producer as NativeProducer,
   type ProducerOpts as NativeProducerOpts,
   type AddOptions as NativeAddOptions,
   type BackoffSpec as NativeBackoffSpec,
+  type DlqEntry as NativeDlqEntry,
   type JobRetryOverride as NativeJobRetryOverride,
 } from "../index.js";
 import type {
@@ -40,10 +42,19 @@ export class Queue<
   readonly name: string;
   readonly opts: QueueOptions;
   private producerPromise?: Promise<NativeProducer>;
+  private closed = false;
 
   constructor(name: string, opts: QueueOptions) {
     this.name = name;
     this.opts = opts;
+  }
+
+  /**
+   * `true` after the first {@link Queue.close} call. Mirrors
+   * `Queue.is_closed` on the Python shim.
+   */
+  get isClosed(): boolean {
+    return this.closed;
   }
 
   private async producer(): Promise<NativeProducer> {
@@ -336,6 +347,32 @@ export class Queue<
     return decodePayload(buf) as ResultType;
   }
 
+  // --- DLQ inspection / replay (engine slice 3) ---
+
+  /**
+   * Inspect up to `limit` DLQ entries, oldest first. Each entry carries
+   * the relocated `dlqId`, the original `sourceId` it had on the main
+   * stream, the routing `reason` (`retries_exhausted` / `unrecoverable`
+   * / `malformed` / `oversize` / `decode_fail`) and an optional
+   * `detail`, the dispatch `name`, plus the raw `payload` bytes. Mirrors
+   * `Queue.peek_dlq` on the Python shim.
+   */
+  async peekDlq(limit: number = 20): Promise<NativeDlqEntry[]> {
+    const producer = await this.producer();
+    return producer.peekDlq(limit);
+  }
+
+  /**
+   * Atomically move up to `limit` DLQ entries back into the main stream,
+   * resetting their attempt counter so they get a fresh retry budget.
+   * Returns the number of entries actually replayed. Mirrors
+   * `Queue.replay_dlq` on the Python shim.
+   */
+  async replayDlq(limit: number = 100): Promise<number> {
+    const producer = await this.producer();
+    return producer.replayDlq(limit);
+  }
+
   // --- Stubs (NotSupportedError) ---
 
   async getJob(_id: string): Promise<Job | undefined> {
@@ -421,6 +458,16 @@ export class Queue<
     // explicitly close yet. Drop the cached promise so a future call
     // would lazily re-connect.
     this.producerPromise = undefined;
+    this.closed = true;
+  }
+
+  /**
+   * `await using` integration (TypeScript 5.2+). Routes through
+   * {@link Queue.close} so explicit-resource-management is symmetric
+   * with manual close. Mirrors Python's `async with` / `__aexit__`.
+   */
+  async [Symbol.asyncDispose](): Promise<void> {
+    await this.close();
   }
 }
 

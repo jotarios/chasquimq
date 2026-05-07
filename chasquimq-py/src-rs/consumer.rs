@@ -267,21 +267,34 @@ struct PyHandlerError(String);
 /// the MRO), return `HandlerError::unrecoverable(...)` so the consumer
 /// routes the job straight to the DLQ. Every other exception follows the
 /// standard retry-then-DLQ path via `HandlerError::new(...)`.
+///
+/// The carried error message is `str(exception)` — Python's natural
+/// "human-readable message" for the exception, mirroring the Node FFI's
+/// stripped `.message` extraction. This keeps the `failedReason` on the
+/// events stream / `failed` event clean of FFI implementation details
+/// (no `"Python handler raised: ..."` prefix, no `repr()`-flavored
+/// `"OSError('boom')"` quoting).
 fn map_py_err(e: &PyErr, unrecoverable_cls: &Py<PyType>) -> HandlerError {
-    let (is_unrecoverable, repr) = Python::attach(|py| {
+    let (is_unrecoverable, message) = Python::attach(|py| {
         let exc_type = e.get_type(py);
         let is_unrecoverable = exc_type
             .is_subclass(unrecoverable_cls.bind(py).as_any())
             .unwrap_or(false);
         let value = e.value(py);
-        let detail = match value.repr() {
-            Ok(r) => r.to_string(),
+        // `str(exc)` returns the user's message (e.g. `"smtp timeout"`).
+        // `repr(exc)` returns `"OSError('smtp timeout')"`, which leaks the
+        // exception class wrapper — fine for logging, noisy for the
+        // wire-level `reason` field. Fall back to `format!("{e}")` only
+        // when `str()` itself errors (defensive; should not happen in
+        // practice for well-formed exceptions).
+        let detail = match value.str() {
+            Ok(s) => s.to_string(),
             Err(_) => format!("{e}"),
         };
         (is_unrecoverable, detail)
     });
 
-    let payload = PyHandlerError(format!("Python handler raised: {repr}"));
+    let payload = PyHandlerError(message);
     if is_unrecoverable {
         HandlerError::unrecoverable(payload)
     } else {
