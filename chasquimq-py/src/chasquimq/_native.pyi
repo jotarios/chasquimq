@@ -61,6 +61,10 @@ class Producer:
         self, limit: int
     ) -> Awaitable[list[dict[str, Any]]]: ...
     def remove_repeatable_by_key(self, key: str) -> Awaitable[bool]: ...
+    def get_result(self, id: str) -> Awaitable[Optional[bytes]]: ...
+    def get_result_bulk(
+        self, ids: Sequence[str]
+    ) -> Awaitable[list[Optional[bytes]]]: ...
 
 class Consumer:
     def __init__(
@@ -79,6 +83,10 @@ class Consumer:
         dlq_max_stream_len: Optional[int] = None,
         events_enabled: bool = True,
         delayed_enabled: bool = True,
+        run_scheduler: bool = True,
+        scheduler_tick_ms: Optional[int] = None,
+        store_results: bool = False,
+        result_ttl_ms: Optional[int] = None,
     ) -> None: ...
     def run(
         self, handler: Callable[[Job], Awaitable[Any]]

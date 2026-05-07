@@ -331,6 +331,38 @@ impl Producer {
             inner.remove_repeatable(&key).await.map_err(map_engine_err)
         })
     }
+
+    fn get_result<'py>(&self, py: Python<'py>, id: String) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let opt = inner.get_result(&id).await.map_err(map_engine_err)?;
+            Python::attach(|py| match opt {
+                Some(b) => Ok::<_, PyErr>(Some(PyBytes::new(py, b.as_ref()).unbind())),
+                None => Ok(None),
+            })
+        })
+    }
+
+    fn get_result_bulk<'py>(
+        &self,
+        py: Python<'py>,
+        ids: Vec<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let results = inner.get_result_bulk(&ids).await.map_err(map_engine_err)?;
+            Python::attach(|py| {
+                let out = PyList::empty(py);
+                for opt in results {
+                    match opt {
+                        Some(b) => out.append(PyBytes::new(py, b.as_ref()))?,
+                        None => out.append(py.None())?,
+                    }
+                }
+                Ok::<_, PyErr>(out.unbind())
+            })
+        })
+    }
 }
 
 fn pybytes_to_bytes(p: &Bound<'_, PyBytes>) -> Bytes {
