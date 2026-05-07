@@ -142,11 +142,23 @@ return replayed
 /// only when the worker opted in to result storage *and* the handler
 /// returned a non-empty value.
 ///
+/// **Maxmemory eviction safety (defense-in-depth).** Redis 8 lets scripts
+/// run when `used_memory >= maxmemory` under `noeviction` by default; the
+/// integration test in `tests/maxmemory.rs` exercises the exact path. The
+/// `#!lua flags=allow-oom` shebang pins the contract explicitly so a
+/// future Redis that flips the default cannot regress the behavior, and
+/// `redis.pcall` swallows an OOM rejection on the SET if it ever fired.
+/// XACKDEL always commits (it frees memory, never adds), and the result-
+/// write is best-effort: if the SET is rejected by the eviction policy
+/// the script returns `1` (ack succeeded) and the result is dropped —
+/// consistent with the documented `Producer::get_result` contract that
+/// `None` collapses "expired" and "never written."
+///
 /// KEYS[1] = stream_key, KEYS[2] = result_key
 /// ARGV[1] = group, ARGV[2] = entry_id, ARGV[3] = result_bytes, ARGV[4] = ttl_secs
 ///
 /// Returns the XACKDEL count (1 if the entry was acked, 0 otherwise).
-pub(crate) const JOB_OK_SCRIPT: &str = r#"
+pub(crate) const JOB_OK_SCRIPT: &str = r#"#!lua flags=allow-oom
 local result = redis.call('XACKDEL', KEYS[1], ARGV[1], 'IDS', 1, ARGV[2])
 local first
 if type(result) == 'table' then
@@ -157,8 +169,14 @@ end
 -- XACKDEL returns 1 (acked + removed), -1 (id not found), or 0 (not in
 -- group); only 1 means we own this delivery — both other values mean a
 -- concurrent CLAIM/replay won the race and SET is correctly skipped.
+--
+-- redis.pcall lets the SET fail silently under maxmemory-policy noeviction:
+-- if Redis is OOM and rejects the write, we still return success so the
+-- ack commits and the entry doesn't stay pending. The result is lost,
+-- which matches the documented `None == expired-or-never-written`
+-- contract on `Producer::get_result`.
 if first == 1 and #ARGV[3] > 0 then
-  redis.call('SET', KEYS[2], ARGV[3], 'EX', tonumber(ARGV[4]))
+  redis.pcall('SET', KEYS[2], ARGV[3], 'EX', tonumber(ARGV[4]))
 end
 return first
 "#;
