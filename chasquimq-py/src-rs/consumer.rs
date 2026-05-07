@@ -197,6 +197,7 @@ impl Consumer {
                 let locals = task_locals.clone();
                 let unrecoverable_cls = unrecoverable_cls.clone();
                 async move {
+                    let job_id_for_log = job.id.clone();
                     let coro_result = Python::attach(|py| -> PyResult<_> {
                         let job_py = Job::from_engine(job);
                         let coro = h.call1(py, (job_py,))?;
@@ -213,7 +214,10 @@ impl Consumer {
                     // bytes opaque to the engine. `None` (or any
                     // non-`bytes` value) maps to empty `Bytes`, which
                     // the engine treats as "no result" and short-
-                    // circuits to the batched ack-only path.
+                    // circuits to the batched ack-only path. The
+                    // non-`bytes` case logs a `tracing::warn!` so the
+                    // silent collapse is visible at debug time —
+                    // matches the Node shim's behavior.
                     match coro_fut.await {
                         Ok(obj) => Ok(Python::attach(|py| -> chasquimq::Bytes {
                             let b = obj.bind(py);
@@ -222,7 +226,13 @@ impl Consumer {
                             }
                             match b.cast::<PyBytes>() {
                                 Ok(pb) => chasquimq::Bytes::copy_from_slice(pb.as_bytes()),
-                                Err(_) => chasquimq::Bytes::new(),
+                                Err(_) => {
+                                    tracing::warn!(
+                                        job_id = %job_id_for_log,
+                                        "handler returned non-bytes/non-None; result skipped"
+                                    );
+                                    chasquimq::Bytes::new()
+                                }
                             }
                         })),
                         Err(e) => Err(map_py_err(&e, &unrecoverable_cls)),

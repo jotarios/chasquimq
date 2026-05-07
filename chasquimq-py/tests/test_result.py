@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import os
 
+import msgpack
 import pytest
 
-from chasquimq import Job, Queue, Worker
+from chasquimq import Consumer, Job, Producer, Queue, Worker
 
 
 REDIS_URL = os.environ.get("CHASQUIMQ_TEST_REDIS_URL", "redis://127.0.0.1:6379")
@@ -248,3 +249,80 @@ async def test_multiple_jobs_resolve_independently(
         except asyncio.TimeoutError:
             pass
         await queue.close()
+
+
+def test_result_ttl_ms_zero_rejected_at_construction(redis_url: str, queue_name: str) -> None:
+    """The native ``Consumer`` rejects ``result_ttl_ms <= 0`` up-front
+    (parity with the Node binding's ``resultTtlMs`` validation)."""
+    with pytest.raises(RuntimeError, match=r"result_ttl_ms.*positive"):
+        Consumer(
+            redis_url,
+            queue_name,
+            store_results=True,
+            result_ttl_ms=0,
+        )
+
+    with pytest.raises(RuntimeError, match=r"result_ttl_ms.*positive"):
+        Consumer(
+            redis_url,
+            queue_name,
+            store_results=True,
+            result_ttl_ms=-1,
+        )
+
+
+def test_result_ttl_ms_omitted_uses_engine_default(
+    redis_url: str, queue_name: str
+) -> None:
+    """``result_ttl_ms=None`` (the default) is legitimate — the engine
+    default applies. Construction must not raise."""
+    Consumer(
+        redis_url,
+        queue_name,
+        store_results=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_native_handler_returns_empty_bytes_writes_no_result(
+    redis_url: str, queue_name: str
+) -> None:
+    """Pin the engine's `JOB_OK_SCRIPT` `#ARGV[3] > 0` gate end-to-end.
+
+    When the handler returns ``b""`` (zero-length bytes), the engine
+    must short-circuit to the ack-only path and write no result key.
+    Uses the native ``Consumer`` / ``Producer`` so we control the exact
+    bytes returned (the high-level :class:`Worker` shim msgpack-encodes
+    results, so an empty user value would still encode to non-empty bytes).
+    """
+    producer = Producer(redis_url, queue_name)
+    consumer = Consumer(
+        redis_url,
+        queue_name,
+        concurrency=1,
+        max_attempts=3,
+        read_block_ms=200,
+        delayed_enabled=False,
+        run_scheduler=False,
+        store_results=True,
+    )
+
+    seen = asyncio.Event()
+
+    async def handler(_job) -> bytes:
+        seen.set()
+        return b""
+
+    run_task = asyncio.ensure_future(consumer.run(handler))
+    try:
+        job_id = await producer.add(msgpack.packb({"v": 1}, use_bin_type=True))
+        await asyncio.wait_for(seen.wait(), timeout=10.0)
+        # Let the engine's ack-flush + script call settle.
+        await asyncio.sleep(0.3)
+        assert await producer.get_result(job_id) is None
+    finally:
+        consumer.shutdown()
+        try:
+            await asyncio.wait_for(run_task, timeout=5.0)
+        except asyncio.TimeoutError:
+            pass
