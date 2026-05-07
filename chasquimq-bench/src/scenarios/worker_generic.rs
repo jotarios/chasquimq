@@ -51,11 +51,34 @@ pub(crate) async fn drive_worker_scenario(
     bench: u64,
     name: &'static str,
 ) -> ScenarioReport {
+    drive_worker_scenario_with_handler(
+        redis_url,
+        consumer_cfg,
+        warmup,
+        bench,
+        name,
+        chasquimq::Bytes::new,
+    )
+    .await
+}
+
+pub(crate) async fn drive_worker_scenario_with_handler<F>(
+    redis_url: &str,
+    consumer_cfg: ConsumerConfig,
+    warmup: u64,
+    bench: u64,
+    name: &'static str,
+    result_fn: F,
+) -> ScenarioReport
+where
+    F: Fn() -> chasquimq::Bytes + Send + Sync + 'static,
+{
     let sw = Arc::new(Mutex::new(Stopwatch::new(warmup, bench)));
     let (done_tx, done_rx) = oneshot::channel::<super::ScenarioOutcome>();
     let done_tx = Arc::new(Mutex::new(Some(done_tx)));
     let shutdown = CancellationToken::new();
     let shutdown_clone = shutdown.clone();
+    let result_fn = Arc::new(result_fn);
 
     let consumer: Consumer<Payload> = Consumer::new(redis_url, consumer_cfg);
     let join = tokio::spawn(async move {
@@ -65,10 +88,12 @@ pub(crate) async fn drive_worker_scenario(
                     let sw = sw.clone();
                     let done_tx = done_tx.clone();
                     let shutdown = shutdown_clone.clone();
+                    let result_fn = result_fn.clone();
                     move |_: Job<Payload>| {
                         let sw = sw.clone();
                         let done_tx = done_tx.clone();
                         let shutdown = shutdown.clone();
+                        let result_fn = result_fn.clone();
                         async move {
                             let outcome = {
                                 let mut guard = sw.lock().await;
@@ -80,7 +105,7 @@ pub(crate) async fn drive_worker_scenario(
                                 let _ = tx.send(outcome);
                                 shutdown.cancel();
                             }
-                            Ok(chasquimq::Bytes::new())
+                            Ok(result_fn())
                         }
                     }
                 },
