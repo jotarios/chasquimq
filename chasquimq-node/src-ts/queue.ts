@@ -115,6 +115,38 @@ export class Queue<
     return new Job(name, data, merged, id)
   }
 
+  /**
+   * Idempotent variant of {@link Queue.add}. Requires `opts.jobId`; throws
+   * `TypeError` when missing. Otherwise identical to `add(name, data, opts)`.
+   *
+   * Idempotency guarantees differ by path:
+   * - **Delayed** (`delay > 0`) — strict and cross-process. Re-enqueueing
+   *   the same `jobId` while the dedup marker is still alive is a no-op at
+   *   Redis (Lua `SET NX EX` on `{chasqui:<queue>}:dlid:<jobId>` gates the
+   *   `ZADD`). The marker TTL outlives the fire time by 1h so a
+   *   producer-retry can't race a successful promotion. Two different
+   *   `Queue` instances calling `addUnique` with the same id will only
+   *   schedule once.
+   * - **Immediate** (no `delay`) — strict within a single `Queue` instance,
+   *   not across instances. Redis 8.6 `XADD IDMP <producer_id> <jobId>`
+   *   dedups at the wire layer, but the IDMP scope is the producer id
+   *   (one per `Queue`). For cross-process idempotency on the immediate
+   *   path, give all callers the same `jobId` *and* use a `delay` so the
+   *   delayed-path SET-NX-EX guard kicks in.
+   */
+  async addUnique(
+    name: NameType,
+    data: DataType,
+    opts: JobsOptions = {},
+  ): Promise<Job<DataType, ResultType, NameType>> {
+    if (!opts.jobId) {
+      throw new TypeError(
+        'Queue.addUnique requires opts.jobId — use Queue.add for engine-minted IDs',
+      )
+    }
+    return await this.add(name, data, opts)
+  }
+
   async addBulk(
     jobs: Array<{ name: NameType; data: DataType; opts?: BulkJobOptions }>,
   ): Promise<Job<DataType, ResultType, NameType>[]> {

@@ -144,6 +144,54 @@ class Queue:
             created_at_ms=_now_ms(),
         )
 
+    async def add_unique(
+        self,
+        name: str,
+        data: Any,
+        *,
+        job_id: str,
+        delay: Optional[DelayLike] = None,
+        attempts: Optional[int] = None,
+        backoff: Optional[BackoffLike] = None,
+        repeat: Optional[RepeatLike] = None,
+    ) -> Job:
+        """Idempotent variant of :meth:`add`. Requires ``job_id``.
+
+        Raises :class:`ValueError` when ``job_id`` is missing or empty.
+        Otherwise behaves exactly like ``add(name, data, job_id=...)``.
+
+        Idempotency guarantees differ by path:
+
+        * **Delayed** (``delay`` set, > 0) — strict and cross-process.
+          Re-enqueueing the same ``job_id`` while the dedup marker is still
+          alive is a no-op at Redis (Lua ``SET NX EX`` on
+          ``{{chasqui:<queue>}}:dlid:<job_id>`` gates the ``ZADD``). The
+          marker TTL outlives the fire time by 1h so a producer-retry can't
+          race a successful promotion. Two different :class:`Queue`
+          instances calling ``add_unique`` with the same id will only
+          schedule once.
+        * **Immediate** (no ``delay``) — strict within a single
+          :class:`Queue` instance, not across instances. Redis 8.6
+          ``XADD IDMP <producer_id> <job_id>`` dedups at the wire layer,
+          but the IDMP scope is the producer id (one per :class:`Queue`).
+          For cross-process idempotency on the immediate path, give all
+          callers the same ``job_id`` *and* use a ``delay`` so the
+          delayed-path SET-NX-EX guard kicks in.
+        """
+        if not job_id:
+            raise ValueError(
+                "Queue.add_unique requires job_id — use Queue.add for engine-minted IDs"
+            )
+        return await self.add(
+            name,
+            data,
+            delay=delay,
+            attempts=attempts,
+            backoff=backoff,
+            job_id=job_id,
+            repeat=repeat,
+        )
+
     async def add_bulk(self, jobs: Sequence[dict]) -> list[Job]:
         """Enqueue many jobs.
 
