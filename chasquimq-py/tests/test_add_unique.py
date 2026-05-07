@@ -22,8 +22,8 @@ async def test_add_with_job_id_on_delayed_path_is_idempotent(
 ) -> None:
     queue = Queue(queue_name, redis_url=redis_url)
     job_id = f"dup-{int(time.time() * 1000)}"
-    a = await queue.add("job", {"k": "a"}, job_id=job_id, delay=60_000)
-    b = await queue.add("job", {"k": "b"}, job_id=job_id, delay=60_000)
+    a = await queue.add("job", {"k": "a"}, job_id=job_id, delay_ms=60_000)
+    b = await queue.add("job", {"k": "b"}, job_id=job_id, delay_ms=60_000)
     assert a.id == job_id
     assert b.id == job_id
     # Only the first call's payload landed in the delayed ZSET — Lua
@@ -96,8 +96,8 @@ async def test_add_unique_with_delay_is_strictly_idempotent(
 ) -> None:
     queue = Queue(queue_name, redis_url=redis_url)
     job_id = f"unique-{int(time.time() * 1000)}"
-    a = await queue.add_unique("job", {"k": "a"}, job_id=job_id, delay=60_000)
-    b = await queue.add_unique("job", {"k": "b"}, job_id=job_id, delay=60_000)
+    a = await queue.add_unique("job", {"k": "a"}, job_id=job_id, delay_ms=60_000)
+    b = await queue.add_unique("job", {"k": "b"}, job_id=job_id, delay_ms=60_000)
     assert a.id == job_id
     assert b.id == job_id
     zcard = await redis_client.zcard(delayed_key_for(queue_name))

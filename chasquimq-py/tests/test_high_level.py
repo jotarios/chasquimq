@@ -243,7 +243,7 @@ async def test_queue_add_with_delay_lands_in_delayed_zset(
     redis_url: str, queue_name: str, redis_client
 ) -> None:
     queue = Queue(queue_name, redis_url=redis_url)
-    job = await queue.add("delayed-task", {"k": 1}, delay=60_000)
+    job = await queue.add("delayed-task", {"k": 1}, delay_ms=60_000)
     assert job.id
     assert (
         await redis_client.zcard(delayed_key_for(queue_name))
@@ -280,7 +280,7 @@ async def test_queue_cancel_delayed_round_trip(
 ) -> None:
     queue = Queue(queue_name, redis_url=redis_url)
     await queue.add(
-        "x", {"k": 1}, delay=60_000, job_id="cancel-target"
+        "x", {"k": 1}, delay_ms=60_000, job_id="cancel-target"
     )
     assert (
         await redis_client.zcard(delayed_key_for(queue_name))
@@ -580,9 +580,7 @@ async def test_negative_delay_raises(
 ) -> None:
     queue = Queue(queue_name, redis_url=redis_url)
     with pytest.raises(ValueError, match="non-negative"):
-        await queue.add("x", {"k": 1}, delay=-1)
-    with pytest.raises(ValueError, match="non-negative"):
-        await queue.add("x", {"k": 1}, delay=-0.5)
+        await queue.add("x", {"k": 1}, delay_ms=-1)
     with pytest.raises(ValueError, match="non-negative"):
         await queue.add(
             "x", {"k": 1}, delay=timedelta(milliseconds=-100)
@@ -591,16 +589,14 @@ async def test_negative_delay_raises(
 
 
 @pytest.mark.asyncio
-async def test_non_finite_float_delay_raises(
+async def test_int_or_float_on_delay_kwarg_rejected(
     redis_url: str, queue_name: str
 ) -> None:
     queue = Queue(queue_name, redis_url=redis_url)
-    with pytest.raises(ValueError, match="finite non-negative"):
-        await queue.add("x", {"k": 1}, delay=float("inf"))
-    with pytest.raises(ValueError, match="finite non-negative"):
-        await queue.add("x", {"k": 1}, delay=float("-inf"))
-    with pytest.raises(ValueError, match="finite non-negative"):
-        await queue.add("x", {"k": 1}, delay=float("nan"))
+    with pytest.raises(TypeError, match="delay_ms"):
+        await queue.add("x", {"k": 1}, delay=60_000)
+    with pytest.raises(TypeError, match="delay_ms"):
+        await queue.add("x", {"k": 1}, delay=1.5)
     await queue.close()
 
 

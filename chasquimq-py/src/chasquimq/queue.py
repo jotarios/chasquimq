@@ -9,7 +9,6 @@ drain the same Redis stream without translation.
 
 from __future__ import annotations
 
-import math
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional, Sequence, Union
@@ -21,14 +20,16 @@ from .job import Job
 from .repeat import BackoffSpec, MissedFiresPolicy, RepeatableMeta, RepeatPattern
 
 
-DelayLike = Union[int, float, datetime, timedelta]
+DelayLike = Union[datetime, timedelta]
 """Anything :meth:`Queue.add` accepts as ``delay``.
 
-* ``int`` — milliseconds before the job becomes processable (BullMQ-compat).
-* ``float`` — seconds (Pythonic; multiplied by 1000 internally).
 * :class:`datetime.timedelta` — relative duration.
 * :class:`datetime.datetime` — absolute fire time. Naive datetimes are
   treated as UTC.
+
+For raw millisecond values, pass ``delay_ms=`` instead — bare ``int`` /
+``float`` on ``delay=`` is rejected to avoid the "is this seconds or
+milliseconds?" trap.
 """
 
 BackoffLike = Union[int, BackoffSpec, dict]
@@ -92,6 +93,7 @@ class Queue:
         name: str,
         data: Any,
         *,
+        delay_ms: Optional[int] = None,
         delay: Optional[DelayLike] = None,
         attempts: Optional[int] = None,
         backoff: Optional[BackoffLike] = None,
@@ -128,8 +130,22 @@ class Queue:
                 "Queue.add: job_id must be a non-empty, non-whitespace string"
             )
 
-        delay_ms = _coerce_delay_ms(delay)
-        absolute_ms = _coerce_absolute_ms(delay)
+        if delay_ms is not None and delay is not None:
+            raise ValueError(
+                "Queue.add: pass either delay_ms (int) or delay (timedelta/datetime), not both"
+            )
+        if delay_ms is not None:
+            if isinstance(delay_ms, bool) or not isinstance(delay_ms, int):
+                raise TypeError(
+                    f"delay_ms must be a non-negative int (milliseconds); "
+                    f"got {type(delay_ms).__name__}"
+                )
+            if delay_ms < 0:
+                raise ValueError(f"delay_ms must be non-negative, got {delay_ms}")
+        absolute_ms: Optional[int] = None
+        if delay_ms is None:
+            delay_ms = _coerce_delay_ms(delay)
+            absolute_ms = _coerce_absolute_ms(delay)
         opts = _build_add_options(job_id, attempts, backoff, name=name)
         payload = encode_payload(data)
         producer = self._get_producer()
@@ -172,6 +188,7 @@ class Queue:
         data: Any,
         *,
         job_id: str,
+        delay_ms: Optional[int] = None,
         delay: Optional[DelayLike] = None,
         attempts: Optional[int] = None,
         backoff: Optional[BackoffLike] = None,
@@ -218,6 +235,7 @@ class Queue:
         return await self.add(
             name,
             data,
+            delay_ms=delay_ms,
             delay=delay,
             attempts=attempts,
             backoff=backoff,
@@ -239,6 +257,7 @@ class Queue:
 
         all_simple = all(
             j.get("delay") is None
+            and j.get("delay_ms") is None
             and j.get("job_id") is None
             and j.get("attempts") is None
             and j.get("backoff") is None
@@ -270,6 +289,7 @@ class Queue:
                 await self.add(
                     j["name"],
                     j["data"],
+                    delay_ms=j.get("delay_ms"),
                     delay=j.get("delay"),
                     attempts=j.get("attempts"),
                     backoff=j.get("backoff"),
@@ -435,21 +455,13 @@ def _coerce_delay_ms(delay: Optional[DelayLike]) -> Optional[int]:
                 f"delay must be non-negative, got {delay!r}"
             )
         return int(secs * 1000)
-    if isinstance(delay, bool):
-        raise TypeError("delay must be int/float/datetime/timedelta; got bool")
-    if isinstance(delay, int):
-        if delay < 0:
-            raise ValueError(f"delay must be non-negative, got {delay}")
-        return delay
-    if isinstance(delay, float):
-        if not math.isfinite(delay) or delay < 0:
-            raise ValueError(
-                f"delay must be a finite non-negative number, got {delay!r}"
-            )
-        return int(delay * 1000)
+    if isinstance(delay, bool) or isinstance(delay, (int, float)):
+        raise TypeError(
+            f"delay must be a timedelta or datetime; got {type(delay).__name__}. "
+            "For raw millisecond values, pass delay_ms=N instead."
+        )
     raise TypeError(
-        f"delay must be int (ms) / float (s) / datetime / timedelta; "
-        f"got {type(delay).__name__}"
+        f"delay must be a timedelta or datetime; got {type(delay).__name__}"
     )
 
 
