@@ -107,6 +107,13 @@ class Queue:
                 job_id=job_id,
             )
 
+        if job_id is not None and (
+            not isinstance(job_id, str) or not job_id.strip()
+        ):
+            raise ValueError(
+                "Queue.add: job_id must be a non-empty, non-whitespace string"
+            )
+
         delay_ms = _coerce_delay_ms(delay)
         absolute_ms = _coerce_absolute_ms(delay)
         opts = _build_add_options(job_id, attempts, backoff, name=name)
@@ -177,10 +184,21 @@ class Queue:
           For cross-process idempotency on the immediate path, give all
           callers the same ``job_id`` *and* use a ``delay`` so the
           delayed-path SET-NX-EX guard kicks in.
+
+        Immediate-path dedup is also bounded by the stream's
+        ``IDMP-MAXSIZE`` LRU; high-cardinality ``job_id`` workloads may
+        silently lose dedup for the oldest entries.
+
+        A ``Producer`` mints a new UUID on each construction (process
+        restart, ``Producer(...)``); immediate-path dedup is therefore
+        not preserved across producer instances even with the same
+        ``job_id``. For cross-process / cross-restart strict dedup, use
+        ``delay > 0`` (delayed-path uses cross-process Lua dedup on the
+        ``:dlid:<job_id>`` key).
         """
-        if not job_id:
+        if not isinstance(job_id, str) or not job_id.strip():
             raise ValueError(
-                "Queue.add_unique requires job_id — use Queue.add for engine-minted IDs"
+                "Queue.add_unique: job_id must be a non-empty, non-whitespace string"
             )
         return await self.add(
             name,

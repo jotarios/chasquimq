@@ -65,6 +65,32 @@ async def test_add_unique_requires_job_id(redis_url: str, queue_name: str) -> No
 
 
 @pytest.mark.asyncio
+async def test_add_unique_rejects_whitespace_job_id(
+    redis_url: str, queue_name: str
+) -> None:
+    queue = Queue(queue_name, redis_url=redis_url)
+    with pytest.raises(ValueError):
+        await queue.add_unique("job", {"k": "x"}, job_id="   ")
+    with pytest.raises(ValueError):
+        await queue.add_unique("job", {"k": "x"}, job_id="\t\n")
+    await queue.close()
+
+
+@pytest.mark.asyncio
+async def test_add_rejects_empty_or_whitespace_job_id(
+    redis_url: str, queue_name: str
+) -> None:
+    queue = Queue(queue_name, redis_url=redis_url)
+    with pytest.raises(ValueError):
+        await queue.add("job", {"k": "x"}, job_id="")
+    with pytest.raises(ValueError):
+        await queue.add("job", {"k": "x"}, job_id="   ")
+    with pytest.raises(ValueError):
+        await queue.add("job", {"k": "x"}, job_id="\t")
+    await queue.close()
+
+
+@pytest.mark.asyncio
 async def test_add_unique_with_delay_is_strictly_idempotent(
     redis_url: str, queue_name: str, redis_client
 ) -> None:

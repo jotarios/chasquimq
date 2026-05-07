@@ -90,6 +90,14 @@ export class Queue<
       }
     }
 
+    if (merged.jobId !== undefined) {
+      if (typeof merged.jobId !== 'string' || merged.jobId.trim().length === 0) {
+        throw new TypeError(
+          'Queue.add: opts.jobId must be a non-empty, non-whitespace string',
+        )
+      }
+    }
+
     const isDelayed = !!(merged.delay && merged.delay > 0)
     const retryOverride = buildRetryOverride(merged)
     const nativeOpts = buildNativeAddOptions(
@@ -133,15 +141,26 @@ export class Queue<
    *   (one per `Queue`). For cross-process idempotency on the immediate
    *   path, give all callers the same `jobId` *and* use a `delay` so the
    *   delayed-path SET-NX-EX guard kicks in.
+   *
+   * Immediate-path dedup is also bounded by the stream's `IDMP-MAXSIZE`
+   * LRU; high-cardinality `jobId` workloads may silently lose dedup for
+   * the oldest entries.
+   *
+   * A `Producer` mints a new UUID on each construction (process restart,
+   * `new Producer(...)`); immediate-path dedup is therefore not preserved
+   * across producer instances even with the same `jobId`. For
+   * cross-process / cross-restart strict dedup, use `delay > 0`
+   * (delayed-path uses cross-process Lua dedup on the `:dlid:<job_id>`
+   * key).
    */
   async addUnique(
     name: NameType,
     data: DataType,
     opts: JobsOptions = {},
   ): Promise<Job<DataType, ResultType, NameType>> {
-    if (!opts.jobId) {
+    if (typeof opts.jobId !== 'string' || opts.jobId.trim().length === 0) {
       throw new TypeError(
-        'Queue.addUnique requires opts.jobId — use Queue.add for engine-minted IDs',
+        'Queue.addUnique: opts.jobId must be a non-empty, non-whitespace string',
       )
     }
     return await this.add(name, data, opts)

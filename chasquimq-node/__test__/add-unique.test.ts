@@ -62,6 +62,27 @@ skipIfNoRedis('Queue.add jobId + addUnique', () => {
     ).rejects.toBeInstanceOf(TypeError)
   })
 
+  it('addUnique() rejects whitespace-only jobId', async () => {
+    await expect(
+      queue.addUnique('job', { k: 'x' }, { jobId: '   ' }),
+    ).rejects.toBeInstanceOf(TypeError)
+    await expect(
+      queue.addUnique('job', { k: 'x' }, { jobId: '\t\n' }),
+    ).rejects.toBeInstanceOf(TypeError)
+  })
+
+  it('add() rejects empty / whitespace-only jobId when provided', async () => {
+    await expect(
+      queue.add('job', { k: 'x' }, { jobId: '' }),
+    ).rejects.toBeInstanceOf(TypeError)
+    await expect(
+      queue.add('job', { k: 'x' }, { jobId: '   ' }),
+    ).rejects.toBeInstanceOf(TypeError)
+    await expect(
+      queue.add('job', { k: 'x' }, { jobId: '\t' }),
+    ).rejects.toBeInstanceOf(TypeError)
+  })
+
   it('addUnique() with delay is strictly idempotent — second call is a no-op', async () => {
     const id = `unique-${Date.now()}`
     const a = await queue.addUnique('job', { k: 'a' }, { jobId: id, delay: 60_000 })
