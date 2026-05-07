@@ -38,7 +38,10 @@ async fn reader_dlq_malformed() {
     let shutdown_h = shutdown.clone();
     let handle = tokio::spawn(async move {
         consumer
-            .run(move |_job: Job<Sample>| async move { Ok(()) }, shutdown_h)
+            .run(
+                move |_job: Job<Sample>| async move { Ok(chasquimq::Bytes::new()) },
+                shutdown_h,
+            )
             .await
     });
 
@@ -94,7 +97,10 @@ async fn reader_dlq_oversize_payload() {
     let shutdown_h = shutdown.clone();
     let handle = tokio::spawn(async move {
         consumer
-            .run(move |_job: Job<Sample>| async move { Ok(()) }, shutdown_h)
+            .run(
+                move |_job: Job<Sample>| async move { Ok(chasquimq::Bytes::new()) },
+                shutdown_h,
+            )
             .await
     });
 
@@ -140,7 +146,10 @@ async fn reader_dlq_decode_failed() {
     let shutdown_h = shutdown.clone();
     let handle = tokio::spawn(async move {
         consumer
-            .run(move |_job: Job<Sample>| async move { Ok(()) }, shutdown_h)
+            .run(
+                move |_job: Job<Sample>| async move { Ok(chasquimq::Bytes::new()) },
+                shutdown_h,
+            )
             .await
     });
 
@@ -190,7 +199,10 @@ async fn reader_dlq_retries_exhausted_on_arrival() {
     let shutdown_h = shutdown.clone();
     let handle = tokio::spawn(async move {
         consumer
-            .run(move |_job: Job<Sample>| async move { Ok(()) }, shutdown_h)
+            .run(
+                move |_job: Job<Sample>| async move { Ok(chasquimq::Bytes::new()) },
+                shutdown_h,
+            )
             .await
     });
 

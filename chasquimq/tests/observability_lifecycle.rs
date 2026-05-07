@@ -42,7 +42,7 @@ async fn job_lifecycle_success_path() {
                     // sleep here, but a tiny one keeps the duration values
                     // recognisable in the assertion below (>= 1ms in micros).
                     tokio::time::sleep(Duration::from_millis(2)).await;
-                    Ok(())
+                    Ok(chasquimq::Bytes::new())
                 },
                 shutdown_h,
             )
@@ -129,7 +129,7 @@ async fn job_lifecycle_retry_then_success() {
                             "scheduled failure",
                         )))
                     } else {
-                        Ok(())
+                        Ok(chasquimq::Bytes::new())
                     }
                 },
                 shutdown_h,
@@ -263,7 +263,7 @@ async fn handler_panic_emits_panic_outcome() {
                 move |_job: Job<Sample>| async move {
                     panic!("intentional handler panic");
                     #[allow(unreachable_code)]
-                    Ok(())
+                    Ok(chasquimq::Bytes::new())
                 },
                 shutdown_h,
             )

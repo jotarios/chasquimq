@@ -116,7 +116,7 @@ async fn shutdown_drains_in_flight() {
                         started.fetch_add(1, Ordering::SeqCst);
                         tokio::time::sleep(Duration::from_millis(200)).await;
                         finished.fetch_add(1, Ordering::SeqCst);
-                        Ok(())
+                        Ok(chasquimq::Bytes::new())
                     }
                 },
                 shutdown_clone,

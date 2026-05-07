@@ -193,8 +193,14 @@ impl Consumer {
                         Ok(fut) => fut,
                         Err(e) => return Err(map_py_err(&e, &unrecoverable_cls)),
                     };
+                    // Slice 5a tactical compile-fix: engine handler now
+                    // returns `Bytes`. Slice 5c will plumb the Python-side
+                    // return value through; for now, an empty `Bytes`
+                    // keeps the signature intact and the engine's
+                    // `store_results` gate is a no-op (empty results
+                    // never trigger the per-entry SET).
                     match coro_fut.await {
-                        Ok(_) => Ok(()),
+                        Ok(_) => Ok(chasquimq::Bytes::new()),
                         Err(e) => Err(map_py_err(&e, &unrecoverable_cls)),
                     }
                 }

@@ -144,9 +144,15 @@ impl Consumer {
                         //
                         // With `Fatal` strategy `call_async` takes the
                         // value directly (not `Result<T>`).
+                        // Slice 5a tactical compile-fix: engine handler now
+                        // returns `Bytes`. Slice 5b will plumb the JS-side
+                        // return value through the TSFN; for now, an empty
+                        // `Bytes` keeps the signature intact and the
+                        // engine's `store_results` gate is a no-op (empty
+                        // results never trigger the per-entry SET).
                         match tsfn.call_async::<Promise<UnknownReturnValue>>(js_job).await {
                             Ok(promise) => match promise.await {
-                                Ok(_) => Ok(()),
+                                Ok(_) => Ok(chasquimq::Bytes::new()),
                                 Err(e) => Err(map_js_rejection(&e)),
                             },
                             Err(e) => Err(HandlerError::new(JsHandlerError(format!(

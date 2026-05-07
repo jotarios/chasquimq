@@ -317,7 +317,7 @@ async fn consumer_embedded_promoter_forwards_metrics() {
                     let counter = counter_h.clone();
                     async move {
                         counter.fetch_add(1, Ordering::SeqCst);
-                        Ok(())
+                        Ok(chasquimq::Bytes::new())
                     }
                 },
                 shutdown_h,

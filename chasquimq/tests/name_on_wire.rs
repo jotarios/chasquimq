@@ -113,7 +113,7 @@ async fn drive_consumer(queue: &str, consumer_id: &str, expected: usize) -> Vec<
                             .lock()
                             .unwrap()
                             .push((job.name.clone(), job.payload.n));
-                        Ok(())
+                        Ok(chasquimq::Bytes::new())
                     }
                 },
                 shutdown_clone,
@@ -358,7 +358,9 @@ async fn drive_failing_consumer(admin: &Client, queue: &str, consumer_id: &str, 
         consumer
             .run(
                 move |_job: Job<Sample>| async move {
-                    Err::<(), _>(HandlerError::new(std::io::Error::other("fail-on-purpose")))
+                    Err::<chasquimq::Bytes, _>(HandlerError::new(std::io::Error::other(
+                        "fail-on-purpose",
+                    )))
                 },
                 shutdown_clone,
             )

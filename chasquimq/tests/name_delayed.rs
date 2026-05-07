@@ -172,7 +172,7 @@ async fn drive_consumer_recording(
                             .lock()
                             .unwrap()
                             .push((job.name.clone(), job.payload.n));
-                        Ok(())
+                        Ok(chasquimq::Bytes::new())
                     }
                 },
                 shutdown_clone,
@@ -442,11 +442,11 @@ async fn retry_via_delayed_zset_preserves_name() {
                         let prior = attempts.fetch_add(1, Ordering::SeqCst);
                         if prior == 0 {
                             // First invocation: fail to trigger retry.
-                            Err::<(), _>(HandlerError::new(std::io::Error::other(
+                            Err::<chasquimq::Bytes, _>(HandlerError::new(std::io::Error::other(
                                 "retry-name-trigger",
                             )))
                         } else {
-                            Ok(())
+                            Ok(chasquimq::Bytes::new())
                         }
                     }
                 },

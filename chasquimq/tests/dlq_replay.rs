@@ -224,9 +224,11 @@ async fn replay_resets_attempt_so_retries_run_again() {
                         // attempt (job.attempt == 1) succeeds. If attempt wasn't
                         // reset the entry would have re-DLQ'd on first dispatch.
                         if job.attempt == 0 {
-                            Err::<(), _>(HandlerError::new(std::io::Error::other("flaky")))
+                            Err::<chasquimq::Bytes, _>(HandlerError::new(std::io::Error::other(
+                                "flaky",
+                            )))
                         } else {
-                            Ok(())
+                            Ok(chasquimq::Bytes::new())
                         }
                     }
                 },

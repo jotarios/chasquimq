@@ -128,7 +128,7 @@ async fn handler_err_then_ok_after_backoff() {
                         if n < 2 {
                             Err(HandlerError::new(std::io::Error::other("flaky")))
                         } else {
-                            Ok(())
+                            Ok(chasquimq::Bytes::new())
                         }
                     }
                 },
@@ -183,7 +183,7 @@ async fn always_err_lands_in_dlq_fast() {
                     let calls = calls_h.clone();
                     async move {
                         calls.fetch_add(1, Ordering::SeqCst);
-                        Err::<(), _>(HandlerError::new(std::io::Error::other("nope")))
+                        Err::<chasquimq::Bytes, _>(HandlerError::new(std::io::Error::other("nope")))
                     }
                 },
                 shutdown_clone,
@@ -244,7 +244,7 @@ async fn attempt_counter_survives_promote_round_trip() {
                         if job.attempt < 2 {
                             Err(HandlerError::new(std::io::Error::other("flaky")))
                         } else {
-                            Ok(())
+                            Ok(chasquimq::Bytes::new())
                         }
                     }
                 },
@@ -298,7 +298,7 @@ async fn panic_treated_as_retry() {
                         calls.fetch_add(1, Ordering::SeqCst);
                         panic!("boom");
                         #[allow(unreachable_code)]
-                        Ok(())
+                        Ok(chasquimq::Bytes::new())
                     }
                 },
                 shutdown_clone,

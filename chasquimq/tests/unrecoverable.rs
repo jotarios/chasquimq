@@ -136,9 +136,9 @@ async fn handler_unrecoverable_routes_directly_to_dlq() {
                     let calls = calls_h.clone();
                     async move {
                         calls.fetch_add(1, Ordering::SeqCst);
-                        Err::<(), _>(HandlerError::unrecoverable(std::io::Error::other(
-                            "terminal failure",
-                        )))
+                        Err::<chasquimq::Bytes, _>(HandlerError::unrecoverable(
+                            std::io::Error::other("terminal failure"),
+                        ))
                     }
                 },
                 shutdown_clone,
@@ -216,7 +216,9 @@ async fn unrecoverable_beats_per_job_retry_override() {
                     let calls = calls_h.clone();
                     async move {
                         calls.fetch_add(1, Ordering::SeqCst);
-                        Err::<(), _>(HandlerError::unrecoverable(std::io::Error::other("nope")))
+                        Err::<chasquimq::Bytes, _>(HandlerError::unrecoverable(
+                            std::io::Error::other("nope"),
+                        ))
                     }
                 },
                 shutdown_clone,
