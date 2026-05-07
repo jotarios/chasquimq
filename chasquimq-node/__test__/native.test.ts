@@ -4,13 +4,16 @@ import { encode, decode } from '@msgpack/msgpack'
 // Native bindings are re-exported from the package root alongside the
 // high-level shim — one namespace, no subpath. The native `Job` value
 // type is re-exported as `NativeJob` to avoid colliding with the
-// high-level `Job` class.
+// high-level `Job` class. `Promoter` is the only exception: it's not
+// re-exported from the package root (symmetry with the Python shim,
+// which has no `Promoter` pyclass), so import it from the underlying
+// napi binding directly.
 import {
   Producer,
   Consumer,
-  Promoter,
   type NativeJob,
 } from '../dist/index.js'
+import { Promoter } from '../index.js'
 
 const REDIS_URL = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379'
 const HAS_REDIS = Boolean(process.env.REDIS_URL)

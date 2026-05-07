@@ -3,8 +3,8 @@ import { encode } from '@msgpack/msgpack'
 import {
   Producer,
   Consumer,
-  Promoter,
 } from '../dist/index.js'
+import { Promoter } from '../index.js'
 
 // The high-level shim doesn't expose cancelDelayed / cancelDelayedBulk
 // or peekDlq / replayDlq, but the underlying native Producer does. These
