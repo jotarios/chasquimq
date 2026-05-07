@@ -18,8 +18,10 @@ use chasquimq::config::{ConsumerConfig, RetryConfig};
 use chasquimq::consumer::Consumer as EngineConsumer;
 use chasquimq::{HandlerError, Job as EngineJob};
 use napi::bindgen_prelude::*;
+use napi::sys;
 use napi::threadsafe_function::{ErrorStrategy, ThreadsafeFunction};
 use napi_derive::napi;
+use std::ptr;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -85,7 +87,7 @@ pub struct Consumer {
 impl Consumer {
     #[napi(constructor)]
     pub fn new(redis_url: String, opts: Option<ConsumerOpts>) -> napi::Result<Self> {
-        let cfg = build_consumer_config(opts);
+        let cfg = build_consumer_config(opts)?;
         Ok(Self {
             redis_url,
             cfg,
@@ -109,6 +111,14 @@ impl Consumer {
     /// `"<name>: <message>"`. We match the prefix `"UnrecoverableError"`
     /// followed by either `:` (the standard `Error.toString()` form) or
     /// end-of-string (an `UnrecoverableError` thrown with no message).
+    ///
+    /// **Return value:** the JS handler's resolved `Promise<Buffer | undefined | null>`
+    /// is plumbed through to the engine's result backend. `null` /
+    /// `undefined` → ack-only path. A `Buffer` is forwarded as the
+    /// result bytes (gated by `storeResults`). A non-Buffer / non-nullish
+    /// resolution silently collapses to the ack-only path with a
+    /// `tracing::warn!` so it surfaces in operator logs without failing
+    /// the job — matches the Python shim's behavior.
     #[napi(ts_args_type = "handler: (job: Job) => Promise<Buffer | undefined | null>")]
     pub async fn run(
         &self,
@@ -136,6 +146,7 @@ impl Consumer {
                         // `docs/phase3-napi-design.md` §4 — the
                         // throughput-path price for keeping the binding
                         // schema-agnostic.
+                        let job_id_for_log = job.id.clone();
                         let js_job = Job {
                             id: job.id,
                             name: job.name,
@@ -144,19 +155,31 @@ impl Consumer {
                             attempt: job.attempt,
                         };
 
-                        // `call_async::<Promise<Option<Buffer>>>` resolves
-                        // the JS handler's returned Promise to either a
-                        // `Buffer` (msgpack-encoded result bytes from the
-                        // shim) or `null` / `undefined` → `None` (no
-                        // result; the engine takes the ack-only fast
-                        // path). Anything else surfaces as a conversion
-                        // error and routes through the standard handler-
-                        // error path. With `Fatal` strategy `call_async`
-                        // takes the value directly (not `Result<T>`).
-                        match tsfn.call_async::<Promise<Option<Buffer>>>(js_job).await {
+                        // `call_async::<Promise<HandlerReturn>>` resolves
+                        // the JS handler's returned Promise. The custom
+                        // `HandlerReturn` decoder runs inside napi's
+                        // `then` callback (on the JS thread) and copies
+                        // the Buffer's bytes — if any — into a Vec, so
+                        // we never carry napi pointers across threads.
+                        // It accepts:
+                        //   - Buffer        → `HandlerReturn::Bytes(...)`
+                        //   - null / undef  → `HandlerReturn::None`
+                        //   - anything else → `HandlerReturn::Skipped`
+                        //                     (silent collapse to ack-only,
+                        //                     parity with the Python shim)
+                        // Real Promise rejections still take the catch
+                        // path and route through `map_js_rejection`.
+                        match tsfn.call_async::<Promise<HandlerReturn>>(js_job).await {
                             Ok(promise) => match promise.await {
-                                Ok(Some(buf)) => Ok(Bytes::copy_from_slice(buf.as_ref())),
-                                Ok(None) => Ok(Bytes::new()),
+                                Ok(HandlerReturn::Bytes(v)) => Ok(Bytes::from(v)),
+                                Ok(HandlerReturn::None) => Ok(Bytes::new()),
+                                Ok(HandlerReturn::Skipped) => {
+                                    tracing::warn!(
+                                        job_id = %job_id_for_log,
+                                        "handler returned non-Buffer/non-nullish; result skipped"
+                                    );
+                                    Ok(Bytes::new())
+                                }
                                 Err(e) => Err(map_js_rejection(&e)),
                             },
                             Err(e) => Err(HandlerError::new(JsHandlerError(format!(
@@ -180,7 +203,7 @@ impl Consumer {
     }
 }
 
-fn build_consumer_config(opts: Option<ConsumerOpts>) -> ConsumerConfig {
+fn build_consumer_config(opts: Option<ConsumerOpts>) -> napi::Result<ConsumerConfig> {
     let mut cfg = ConsumerConfig::default();
     if let Some(o) = opts {
         if let Some(v) = o.queue_name {
@@ -242,11 +265,17 @@ fn build_consumer_config(opts: Option<ConsumerOpts>) -> ConsumerConfig {
             cfg.store_results = v;
         }
         if let Some(v) = o.result_ttl_ms {
+            // Reject 0 / negative explicitly; matches the Python shim's
+            // PyRuntimeError. `undefined` (None) is still legitimate and
+            // falls through to the engine default (3,600,000 ms).
+            if v <= 0 {
+                return Err(napi::Error::from_reason(format!(
+                    "resultTtlMs must be > 0; got {v}"
+                )));
+            }
             // Engine TTL is in seconds; round up so a sub-second value
             // doesn't collapse to zero (which Redis rejects on `EX`).
-            if v > 0 {
-                cfg.result_ttl_secs = (v as u64).div_ceil(1000);
-            }
+            cfg.result_ttl_secs = (v as u64).div_ceil(1000);
         }
         if let Some(r) = o.retry {
             let mut rc = RetryConfig::default();
@@ -271,7 +300,7 @@ fn build_consumer_config(opts: Option<ConsumerOpts>) -> ConsumerConfig {
             cfg.retry = rc;
         }
     }
-    cfg
+    Ok(cfg)
 }
 
 fn clamp_u64_to_i64(v: u64) -> i64 {
@@ -288,6 +317,55 @@ fn clamp_u64_to_i64(v: u64) -> i64 {
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 struct JsHandlerError(String);
+
+/// Decoded form of the JS handler's resolved Promise. The decoder runs
+/// inside napi's `then` callback (on the JS thread) and copies any
+/// Buffer's bytes into a `Vec<u8>` so the resulting value is `Send` —
+/// no napi pointers are carried back to the tokio worker.
+///
+/// Variants:
+/// - `Bytes(Vec<u8>)` — handler resolved with a `Buffer`.
+/// - `None` — handler resolved with `null` or `undefined`.
+/// - `Skipped` — handler resolved with anything else (number, object,
+///   string, ...). Treated as "no result"; the consumer logs a warn
+///   and ack-only's the job.
+#[derive(Debug)]
+enum HandlerReturn {
+    Bytes(Vec<u8>),
+    None,
+    Skipped,
+}
+
+impl FromNapiValue for HandlerReturn {
+    unsafe fn from_napi_value(env: sys::napi_env, napi_val: sys::napi_value) -> napi::Result<Self> {
+        let mut val_type = 0;
+        let status = unsafe { sys::napi_typeof(env, napi_val, &mut val_type) };
+        if status != sys::Status::napi_ok {
+            return Ok(HandlerReturn::Skipped);
+        }
+        if val_type == sys::ValueType::napi_undefined || val_type == sys::ValueType::napi_null {
+            return Ok(HandlerReturn::None);
+        }
+        let mut is_buffer = false;
+        let st2 = unsafe { sys::napi_is_buffer(env, napi_val, &mut is_buffer) };
+        if st2 != sys::Status::napi_ok || !is_buffer {
+            return Ok(HandlerReturn::Skipped);
+        }
+        let mut data = ptr::null_mut();
+        let mut len: usize = 0;
+        let st3 = unsafe { sys::napi_get_buffer_info(env, napi_val, &mut data, &mut len) };
+        if st3 != sys::Status::napi_ok {
+            return Ok(HandlerReturn::Skipped);
+        }
+        if len == 0 || data.is_null() {
+            return Ok(HandlerReturn::Bytes(Vec::new()));
+        }
+        // Copy into an owned Vec; the underlying Buffer storage is owned
+        // by V8 and may be GC'd after the `then` callback returns.
+        let slice = unsafe { std::slice::from_raw_parts(data as *const u8, len) };
+        Ok(HandlerReturn::Bytes(slice.to_vec()))
+    }
+}
 
 /// Translate a `napi::Error` produced by a rejected JS Promise into the
 /// engine's `HandlerError`. When the rejection's stringified form starts

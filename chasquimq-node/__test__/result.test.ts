@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, expectTypeOf, it } from 'vitest'
-import { Queue, Worker } from '../dist/index.js'
+import { encode } from '@msgpack/msgpack'
+import { Consumer, Producer, Queue, Worker } from '../dist/index.js'
 
 const REDIS_URL = process.env.REDIS_URL
 const skipIfNoRedis = REDIS_URL ? describe : describe.skip
@@ -165,6 +166,48 @@ skipIfNoRedis('Result backend integration', () => {
     })
     const ret = typedQueue.getJobResult('any-id')
     expectTypeOf(ret).toEqualTypeOf<Promise<{ y: string } | undefined>>()
+  })
+
+  // Pins the engine's `JOB_OK_SCRIPT` `#ARGV[3] > 0` gate end-to-end:
+  // when the handler returns `Buffer.from([])` (zero-length result),
+  // the engine must short-circuit to the ack-only path and write no
+  // result key. Uses the native binding so we control the exact bytes
+  // returned (the high-level `Worker` shim msgpack-encodes results, so
+  // an empty user value would still encode to non-empty bytes).
+  it('native: handler returns Buffer.from([]) → no result key written', async () => {
+    const url = REDIS_URL!
+    let nativeProducer: Producer | undefined
+    let nativeConsumer: Consumer | undefined
+    try {
+      nativeProducer = await Producer.connect(url, { queueName })
+      nativeConsumer = new Consumer(url, {
+        queueName,
+        concurrency: 1,
+        storeResults: true,
+      })
+
+      let processed = false
+      // eslint-disable-next-line @typescript-eslint/require-await
+      const runP = nativeConsumer.run(async () => {
+        processed = true
+        return Buffer.from([])
+      })
+      // Don't `await runP` — Consumer.run resolves on shutdown.
+      void runP
+
+      const id = await nativeProducer.add(Buffer.from(encode({ v: 1 })))
+
+      await waitFor(() => processed, 5_000)
+      // Let the engine's ack-flush + script call settle.
+      await sleep(250)
+
+      const result = await nativeProducer.getResult(id)
+      expect(result).toBeNull()
+    } finally {
+      nativeConsumer?.shutdown()
+      // Best-effort: give the consumer's drain a beat.
+      await sleep(100)
+    }
   })
 })
 

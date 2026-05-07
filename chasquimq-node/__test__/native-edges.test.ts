@@ -14,7 +14,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { encode } from '@msgpack/msgpack'
 import IORedis from 'ioredis'
-import { Producer } from '../dist/index.js'
+import { Consumer, Producer } from '../dist/index.js'
 
 const REDIS_URL = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379'
 // CI sets REDIS_URL; locally we run anyway against the conventional
@@ -507,5 +507,50 @@ d('NAPI edge: AddOptions.name round-trips through XADD `n` field', () => {
       .filter(Boolean)
       .sort()
     expect(namesSeen).toEqual(['job-a', 'job-b'])
+  })
+})
+
+d('NAPI edge: ConsumerOpts.resultTtlMs validation', () => {
+  it('rejects 0 at construction', () => {
+    expect(
+      () =>
+        new Consumer(REDIS_URL, {
+          queueName: freshQueue(),
+          storeResults: true,
+          resultTtlMs: 0,
+        }),
+    ).toThrow(/resultTtlMs.*> 0/i)
+  })
+
+  it('rejects negative at construction', () => {
+    expect(
+      () =>
+        new Consumer(REDIS_URL, {
+          queueName: freshQueue(),
+          storeResults: true,
+          resultTtlMs: -1,
+        }),
+    ).toThrow(/resultTtlMs.*> 0/i)
+  })
+
+  it('accepts undefined (engine default applies)', () => {
+    expect(
+      () =>
+        new Consumer(REDIS_URL, {
+          queueName: freshQueue(),
+          storeResults: true,
+        }),
+    ).not.toThrow()
+  })
+
+  it('accepts a positive value', () => {
+    expect(
+      () =>
+        new Consumer(REDIS_URL, {
+          queueName: freshQueue(),
+          storeResults: true,
+          resultTtlMs: 500,
+        }),
+    ).not.toThrow()
   })
 })
