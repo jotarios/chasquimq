@@ -56,6 +56,14 @@ pub enum MissedFiresPolicy {
     /// Fire every missed window in this tick. Bounded by `max_catchup`
     /// to avoid pathological replays after very long outages. After
     /// `max_catchup` fires, advance to first-future and log a warning.
+    ///
+    /// Valid range: `>= 1`. The engine's scheduler loop short-circuits
+    /// when `count >= max_catchup`, so `max_catchup = 0` would behave
+    /// identically to [`MissedFiresPolicy::Skip`] (no fires emitted) —
+    /// the engine itself does not enforce the lower bound, but the
+    /// Node and Python shims reject `max_catchup < 1` at their
+    /// boundaries so users don't end up with a wire-distinct-but-
+    /// semantically-equivalent encoding of `Skip`.
     FireAll { max_catchup: u32 },
 }
 

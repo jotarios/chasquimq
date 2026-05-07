@@ -84,6 +84,56 @@ skipIfNoRedis('Queue.add({ repeat, missedFires }) round-trips through Redis', ()
     expect(list.find((m) => m.jobName === 'mf-bad')).toBeUndefined()
   })
 
+  it('rejects fire-all with maxCatchup=0 (semantically equivalent to skip)', async () => {
+    await expect(
+      queue.add(
+        'mf-zero',
+        { idx: 0 },
+        {
+          repeat: {
+            every: 60_000,
+            missedFires: { kind: 'fire-all', maxCatchup: 0 },
+          },
+        },
+      ),
+    ).rejects.toThrowError(/maxCatchup/)
+    const list = await queue.getRepeatableJobs()
+    expect(list.find((m) => m.jobName === 'mf-zero')).toBeUndefined()
+  })
+
+  it('rejects fire-all with non-integer maxCatchup', async () => {
+    // 5.7 would silently truncate to 5 inside napi_get_value_uint32. The
+    // JS-side guard catches the float before it reaches the FFI boundary.
+    await expect(
+      queue.add(
+        'mf-frac',
+        { idx: 0 },
+        {
+          repeat: {
+            every: 60_000,
+            missedFires: { kind: 'fire-all', maxCatchup: 5.7 },
+          },
+        },
+      ),
+    ).rejects.toThrowError(/maxCatchup/)
+    const list = await queue.getRepeatableJobs()
+    expect(list.find((m) => m.jobName === 'mf-frac')).toBeUndefined()
+  })
+
+  it('rejects missedFires passed outside `repeat` (defense in depth)', async () => {
+    // TS types nest `missedFires` under `RepeatOptions`, but `as any`
+    // would let the field through silently — Python's shim raises
+    // `ValueError`, so mirror the rejection here at runtime.
+    await expect(
+      queue.add(
+        'mf-orphan',
+        { idx: 0 },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        { missedFires: { kind: 'skip' } } as any,
+      ),
+    ).rejects.toThrowError(/missedFires is only meaningful with `repeat`/)
+  })
+
   it('explicit { kind: "skip" } is encoded to engine default', async () => {
     const job = await queue.add(
       'mf-explicit-skip',

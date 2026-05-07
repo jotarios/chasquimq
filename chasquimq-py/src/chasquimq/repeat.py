@@ -133,14 +133,20 @@ class MissedFiresPolicy:
     def fire_all(max_catchup: int) -> "MissedFiresPolicy":
         """Replay each missed window up to ``max_catchup`` fires.
 
-        ``max_catchup`` must be a non-negative integer. The engine clamps
-        replay to this cap per scheduler tick to avoid pathological
-        replays after very long outages; values that don't fit a 32-bit
-        unsigned integer are rejected at the FFI boundary.
+        ``max_catchup`` must be a positive integer (``>= 1``). The engine's
+        scheduler loop breaks when the replay count reaches the cap, so
+        ``max_catchup = 0`` would be wire-distinct from but semantically
+        equivalent to :meth:`skip` — almost certainly a caller mistake.
+        Values that don't fit a 32-bit unsigned integer are rejected at
+        the FFI boundary.
         """
-        if max_catchup < 0:
+        if not isinstance(max_catchup, int) or isinstance(max_catchup, bool):
+            raise TypeError(
+                f"max_catchup must be an int, got {type(max_catchup).__name__}"
+            )
+        if max_catchup < 1:
             raise ValueError(
-                f"max_catchup must be non-negative, got {max_catchup}"
+                f"max_catchup must be a positive integer (>= 1), got {max_catchup}"
             )
         return MissedFiresPolicy(kind="fire-all", max_catchup=max_catchup)
 

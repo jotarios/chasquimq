@@ -438,7 +438,7 @@ def _missed_fires_from_dict(d: Optional[dict]) -> Optional[MissedFiresPolicy]:
         return MissedFiresPolicy.fire_once()
     if kind == "fire-all":
         return MissedFiresPolicy.fire_all(int(d.get("max_catchup", 0)))
-    return None
+    raise ValueError(f"unknown missed_fires kind: {kind!r}")
 
 
 def _meta_from_dict(m: dict[str, Any]) -> RepeatableMeta:

@@ -592,8 +592,17 @@ fn dict_to_missed_fires(d: &Bound<'_, PyDict>) -> PyResult<MissedFiresPolicy> {
                 Some(v) if !v.is_none() => v.extract().map_err(|_| {
                     PyValueError::new_err("missed_fires.max_catchup must be a non-negative int")
                 })?,
-                _ => 100,
+                _ => {
+                    return Err(PyValueError::new_err(
+                        "missed_fires.max_catchup is required when kind is 'fire-all'",
+                    ));
+                }
             };
+            if max_catchup < 1 {
+                return Err(PyValueError::new_err(format!(
+                    "missed_fires.max_catchup must be a positive integer (>= 1), got {max_catchup}"
+                )));
+            }
             Ok(MissedFiresPolicy::FireAll { max_catchup })
         }
         other => Err(PyValueError::new_err(format!(

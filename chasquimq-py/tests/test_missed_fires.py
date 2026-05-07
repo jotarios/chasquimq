@@ -133,5 +133,23 @@ async def test_missed_fires_without_repeat_raises(
 
 
 def test_missed_fires_policy_negative_max_catchup_rejected() -> None:
-    with pytest.raises(ValueError, match="max_catchup must be non-negative"):
+    with pytest.raises(ValueError, match=r"max_catchup must be a positive integer"):
         MissedFiresPolicy.fire_all(max_catchup=-1)
+
+
+def test_missed_fires_policy_zero_max_catchup_rejected() -> None:
+    # `max_catchup = 0` would be wire-distinct from but semantically equivalent
+    # to Skip — the engine's catch-up loop short-circuits when count >=
+    # max_catchup so nothing fires. Almost certainly a caller mistake.
+    with pytest.raises(ValueError, match=r"max_catchup must be a positive integer"):
+        MissedFiresPolicy.fire_all(max_catchup=0)
+
+
+def test_missed_fires_from_dict_unknown_kind_raises() -> None:
+    # Defense in depth: a wire payload with an unrecognized `kind` must
+    # surface as an error rather than silently producing `None` (which
+    # would mask data corruption / cross-version drift).
+    from chasquimq.queue import _missed_fires_from_dict
+
+    with pytest.raises(ValueError, match=r"unknown missed_fires kind"):
+        _missed_fires_from_dict({"kind": "weird"})
