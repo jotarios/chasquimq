@@ -140,7 +140,14 @@ where
                         }
                     }
                     Ok(Err(e)) => {
-                        let reason = format!("{e}");
+                        // Use the inner source error for the on-the-wire `reason`
+                        // — `format!("{e}")` would prepend the engine's
+                        // `"handler: "` Display prefix, which is implementation
+                        // detail that consumers of `failed` / `dlq` events
+                        // shouldn't have to strip. The full HandlerError
+                        // (including the prefix) is still surfaced via the
+                        // `tracing::warn!` below for operator logs.
+                        let reason = format!("{}", e.source_err());
                         let unrecoverable = e.is_unrecoverable();
                         tracing::warn!(job_id = %job_id, error = %e, attempt = attempt_index, unrecoverable, "handler returned Err");
                         wiring

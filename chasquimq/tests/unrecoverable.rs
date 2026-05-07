@@ -7,6 +7,7 @@
 
 use chasquimq::config::{ConsumerConfig, ProducerConfig, RetryConfig};
 use chasquimq::consumer::Consumer;
+use chasquimq::metrics::{JobOutcomeKind, MetricsSink, testing::InMemorySink};
 use chasquimq::producer::{Producer, dlq_key};
 use chasquimq::{HandlerError, Job};
 use fred::clients::Client;
@@ -246,6 +247,181 @@ async fn unrecoverable_beats_per_job_retry_override() {
 
     shutdown.cancel();
     let _ = tokio::time::timeout(Duration::from_secs(5), join).await;
+    let _: () = admin.quit().await.unwrap();
+}
+
+/// Tier 1 / Fix B: a single `JobOutcome` event must fire per
+/// `UnrecoverableError` handler invocation, regardless of the retry
+/// budget. The shim-side double-`failed` regression came from the Node
+/// `QueueEvents` mapping `dlq` to a synthetic second `failed`; this
+/// test pins the engine-side invariant the shim relies on (one
+/// handler invocation → one `JobOutcome`, **not** "one + one DLQ
+/// emission").
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires REDIS_URL"]
+async fn unrecoverable_emits_exactly_one_job_outcome() {
+    let admin = admin().await;
+    let queue = "unrecoverable_one_job_outcome";
+    flush_all(&admin, queue).await;
+
+    let producer: Producer<Sample> = Producer::connect(&redis_url(), producer_cfg(queue))
+        .await
+        .expect("producer");
+    producer.add(Sample { n: 7 }).await.expect("add");
+
+    let sink = Arc::new(InMemorySink::new());
+    let mut cfg = fast_consumer_cfg(queue, "c1", 5);
+    cfg.metrics = sink.clone() as Arc<dyn MetricsSink>;
+    let consumer: Consumer<Sample> = Consumer::new(redis_url(), cfg);
+    let shutdown = CancellationToken::new();
+    let shutdown_clone = shutdown.clone();
+
+    let handle = tokio::spawn(async move {
+        consumer
+            .run(
+                move |_: Job<Sample>| async move {
+                    Err::<chasquimq::Bytes, _>(HandlerError::unrecoverable(std::io::Error::other(
+                        "smtp timeout",
+                    )))
+                },
+                shutdown_clone,
+            )
+            .await
+    });
+
+    // Wait for the DLQ to land — that's the terminal state for an
+    // unrecoverable job. Once the DLQ has the entry the worker has fully
+    // emitted both `JobOutcome` and `DlqRouted`.
+    let dlq = dlq_key(queue);
+    wait_until(Duration::from_secs(5), || {
+        let admin = admin.clone();
+        let dlq = dlq.clone();
+        async move { xlen(&admin, &dlq).await >= 1 }
+    })
+    .await;
+
+    // One full extra wait window so a hypothetical second JobOutcome
+    // (from a phantom retry) would have time to fire.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let outcomes = sink.job_outcomes();
+    assert_eq!(
+        outcomes.len(),
+        1,
+        "exactly one JobOutcome per UnrecoverableError handler invocation; got {outcomes:?}"
+    );
+    assert_eq!(outcomes[0].kind, JobOutcomeKind::Err);
+    assert_eq!(outcomes[0].attempt, 1);
+
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+    let _: () = admin.quit().await.unwrap();
+}
+
+/// Tier 1 / Fix C: the on-the-wire `failed` event reason must NOT carry
+/// the engine-internal `"handler: "` Display prefix. The reason field
+/// comes from `e.source_err()` so it's just the inner error's string.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires REDIS_URL"]
+async fn failed_event_reason_omits_handler_prefix() {
+    let admin = admin().await;
+    let queue = "failed_event_reason_strip";
+    flush_all(&admin, queue).await;
+
+    let producer: Producer<Sample> = Producer::connect(&redis_url(), producer_cfg(queue))
+        .await
+        .expect("producer");
+    producer.add(Sample { n: 1 }).await.expect("add");
+
+    let consumer: Consumer<Sample> = Consumer::new(redis_url(), fast_consumer_cfg(queue, "c1", 1));
+    let shutdown = CancellationToken::new();
+    let shutdown_clone = shutdown.clone();
+
+    let handle = tokio::spawn(async move {
+        consumer
+            .run(
+                move |_: Job<Sample>| async move {
+                    Err::<chasquimq::Bytes, _>(HandlerError::new(std::io::Error::other(
+                        "smtp timeout",
+                    )))
+                },
+                shutdown_clone,
+            )
+            .await
+    });
+
+    // Wait for the engine to emit its `failed` event. The events stream
+    // key is `{chasqui:<queue>}:events`.
+    let events_key = format!("{{chasqui:{queue}}}:events");
+    let events_key_for_wait = events_key.clone();
+    wait_until(Duration::from_secs(5), || {
+        let admin = admin.clone();
+        let key = events_key_for_wait.clone();
+        async move { xlen(&admin, &key).await >= 1 }
+    })
+    .await;
+
+    // Read all events and find the `failed` one.
+    let events_resp: Value = admin
+        .custom(
+            CustomCommand::new_static("XRANGE", ClusterHash::FirstKey, false),
+            vec![Value::from(events_key), Value::from("-"), Value::from("+")],
+        )
+        .await
+        .expect("XRANGE events");
+
+    let mut found_failed_reason: Option<String> = None;
+    if let Value::Array(entries) = events_resp {
+        for entry in entries {
+            if let Value::Array(parts) = entry
+                && parts.len() == 2
+                && let Value::Array(kv) = &parts[1]
+            {
+                let mut e_field: Option<String> = None;
+                let mut reason_field: Option<String> = None;
+                for pair in kv.chunks(2) {
+                    if pair.len() == 2 {
+                        let k = match &pair[0] {
+                            Value::String(s) => s.to_string(),
+                            Value::Bytes(b) => String::from_utf8_lossy(b).to_string(),
+                            _ => continue,
+                        };
+                        let v = match &pair[1] {
+                            Value::String(s) => s.to_string(),
+                            Value::Bytes(b) => String::from_utf8_lossy(b).to_string(),
+                            _ => continue,
+                        };
+                        if k == "e" {
+                            e_field = Some(v);
+                        } else if k == "reason" {
+                            reason_field = Some(v);
+                        }
+                    }
+                }
+                if e_field.as_deref() == Some("failed")
+                    && let Some(r) = reason_field
+                {
+                    found_failed_reason = Some(r);
+                    break;
+                }
+            }
+        }
+    }
+
+    let reason = found_failed_reason.expect("failed event with reason field");
+    // The cleaned reason is the inner io::Error's Display, not the
+    // wrapping `"handler: "` prefix.
+    assert!(
+        !reason.starts_with("handler:"),
+        "failed reason must not carry the engine `handler:` prefix; got {reason:?}"
+    );
+    assert_eq!(
+        reason, "smtp timeout",
+        "expected just the inner error message; got {reason:?}"
+    );
+
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
     let _: () = admin.quit().await.unwrap();
 }
 

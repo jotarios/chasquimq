@@ -380,13 +380,48 @@ impl FromNapiValue for HandlerReturn {
 /// to read the JS `.name` property back out of a moved-out `napi::Error`
 /// in a tokio context, so the prefix is the cheap, allocation-free way
 /// to detect the marker class.
+///
+/// The carried error message is the user's `Error.message` only — the
+/// `<ErrorName>: ` prefix added by `coerce_to_string` is stripped so the
+/// `failedReason` surfaced on the events stream / `failed` event is the
+/// raw user string (e.g. `new Error("smtp timeout")` → `"smtp timeout"`).
 fn map_js_rejection(e: &napi::Error) -> HandlerError {
     let reason = &e.reason;
-    if is_unrecoverable_prefix(reason) {
-        HandlerError::unrecoverable(JsHandlerError(format!("JS handler rejected: {reason}")))
+    let unrecoverable = is_unrecoverable_prefix(reason);
+    let message = strip_js_error_name_prefix(reason);
+    if unrecoverable {
+        HandlerError::unrecoverable(JsHandlerError(message))
     } else {
-        HandlerError::new(JsHandlerError(format!("JS handler rejected: {reason}")))
+        HandlerError::new(JsHandlerError(message))
     }
+}
+
+/// Strip the `"<ErrorName>: "` prefix that JS's `Error.toString()` (and
+/// napi's `coerce_to_string`) adds to a rejected Error value. Returns the
+/// suffix verbatim, or the input unchanged when no recognizable prefix
+/// matches (e.g. the rejected value was a string or a non-Error object).
+///
+/// The prefix shape is `<JsIdentifier>: <message>` — match a leading
+/// run of identifier-safe characters followed by `": "`. A bare error
+/// name with no trailing `": "` (a `coerce_to_string` of `new Error()`
+/// with no message) collapses to the empty string.
+fn strip_js_error_name_prefix(s: &str) -> String {
+    if let Some(idx) = s.find(": ") {
+        let head = &s[..idx];
+        if !head.is_empty() && head.chars().all(is_js_ident_char) {
+            return s[idx + 2..].to_string();
+        }
+    }
+    // Bare `"ErrorName"` (no message) — collapse to empty for parity with
+    // `new Error("")` whose `.message` is `""`.
+    if !s.is_empty() && s.chars().all(is_js_ident_char) {
+        return String::new();
+    }
+    s.to_string()
+}
+
+fn is_js_ident_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '$'
 }
 
 fn is_unrecoverable_prefix(s: &str) -> bool {
@@ -428,5 +463,56 @@ mod prefix_tests {
         // match — the prefix must be the full token followed by `:` or end.
         assert!(!is_unrecoverable_prefix("MyUnrecoverableError: boom"));
         assert!(!is_unrecoverable_prefix("UnrecoverableErrorInfo: boom"));
+    }
+}
+
+#[cfg(test)]
+mod strip_prefix_tests {
+    use super::strip_js_error_name_prefix;
+
+    #[test]
+    fn strips_standard_error_prefix() {
+        assert_eq!(
+            strip_js_error_name_prefix("Error: smtp timeout"),
+            "smtp timeout"
+        );
+    }
+
+    #[test]
+    fn strips_custom_named_error() {
+        assert_eq!(
+            strip_js_error_name_prefix("UnrecoverableError: poison pill"),
+            "poison pill"
+        );
+        assert_eq!(
+            strip_js_error_name_prefix("RangeError: out of bounds"),
+            "out of bounds"
+        );
+    }
+
+    #[test]
+    fn collapses_bare_error_name_to_empty() {
+        // `new Error()` with no message → `coerce_to_string` yields just
+        // `"Error"`. Match parity: `.message` is `""`.
+        assert_eq!(strip_js_error_name_prefix("Error"), "");
+        assert_eq!(strip_js_error_name_prefix("UnrecoverableError"), "");
+    }
+
+    #[test]
+    fn passes_through_non_error_strings() {
+        // A rejected string / non-Error value: leave verbatim.
+        assert_eq!(
+            strip_js_error_name_prefix("string rejection"),
+            "string rejection"
+        );
+        assert_eq!(strip_js_error_name_prefix("foo: bar"), "bar");
+        // No `": "` pair, no all-ident → passthrough.
+        assert_eq!(strip_js_error_name_prefix("foo bar baz"), "foo bar baz");
+    }
+
+    #[test]
+    fn message_with_colon_keeps_first_split() {
+        // `new Error("a: b")` → `"Error: a: b"`. Strip only the first `: `.
+        assert_eq!(strip_js_error_name_prefix("Error: a: b"), "a: b");
     }
 }
