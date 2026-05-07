@@ -27,7 +27,7 @@ import type {
 } from './types.js'
 import { NotSupportedError } from './errors.js'
 import { Job } from './job.js'
-import { encodePayload } from './encoding.js'
+import { decodePayload, encodePayload } from './encoding.js'
 
 let warnedPriority = false
 let warnedLifo = false
@@ -310,6 +310,24 @@ export class Queue<
   async removeRepeatableByKey(key: string): Promise<boolean> {
     const producer = await this.producer()
     return producer.removeRepeatable(key)
+  }
+
+  /**
+   * Read a stored handler result by job id. Returns `undefined` for three
+   * indistinguishable cases: the job has not yet completed, the result
+   * key already expired (`Worker.resultTtlMs`), or no result was ever
+   * written (job failed, was DLQ'd, or the worker ran without
+   * `storeResults`).
+   *
+   * The bytes are msgpack-decoded with the same wire format the worker
+   * shim used to encode them, so the typed `ResultType` of the Queue is
+   * the natural return type.
+   */
+  async getJobResult(jobId: string): Promise<ResultType | undefined> {
+    const producer = await this.producer()
+    const buf = await producer.getResult(jobId)
+    if (buf == null) return undefined
+    return decodePayload(buf) as ResultType
   }
 
   // --- Stubs (NotSupportedError) ---

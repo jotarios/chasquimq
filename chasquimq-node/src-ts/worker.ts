@@ -34,6 +34,7 @@ import {
 } from '../index.js'
 import { Job } from './job.js'
 import type { ConnectionOptions, JobsOptions } from './types.js'
+import { encodePayload } from './encoding.js'
 import { NotSupportedError } from './errors.js'
 
 // ---------------------------------------------------------------------------
@@ -120,6 +121,24 @@ export interface WorkerOptions {
    * interval.
    */
   schedulerTickMs?: number
+
+  /**
+   * If `true`, the engine persists each handler's resolved return value
+   * under `{chasqui:<queue>}:result:<jobId>` with TTL `resultTtlMs`.
+   * Read it back via `Queue.getJobResult(jobId)`.
+   *
+   * Default `false` — handlers that return `undefined` / `void` are the
+   * common case, and persisting nothing is the cheapest path through
+   * the engine. Opt in only when consumers need to fetch results.
+   */
+  storeResults?: boolean
+
+  /**
+   * Time-to-live (ms) for stored results when `storeResults = true`.
+   * Default 3,600,000 (1h). Rounded up to whole seconds at the FFI
+   * boundary because Redis `EX` only accepts integer seconds.
+   */
+  resultTtlMs?: number
 }
 
 // ---------------------------------------------------------------------------
@@ -183,6 +202,8 @@ export class Worker<
       consumerId: opts.name,
       runScheduler: opts.runScheduler !== false,
       schedulerTickMs: opts.schedulerTickMs,
+      storeResults: opts.storeResults,
+      resultTtlMs: opts.resultTtlMs,
     }
     this.native = new NativeConsumer(url, nativeOpts)
 
@@ -205,7 +226,10 @@ export class Worker<
     this.running = true
     this.emit('ready')
 
-    const handler = async (nativeJob: NativeJob): Promise<void> => {
+    const storeResults = this.opts.storeResults === true
+    const handler = async (
+      nativeJob: NativeJob,
+    ): Promise<Buffer | undefined> => {
       const data = decode(nativeJob.payload) as DataType
       // Worker-side jobs have no producer-supplied JobsOptions on the wire —
       // pass `{ timestamp }` so the canonical Job class still gets a
@@ -223,6 +247,15 @@ export class Worker<
         const result = await this.processor(job)
         job.returnvalue = result
         this.emit('completed', job, result, '')
+        // When `storeResults` is opt'd-in and the user returned a defined
+        // value, msgpack-encode it for the engine. `undefined` / `void`
+        // collapses to `undefined`, which the native binding maps to
+        // empty `Bytes` — engine then short-circuits to the ack-only
+        // fast path (no result key written).
+        if (storeResults && result !== undefined) {
+          return encodePayload(result)
+        }
+        return undefined
       } catch (err) {
         const e = err instanceof Error ? err : new Error(String(err))
         job.failedReason = e.message
