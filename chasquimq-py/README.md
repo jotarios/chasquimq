@@ -7,7 +7,7 @@ Python bindings for [ChasquiMQ](https://github.com/jotarios/chasquimq) — the f
 ## Layout
 
 - `src-rs/` — PyO3 Rust bindings, compiled as the `chasquimq._native` extension module.
-- `src/chasquimq/` — Python shim (the `src layout`); re-exports the native module behind `Queue` / `Worker` / `Job` / `QueueEvents`.
+- `src/chasquimq/` — Python shim (the `src layout`); re-exports the native classes (`Producer` / `Consumer` / `Scheduler`) and the high-level surface (`Queue` / `Worker` / `Job` / `QueueEvents`) from one flat namespace.
 - `tests/` — pytest harness.
 
 ## Build
@@ -54,6 +54,22 @@ async def main() -> None:
 
 
 asyncio.run(main())
+```
+
+## Power-user surface
+
+Native engine handles are re-exported from the same top-level package — no
+private `_native` import needed:
+
+```python
+from chasquimq import Producer, Consumer, Scheduler
+```
+
+The high-level `Job` dataclass wins the unqualified `Job` name; if you need
+the native value type, import it explicitly:
+
+```python
+from chasquimq._native import Job as NativeJob
 ```
 
 ## See also
