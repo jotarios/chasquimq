@@ -62,4 +62,10 @@ pub struct RepeatableMeta {
     pub limit: Option<f64>,
     pub start_after_ms: Option<f64>,
     pub end_before_ms: Option<f64>,
+    /// Catch-up policy. `None` is reported when the engine wire encoding
+    /// omits the field (default `Skip`). `{ kind: "fire-once" }` and
+    /// `{ kind: "fire-all", maxCatchup }` are surfaced verbatim from the
+    /// stored spec so callers can audit upsert-time choices without
+    /// re-fetching the payload.
+    pub missed_fires: Option<MissedFiresPolicy>,
 }

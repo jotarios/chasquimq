@@ -85,6 +85,23 @@ export interface JobsOptions {
   parent?: { id: string; queue: string }
 }
 
+/**
+ * Catch-up policy for repeatable specs whose scheduler was offline across
+ * one or more fire windows. Mirrors the engine's `MissedFiresPolicy`:
+ *
+ * - `{ kind: 'skip' }` (default) — drop missed windows and resume on the
+ *   first future fire. No thundering herd after a deploy / outage.
+ * - `{ kind: 'fire-once' }` — emit a single job to represent the missed
+ *   window(s); the spec then advances to its next future fire.
+ * - `{ kind: 'fire-all', maxCatchup }` — replay each missed window up to
+ *   `maxCatchup` fires before advancing. Use with care on cron specs
+ *   that fire frequently (e.g. every minute) after a long downtime.
+ */
+export type MissedFiresOption =
+  | { kind: 'skip' }
+  | { kind: 'fire-once' }
+  | { kind: 'fire-all'; maxCatchup: number }
+
 export interface RepeatOptions {
   /**
    * Cron expression. Accepts both 5-field (`m h dom mon dow`) and 6-field
@@ -125,6 +142,12 @@ export interface RepeatOptions {
   tz?: string
   /** Unused in v1. Reserved for future explicit-id-per-fire wiring. */
   jobId?: string
+  /**
+   * Catch-up policy when the scheduler was offline across one or more
+   * fire windows. Default is `{ kind: 'skip' }` — drop missed windows
+   * and resume on the first future fire. See {@link MissedFiresOption}.
+   */
+  missedFires?: MissedFiresOption
 }
 
 /**
@@ -147,6 +170,12 @@ export interface RepeatableJobMeta {
   limit?: number
   startAfterMs?: number
   endBeforeMs?: number
+  /**
+   * Catch-up policy this spec was upserted with. Absent when the policy
+   * is the default `{ kind: 'skip' }` (the engine omits it from the
+   * stored spec). See {@link MissedFiresOption}.
+   */
+  missedFires?: MissedFiresOption
 }
 
 export type BulkJobOptions = Omit<JobsOptions, 'repeat'>

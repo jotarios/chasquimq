@@ -21,6 +21,7 @@ import type {
   QueueOptions,
   JobState,
   JobType,
+  MissedFiresOption,
   RepeatOptions,
   RepeatableJobMeta,
 } from './types.js'
@@ -66,6 +67,15 @@ export class Queue<
 
     if (merged.repeat) {
       return await this.upsertRepeatableJob(name, data, merged)
+    }
+    // Defense in depth: TS types nest `missedFires` under `RepeatOptions`,
+    // but `Queue.add(name, data, { missedFires } as any)` would silently
+    // pass through. Mirror Python's `ValueError("missed_fires is only
+    // meaningful with repeat...")`.
+    if ((merged as { missedFires?: unknown }).missedFires !== undefined) {
+      throw new Error(
+        'missedFires is only meaningful with `repeat`; pass it as { repeat: { missedFires } }',
+      )
     }
     if (merged.parent) {
       throw new NotSupportedError('Parent/child flows are not supported')
@@ -184,6 +194,7 @@ export class Queue<
       limit: repeat.limit,
       startAfterMs,
       endBeforeMs,
+      missedFires: translateMissedFires(repeat.missedFires),
     })
     // The repeatable upsert is a *spec*, not a job invocation; the engine
     // mints a fresh ULID for each fire. Returning a Job here gives callers
@@ -221,6 +232,16 @@ export class Queue<
         base.tz = m.pattern.tz ?? undefined
       } else {
         base.every = m.pattern.intervalMs ?? undefined
+      }
+      if (m.missedFires) {
+        if (m.missedFires.kind === 'fire-once') {
+          base.missedFires = { kind: 'fire-once' }
+        } else if (m.missedFires.kind === 'fire-all') {
+          base.missedFires = {
+            kind: 'fire-all',
+            maxCatchup: m.missedFires.maxCatchup ?? 0,
+          }
+        }
       }
       return base
     })
@@ -378,6 +399,40 @@ function translateRepeatPattern(repeat: RepeatOptions): {
   return {
     kind: 'every',
     intervalMs: repeat.every,
+  }
+}
+
+/**
+ * Translate a {@link MissedFiresOption} (the JS-shaped policy users pass
+ * via `RepeatOptions.missedFires`) into the NAPI-shaped policy object the
+ * native binding accepts. `undefined` → `undefined` so the engine default
+ * (`Skip`) applies. `fire-all` requires `maxCatchup` to be a finite
+ * positive integer (`>= 1`); zero is rejected because the engine's
+ * scheduler loop is `if count >= max_catchup { break }`, making
+ * `max_catchup = 0` a wire-distinct equivalent of `Skip` that callers
+ * almost certainly didn't mean.
+ */
+function translateMissedFires(
+  policy: MissedFiresOption | undefined,
+): { kind: string; maxCatchup?: number } | undefined {
+  if (policy == null) return undefined
+  switch (policy.kind) {
+    case 'skip':
+    case 'fire-once':
+      return { kind: policy.kind }
+    case 'fire-all': {
+      const n = policy.maxCatchup
+      if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1) {
+        throw new RangeError(
+          `missedFires.maxCatchup must be a positive integer (>= 1), got ${n}`,
+        )
+      }
+      return { kind: 'fire-all', maxCatchup: n }
+    }
+    default: {
+      const _exhaustive: never = policy
+      throw new Error(`Unknown missedFires kind ${JSON.stringify(_exhaustive)}`)
+    }
   }
 }
 

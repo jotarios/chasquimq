@@ -107,6 +107,61 @@ class BackoffSpec:
 
 
 @dataclass(frozen=True)
+class MissedFiresPolicy:
+    """Catch-up policy for windows missed during scheduler downtime.
+
+    Build instances via the :meth:`skip` / :meth:`fire_once` /
+    :meth:`fire_all` constructors. The default policy is
+    :meth:`skip` — drop missed windows and resume on the first future
+    fire (no thundering herd after a deploy / outage).
+    """
+
+    kind: str
+    max_catchup: Optional[int] = None
+
+    @staticmethod
+    def skip() -> "MissedFiresPolicy":
+        """Drop missed windows; resume on the first future fire (default)."""
+        return MissedFiresPolicy(kind="skip")
+
+    @staticmethod
+    def fire_once() -> "MissedFiresPolicy":
+        """Emit one job to represent the missed window(s), then advance."""
+        return MissedFiresPolicy(kind="fire-once")
+
+    @staticmethod
+    def fire_all(max_catchup: int) -> "MissedFiresPolicy":
+        """Replay each missed window up to ``max_catchup`` fires.
+
+        ``max_catchup`` must be a positive integer (``>= 1``). The engine's
+        scheduler loop breaks when the replay count reaches the cap, so
+        ``max_catchup = 0`` would be wire-distinct from but semantically
+        equivalent to :meth:`skip` — almost certainly a caller mistake.
+        Values that don't fit a 32-bit unsigned integer are rejected at
+        the FFI boundary.
+        """
+        if not isinstance(max_catchup, int) or isinstance(max_catchup, bool):
+            raise TypeError(
+                f"max_catchup must be an int, got {type(max_catchup).__name__}"
+            )
+        if max_catchup < 1:
+            raise ValueError(
+                f"max_catchup must be a positive integer (>= 1), got {max_catchup}"
+            )
+        return MissedFiresPolicy(kind="fire-all", max_catchup=max_catchup)
+
+    def to_dict(self) -> dict[str, Any]:
+        if self.kind in ("skip", "fire-once"):
+            return {"kind": self.kind}
+        if self.kind == "fire-all":
+            return {
+                "kind": "fire-all",
+                "max_catchup": int(self.max_catchup or 0),
+            }
+        raise ValueError(f"unknown MissedFiresPolicy kind {self.kind!r}")
+
+
+@dataclass(frozen=True)
 class RepeatableMeta:
     """Wire-compatible projection of a repeatable spec.
 
@@ -123,3 +178,4 @@ class RepeatableMeta:
     limit: Optional[int] = None
     start_after_ms: Optional[int] = None
     end_before_ms: Optional[int] = None
+    missed_fires: Optional[MissedFiresPolicy] = None
