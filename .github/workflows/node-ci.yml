@@ -152,6 +152,14 @@ jobs:
     needs: [build, test]
     if: startsWith(github.event.head_commit.message, 'chore(release):') && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    permissions:
+      # `napi prepublish -t npm` posts the platform binaries as a GitHub
+      # Release alongside the npm publish; without contents:write it gets
+      # 401 Unauthorized on POST /repos/.../releases.
+      contents: write
+      # Inherit id-token from the workflow root so npm provenance still
+      # works (npm sigstore verification uses the OIDC token).
+      id-token: write
     defaults:
       run:
         working-directory: chasquimq-node
