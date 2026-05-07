@@ -256,6 +256,205 @@ jobs:
             docker exec "$REDIS_CID" redis-cli ZCARD "{chasqui:${QUEUE}}:delayed" || true
           } | tee /tmp/phase4-redis-state.log
 
+      # ----------------------------------------------------------------
+      # Phases 5–8: result-backend round-trip across all 4 directions.
+      #
+      # For each direction:
+      #   1. Producer enqueues COUNT jobs with `STORE_RESULT=1`, capturing
+      #      the engine-minted ids to JOB_IDS_FILE.
+      #   2. Worker drains with `storeResults=true` and returns the
+      #      JSON-decoded RESULT_VALUE from the handler. The engine's
+      #      ok-result writer persists each result at
+      #      `{chasqui:<queue>}:result:<jobId>`.
+      #   3. Verifier (in the producer's language) reads each id back via
+      #      `Queue.getJobResult` / `Queue.get_job_result` and asserts
+      #      deep-equality with EXPECT_RESULT.
+      #
+      # Result payload uses mixed types (int, string, array, nested dict)
+      # so the msgpack round-trip exercises the full type domain that
+      # both shims share.
+      # ----------------------------------------------------------------
+
+      - name: Flush Redis between phases (phase 4 -> phase 5)
+        shell: bash
+        run: |
+          REDIS_CID=$(docker ps -qf 'ancestor=redis:8.6.2' | head -n1)
+          docker exec "$REDIS_CID" redis-cli FLUSHDB
+
+      - name: Phase 5 — Python producer -> Python worker (result round-trip)
+        id: phase5
+        working-directory: .github/cross-shim-tests
+        env:
+          QUEUE: cross-shim-phase5-${{ github.run_id }}-${{ github.run_attempt }}
+          COUNT: '20'
+          TAG: py
+          JOB_NAME: cross-result-py-py
+          EXPECT_TAG: py
+          EXPECT_JOB_NAME: cross-result-py-py
+          MODE: immediate
+          STORE_RESULT: '1'
+          RESULT_VALUE: '{"ok":42,"msg":"result","tags":["a","b"],"nested":{"k":7}}'
+          EXPECT_RESULT: '{"ok":42,"msg":"result","tags":["a","b"],"nested":{"k":7}}'
+          JOB_IDS_FILE: /tmp/phase5-ids.txt
+          TIMEOUT_SECS: '30'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python producer.py 2>&1 | tee /tmp/phase5-producer.log
+          python worker.py 2>&1 | tee /tmp/phase5-worker.log
+          python verify_results.py 2>&1 | tee /tmp/phase5-verify.log
+
+      - name: Dump Redis state on Phase 5 failure
+        if: failure() && steps.phase5.outcome == 'failure'
+        env:
+          QUEUE: cross-shim-phase5-${{ github.run_id }}-${{ github.run_attempt }}
+        shell: bash
+        run: |
+          REDIS_CID=$(docker ps -qf 'ancestor=redis:8.6.2' | head -n1)
+          {
+            echo "=== XINFO STREAM ==="
+            docker exec "$REDIS_CID" redis-cli XINFO STREAM "{chasqui:${QUEUE}}:stream" || true
+            echo "=== XLEN main ==="
+            docker exec "$REDIS_CID" redis-cli XLEN "{chasqui:${QUEUE}}:stream" || true
+            echo "=== KEYS result ==="
+            docker exec "$REDIS_CID" redis-cli --scan --pattern "{chasqui:${QUEUE}}:result:*" || true
+          } | tee /tmp/phase5-redis-state.log
+
+      - name: Flush Redis between phases (phase 5 -> phase 6)
+        shell: bash
+        run: |
+          REDIS_CID=$(docker ps -qf 'ancestor=redis:8.6.2' | head -n1)
+          docker exec "$REDIS_CID" redis-cli FLUSHDB
+
+      - name: Phase 6 — Node producer -> Node worker (result round-trip)
+        id: phase6
+        working-directory: .github/cross-shim-tests
+        env:
+          QUEUE: cross-shim-phase6-${{ github.run_id }}-${{ github.run_attempt }}
+          COUNT: '20'
+          TAG: node
+          JOB_NAME: cross-result-node-node
+          EXPECT_TAG: node
+          EXPECT_JOB_NAME: cross-result-node-node
+          MODE: immediate
+          STORE_RESULT: '1'
+          RESULT_VALUE: '{"ok":42,"msg":"result","tags":["a","b"],"nested":{"k":7}}'
+          EXPECT_RESULT: '{"ok":42,"msg":"result","tags":["a","b"],"nested":{"k":7}}'
+          JOB_IDS_FILE: /tmp/phase6-ids.txt
+          TIMEOUT_SECS: '30'
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx tsx producer.ts 2>&1 | tee /tmp/phase6-producer.log
+          npx tsx worker.ts 2>&1 | tee /tmp/phase6-worker.log
+          npx tsx verify_results.ts 2>&1 | tee /tmp/phase6-verify.log
+
+      - name: Dump Redis state on Phase 6 failure
+        if: failure() && steps.phase6.outcome == 'failure'
+        env:
+          QUEUE: cross-shim-phase6-${{ github.run_id }}-${{ github.run_attempt }}
+        shell: bash
+        run: |
+          REDIS_CID=$(docker ps -qf 'ancestor=redis:8.6.2' | head -n1)
+          {
+            echo "=== XINFO STREAM ==="
+            docker exec "$REDIS_CID" redis-cli XINFO STREAM "{chasqui:${QUEUE}}:stream" || true
+            echo "=== XLEN main ==="
+            docker exec "$REDIS_CID" redis-cli XLEN "{chasqui:${QUEUE}}:stream" || true
+            echo "=== KEYS result ==="
+            docker exec "$REDIS_CID" redis-cli --scan --pattern "{chasqui:${QUEUE}}:result:*" || true
+          } | tee /tmp/phase6-redis-state.log
+
+      - name: Flush Redis between phases (phase 6 -> phase 7)
+        shell: bash
+        run: |
+          REDIS_CID=$(docker ps -qf 'ancestor=redis:8.6.2' | head -n1)
+          docker exec "$REDIS_CID" redis-cli FLUSHDB
+
+      - name: Phase 7 — Python producer -> Node worker (result round-trip)
+        id: phase7
+        working-directory: .github/cross-shim-tests
+        env:
+          QUEUE: cross-shim-phase7-${{ github.run_id }}-${{ github.run_attempt }}
+          COUNT: '20'
+          TAG: py
+          JOB_NAME: cross-result-py-node
+          EXPECT_TAG: py
+          EXPECT_JOB_NAME: cross-result-py-node
+          MODE: immediate
+          STORE_RESULT: '1'
+          RESULT_VALUE: '{"ok":42,"msg":"result","tags":["a","b"],"nested":{"k":7}}'
+          EXPECT_RESULT: '{"ok":42,"msg":"result","tags":["a","b"],"nested":{"k":7}}'
+          JOB_IDS_FILE: /tmp/phase7-ids.txt
+          TIMEOUT_SECS: '30'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python producer.py 2>&1 | tee /tmp/phase7-producer.log
+          npx tsx worker.ts 2>&1 | tee /tmp/phase7-worker.log
+          python verify_results.py 2>&1 | tee /tmp/phase7-verify.log
+
+      - name: Dump Redis state on Phase 7 failure
+        if: failure() && steps.phase7.outcome == 'failure'
+        env:
+          QUEUE: cross-shim-phase7-${{ github.run_id }}-${{ github.run_attempt }}
+        shell: bash
+        run: |
+          REDIS_CID=$(docker ps -qf 'ancestor=redis:8.6.2' | head -n1)
+          {
+            echo "=== XINFO STREAM ==="
+            docker exec "$REDIS_CID" redis-cli XINFO STREAM "{chasqui:${QUEUE}}:stream" || true
+            echo "=== XLEN main ==="
+            docker exec "$REDIS_CID" redis-cli XLEN "{chasqui:${QUEUE}}:stream" || true
+            echo "=== KEYS result ==="
+            docker exec "$REDIS_CID" redis-cli --scan --pattern "{chasqui:${QUEUE}}:result:*" || true
+          } | tee /tmp/phase7-redis-state.log
+
+      - name: Flush Redis between phases (phase 7 -> phase 8)
+        shell: bash
+        run: |
+          REDIS_CID=$(docker ps -qf 'ancestor=redis:8.6.2' | head -n1)
+          docker exec "$REDIS_CID" redis-cli FLUSHDB
+
+      - name: Phase 8 — Node producer -> Python worker (result round-trip)
+        id: phase8
+        working-directory: .github/cross-shim-tests
+        env:
+          QUEUE: cross-shim-phase8-${{ github.run_id }}-${{ github.run_attempt }}
+          COUNT: '20'
+          TAG: node
+          JOB_NAME: cross-result-node-py
+          EXPECT_TAG: node
+          EXPECT_JOB_NAME: cross-result-node-py
+          MODE: immediate
+          STORE_RESULT: '1'
+          RESULT_VALUE: '{"ok":42,"msg":"result","tags":["a","b"],"nested":{"k":7}}'
+          EXPECT_RESULT: '{"ok":42,"msg":"result","tags":["a","b"],"nested":{"k":7}}'
+          JOB_IDS_FILE: /tmp/phase8-ids.txt
+          TIMEOUT_SECS: '30'
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx tsx producer.ts 2>&1 | tee /tmp/phase8-producer.log
+          python worker.py 2>&1 | tee /tmp/phase8-worker.log
+          npx tsx verify_results.ts 2>&1 | tee /tmp/phase8-verify.log
+
+      - name: Dump Redis state on Phase 8 failure
+        if: failure() && steps.phase8.outcome == 'failure'
+        env:
+          QUEUE: cross-shim-phase8-${{ github.run_id }}-${{ github.run_attempt }}
+        shell: bash
+        run: |
+          REDIS_CID=$(docker ps -qf 'ancestor=redis:8.6.2' | head -n1)
+          {
+            echo "=== XINFO STREAM ==="
+            docker exec "$REDIS_CID" redis-cli XINFO STREAM "{chasqui:${QUEUE}}:stream" || true
+            echo "=== XLEN main ==="
+            docker exec "$REDIS_CID" redis-cli XLEN "{chasqui:${QUEUE}}:stream" || true
+            echo "=== KEYS result ==="
+            docker exec "$REDIS_CID" redis-cli --scan --pattern "{chasqui:${QUEUE}}:result:*" || true
+          } | tee /tmp/phase8-redis-state.log
+
       - name: Upload phase logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -274,4 +473,20 @@ jobs:
             /tmp/phase2-redis-state.log
             /tmp/phase3-redis-state.log
             /tmp/phase4-redis-state.log
+            /tmp/phase5-producer.log
+            /tmp/phase5-worker.log
+            /tmp/phase5-verify.log
+            /tmp/phase5-redis-state.log
+            /tmp/phase6-producer.log
+            /tmp/phase6-worker.log
+            /tmp/phase6-verify.log
+            /tmp/phase6-redis-state.log
+            /tmp/phase7-producer.log
+            /tmp/phase7-worker.log
+            /tmp/phase7-verify.log
+            /tmp/phase7-redis-state.log
+            /tmp/phase8-producer.log
+            /tmp/phase8-worker.log
+            /tmp/phase8-verify.log
+            /tmp/phase8-redis-state.log
           if-no-files-found: warn

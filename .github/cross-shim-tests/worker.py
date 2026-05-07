@@ -16,12 +16,22 @@ Env vars:
                       ``job.name == EXPECT_JOB_NAME`` for every job, so
                       a regression that drops `name` on either shim's
                       wire path is caught here.
+  STORE_RESULT  — optional. When ``"1"`` the worker enables
+                   ``store_results=True`` so the engine persists the
+                   handler's return value at
+                   ``{chasqui:<QUEUE>}:result:<jobId>`` for the verifier
+                   to read back. Default off.
+  RESULT_VALUE  — optional, JSON-encoded. When set, the handler returns
+                   ``json.loads(RESULT_VALUE)`` instead of ``None``. The
+                   verifier asserts this value round-trips through the
+                   shim's msgpack wire format.
   EXPECT_TAG, TIMEOUT_SECS, REDIS_URL — optional.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 
@@ -35,36 +45,40 @@ async def main() -> int:
     expect_job_name = os.environ.get("EXPECT_JOB_NAME", "")
     timeout_secs = float(os.environ.get("TIMEOUT_SECS", "30"))
     redis_url = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
+    store_results = os.environ.get("STORE_RESULT", "") == "1"
+    result_value_raw = os.environ.get("RESULT_VALUE", "")
+    result_value = json.loads(result_value_raw) if result_value_raw else None
 
     seen: set[int] = set()
     done = asyncio.Event()
     errors: list[str] = []
 
-    async def handler(job: Job) -> None:
+    async def handler(job: Job):
         data = job.data
         if not isinstance(data, dict):
             errors.append(f"payload not a dict: {data!r}")
             done.set()
-            return
+            return None
         i = data.get("i")
         tag = data.get("tag")
         if not isinstance(i, int) or i < 0 or i >= count:
             errors.append(f"i out of range: {i!r}")
             done.set()
-            return
+            return None
         if tag != expect_tag:
             errors.append(f"tag mismatch: got {tag!r}, want {expect_tag!r}")
             done.set()
-            return
+            return None
         if expect_job_name and job.name != expect_job_name:
             errors.append(
                 f"name mismatch: got {job.name!r}, want {expect_job_name!r}"
             )
             done.set()
-            return
+            return None
         seen.add(i)
         if len(seen) >= count:
             done.set()
+        return result_value
 
     worker = Worker(
         queue_name,
@@ -74,6 +88,7 @@ async def main() -> int:
         max_attempts=1,
         read_block_ms=200,
         run_scheduler=False,
+        store_results=store_results,
     )
 
     run_task = asyncio.create_task(worker.run())
