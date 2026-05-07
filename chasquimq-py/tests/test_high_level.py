@@ -243,7 +243,7 @@ async def test_queue_add_with_delay_lands_in_delayed_zset(
     redis_url: str, queue_name: str, redis_client
 ) -> None:
     queue = Queue(queue_name, redis_url=redis_url)
-    job = await queue.add("delayed-task", {"k": 1}, delay=60_000)
+    job = await queue.add("delayed-task", {"k": 1}, delay_ms=60_000)
     assert job.id
     assert (
         await redis_client.zcard(delayed_key_for(queue_name))
@@ -280,7 +280,7 @@ async def test_queue_cancel_delayed_round_trip(
 ) -> None:
     queue = Queue(queue_name, redis_url=redis_url)
     await queue.add(
-        "x", {"k": 1}, delay=60_000, job_id="cancel-target"
+        "x", {"k": 1}, delay_ms=60_000, job_id="cancel-target"
     )
     assert (
         await redis_client.zcard(delayed_key_for(queue_name))
@@ -580,9 +580,9 @@ async def test_negative_delay_raises(
 ) -> None:
     queue = Queue(queue_name, redis_url=redis_url)
     with pytest.raises(ValueError, match="non-negative"):
-        await queue.add("x", {"k": 1}, delay=-1)
+        await queue.add("x", {"k": 1}, delay_ms=-1)
     with pytest.raises(ValueError, match="non-negative"):
-        await queue.add("x", {"k": 1}, delay=-0.5)
+        await queue.add("x", {"k": 1}, delay_ms=-0.5)
     with pytest.raises(ValueError, match="non-negative"):
         await queue.add(
             "x", {"k": 1}, delay=timedelta(milliseconds=-100)
@@ -596,11 +596,11 @@ async def test_non_finite_float_delay_raises(
 ) -> None:
     queue = Queue(queue_name, redis_url=redis_url)
     with pytest.raises(ValueError, match="finite non-negative"):
-        await queue.add("x", {"k": 1}, delay=float("inf"))
+        await queue.add("x", {"k": 1}, delay_ms=float("inf"))
     with pytest.raises(ValueError, match="finite non-negative"):
-        await queue.add("x", {"k": 1}, delay=float("-inf"))
+        await queue.add("x", {"k": 1}, delay_ms=float("-inf"))
     with pytest.raises(ValueError, match="finite non-negative"):
-        await queue.add("x", {"k": 1}, delay=float("nan"))
+        await queue.add("x", {"k": 1}, delay_ms=float("nan"))
     await queue.close()
 
 
@@ -641,3 +641,87 @@ def test_worker_default_concurrency_is_100() -> None:
 
     sig = inspect.signature(Worker.__init__)
     assert sig.parameters["concurrency"].default == 100
+
+
+@pytest.mark.asyncio
+async def test_queue_add_delay_ms_lands_in_delayed_zset(
+    redis_url: str, queue_name: str, redis_client
+) -> None:
+    """``delay_ms=2000`` schedules ~2s out (delayed-ZSET path)."""
+    queue = Queue(queue_name, redis_url=redis_url)
+    await queue.add("delayed-task", {"k": 1}, delay_ms=2_000)
+    assert (
+        await redis_client.zcard(delayed_key_for(queue_name))
+    ) == 1
+    assert (
+        await redis_client.xlen(stream_key_for(queue_name))
+    ) == 0
+    await queue.close()
+
+
+@pytest.mark.asyncio
+async def test_queue_add_delay_timedelta_lands_in_delayed_zset(
+    redis_url: str, queue_name: str, redis_client
+) -> None:
+    """``delay=timedelta(seconds=2)`` schedules ~2s out via the parallel
+    timedelta-friendly kwarg."""
+    queue = Queue(queue_name, redis_url=redis_url)
+    await queue.add(
+        "delayed-task", {"k": 1}, delay=timedelta(seconds=2)
+    )
+    assert (
+        await redis_client.zcard(delayed_key_for(queue_name))
+    ) == 1
+    await queue.close()
+
+
+@pytest.mark.asyncio
+async def test_queue_add_rejects_both_delay_kwargs(
+    redis_url: str, queue_name: str
+) -> None:
+    queue = Queue(queue_name, redis_url=redis_url)
+    with pytest.raises(ValueError, match="not both"):
+        await queue.add(
+            "x", {"k": 1}, delay_ms=1_000, delay=timedelta(seconds=1)
+        )
+    await queue.close()
+
+
+@pytest.mark.asyncio
+async def test_queue_async_context_manager_closes_on_exit(
+    redis_url: str, queue_name: str
+) -> None:
+    async with Queue(queue_name, redis_url=redis_url) as queue:
+        assert queue is not None
+        assert queue.is_closed is False
+        await queue.add("hello", {"x": 1})
+    assert queue.is_closed is True
+
+
+@pytest.mark.asyncio
+async def test_worker_async_context_manager_closes_on_exit(
+    redis_url: str, queue_name: str
+) -> None:
+    async def handler(_job: Job) -> None:
+        return None
+
+    async with Worker(
+        queue_name,
+        handler,
+        redis_url=redis_url,
+        concurrency=1,
+        read_block_ms=100,
+        delayed_enabled=False,
+        run_scheduler=False,
+    ) as worker:
+        assert worker is not None
+        assert worker.is_closed is False
+        run_task = asyncio.create_task(worker.run())
+        await asyncio.sleep(0.1)
+
+    # __aexit__ called close(); the run_task should drain promptly.
+    assert worker.is_closed is True
+    try:
+        await asyncio.wait_for(run_task, timeout=5.0)
+    except asyncio.TimeoutError:
+        pass

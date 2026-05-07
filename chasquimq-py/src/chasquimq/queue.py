@@ -21,15 +21,20 @@ from .job import Job
 from .repeat import BackoffSpec, MissedFiresPolicy, RepeatableMeta, RepeatPattern
 
 
-DelayLike = Union[int, float, datetime, timedelta]
-"""Anything :meth:`Queue.add` accepts as ``delay``.
+DelayMsLike = Union[int, float, datetime]
+"""Anything :meth:`Queue.add` accepts as ``delay_ms``.
 
 * ``int`` — milliseconds before the job becomes processable (BullMQ-compat).
-* ``float`` — seconds (Pythonic; multiplied by 1000 internally).
-* :class:`datetime.timedelta` — relative duration.
+* ``float`` — milliseconds (fractional accepted; truncated to int).
 * :class:`datetime.datetime` — absolute fire time. Naive datetimes are
   treated as UTC.
+
+For ergonomic relative durations expressed in seconds, pass a
+:class:`datetime.timedelta` via the parallel ``delay`` keyword instead.
 """
+
+DelayLike = DelayMsLike
+"""Backwards-compatible alias. Prefer :data:`DelayMsLike`."""
 
 BackoffLike = Union[int, BackoffSpec, dict]
 """Anything :meth:`Queue.add` accepts as ``backoff``.
@@ -70,10 +75,15 @@ class Queue:
         self._max_stream_len = max_stream_len
         self._max_delay_secs = max_delay_secs
         self._producer: Optional[_native.Producer] = None
+        self._closed = False
 
     @property
     def name(self) -> str:
         return self._name
+
+    @property
+    def is_closed(self) -> bool:
+        return self._closed
 
     def _get_producer(self) -> _native.Producer:
         if self._producer is None:
@@ -92,7 +102,8 @@ class Queue:
         name: str,
         data: Any,
         *,
-        delay: Optional[DelayLike] = None,
+        delay_ms: Optional[DelayMsLike] = None,
+        delay: Optional[timedelta] = None,
         attempts: Optional[int] = None,
         backoff: Optional[BackoffLike] = None,
         job_id: Optional[str] = None,
@@ -104,6 +115,13 @@ class Queue:
         Returns a :class:`Job` whose ``id`` is the engine-minted ULID
         (or the resolved spec key for repeatable upserts). The
         ``data`` round-trips verbatim to the worker handler.
+
+        ``delay_ms`` schedules the job for future delivery in
+        **milliseconds** (BullMQ-compatible) — ``int``, ``float``, or a
+        :class:`datetime.datetime` for an absolute fire time. For
+        seconds-friendly Python ergonomics pass a
+        :class:`datetime.timedelta` via the parallel ``delay`` kwarg.
+        Supplying both raises :class:`ValueError`.
         """
         if repeat is not None:
             return await self.upsert_repeatable_job(
@@ -128,8 +146,9 @@ class Queue:
                 "Queue.add: job_id must be a non-empty, non-whitespace string"
             )
 
-        delay_ms = _coerce_delay_ms(delay)
-        absolute_ms = _coerce_absolute_ms(delay)
+        effective_delay = _resolve_delay_kwargs(delay_ms, delay)
+        delay_ms_int = _coerce_delay_ms(effective_delay)
+        absolute_ms = _coerce_absolute_ms(effective_delay)
         opts = _build_add_options(job_id, attempts, backoff, name=name)
         payload = encode_payload(data)
         producer = self._get_producer()
@@ -141,13 +160,13 @@ class Queue:
                 )
             else:
                 job_id_ret = await producer.add_at(absolute_ms, payload)
-        elif delay_ms is not None and delay_ms > 0:
+        elif delay_ms_int is not None and delay_ms_int > 0:
             if opts is not None:
                 job_id_ret = await producer.add_in_with_options(
-                    delay_ms, payload, opts
+                    delay_ms_int, payload, opts
                 )
             else:
-                job_id_ret = await producer.add_in(delay_ms, payload)
+                job_id_ret = await producer.add_in(delay_ms_int, payload)
         elif opts is not None:
             job_id_ret = await producer.add_with_options(payload, opts)
         elif name:
@@ -172,7 +191,8 @@ class Queue:
         data: Any,
         *,
         job_id: str,
-        delay: Optional[DelayLike] = None,
+        delay_ms: Optional[DelayMsLike] = None,
+        delay: Optional[timedelta] = None,
         attempts: Optional[int] = None,
         backoff: Optional[BackoffLike] = None,
         repeat: Optional[RepeatLike] = None,
@@ -218,6 +238,7 @@ class Queue:
         return await self.add(
             name,
             data,
+            delay_ms=delay_ms,
             delay=delay,
             attempts=attempts,
             backoff=backoff,
@@ -229,16 +250,18 @@ class Queue:
         """Enqueue many jobs.
 
         Each entry is a dict with keys ``name``, ``data`` and optional
-        ``delay`` / ``attempts`` / ``backoff`` / ``job_id``. When all
-        entries lack per-job overrides the call routes through the
-        underlying ``add_bulk_named`` (per-entry names) for pipelining;
-        otherwise the bulk degrades to a per-entry :meth:`add` loop.
+        ``delay_ms`` (or :class:`datetime.timedelta` ``delay``) /
+        ``attempts`` / ``backoff`` / ``job_id``. When all entries lack
+        per-job overrides the call routes through the underlying
+        ``add_bulk_named`` (per-entry names) for pipelining; otherwise
+        the bulk degrades to a per-entry :meth:`add` loop.
         """
         if not jobs:
             return []
 
         all_simple = all(
-            j.get("delay") is None
+            j.get("delay_ms") is None
+            and j.get("delay") is None
             and j.get("job_id") is None
             and j.get("attempts") is None
             and j.get("backoff") is None
@@ -270,6 +293,7 @@ class Queue:
                 await self.add(
                     j["name"],
                     j["data"],
+                    delay_ms=j.get("delay_ms"),
                     delay=j.get("delay"),
                     attempts=j.get("attempts"),
                     backoff=j.get("backoff"),
@@ -399,9 +423,18 @@ class Queue:
 
         The native pool tears itself down when all references are
         released; calling :meth:`close` simply discards the handle so
-        a future call lazily reconnects with the same options.
+        a future call lazily reconnects with the same options. Safe to
+        call multiple times; the :attr:`is_closed` flag flips to
+        ``True`` on the first call.
         """
         self._producer = None
+        self._closed = True
+
+    async def __aenter__(self) -> "Queue":
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        await self.close()
 
 
 def _now_ms() -> int:
@@ -423,7 +456,32 @@ def _coerce_repeat(r: RepeatLike) -> RepeatPattern:
     )
 
 
-def _coerce_delay_ms(delay: Optional[DelayLike]) -> Optional[int]:
+def _resolve_delay_kwargs(
+    delay_ms: Optional[DelayMsLike],
+    delay: Optional[timedelta],
+) -> Optional[DelayMsLike]:
+    """Reconcile the two delay kwargs into a single value for downstream
+    coercion. ``delay_ms`` is the canonical milliseconds-flavored kwarg;
+    ``delay`` is the parallel :class:`datetime.timedelta` path. Passing
+    both is a programmer error and raises ``ValueError``.
+    """
+    if delay_ms is not None and delay is not None:
+        raise ValueError(
+            "pass either delay_ms (int/float/datetime) or delay "
+            "(timedelta), not both"
+        )
+    if delay is not None:
+        if not isinstance(delay, timedelta):
+            raise TypeError(
+                f"delay must be a datetime.timedelta; got {type(delay).__name__}"
+            )
+        return delay
+    return delay_ms
+
+
+def _coerce_delay_ms(
+    delay: Optional[Union[DelayMsLike, timedelta]],
+) -> Optional[int]:
     if delay is None:
         return None
     if isinstance(delay, datetime):
@@ -436,24 +494,28 @@ def _coerce_delay_ms(delay: Optional[DelayLike]) -> Optional[int]:
             )
         return int(secs * 1000)
     if isinstance(delay, bool):
-        raise TypeError("delay must be int/float/datetime/timedelta; got bool")
+        raise TypeError(
+            "delay_ms must be int/float/datetime; got bool"
+        )
     if isinstance(delay, int):
         if delay < 0:
-            raise ValueError(f"delay must be non-negative, got {delay}")
+            raise ValueError(f"delay_ms must be non-negative, got {delay}")
         return delay
     if isinstance(delay, float):
         if not math.isfinite(delay) or delay < 0:
             raise ValueError(
-                f"delay must be a finite non-negative number, got {delay!r}"
+                f"delay_ms must be a finite non-negative number, got {delay!r}"
             )
-        return int(delay * 1000)
+        return int(delay)
     raise TypeError(
-        f"delay must be int (ms) / float (s) / datetime / timedelta; "
+        f"delay_ms must be int (ms) / float (ms) / datetime; "
         f"got {type(delay).__name__}"
     )
 
 
-def _coerce_absolute_ms(delay: Optional[DelayLike]) -> Optional[int]:
+def _coerce_absolute_ms(
+    delay: Optional[Union[DelayMsLike, timedelta]],
+) -> Optional[int]:
     if not isinstance(delay, datetime):
         return None
     # Naive datetime → assume UTC. Same convention as `datetime.timestamp()`

@@ -231,3 +231,90 @@ def test_invalid_timeout_rejected() -> None:
         asyncio.run(job.wait_for_result(timeout=0))
     with pytest.raises(ValueError, match=r"poll_interval must be a positive"):
         asyncio.run(job.wait_for_result(timeout=1.0, poll_interval=0))
+
+
+@pytest.mark.asyncio
+async def test_wait_for_result_warns_when_store_results_disabled(
+    redis_url: str, queue_name: str
+) -> None:
+    """Worker without ``store_results=True`` → polling never finds a key
+    → after >1s wait_for_result emits a one-shot RuntimeWarning that
+    points at the most likely cause."""
+    queue = Queue(queue_name, redis_url=redis_url)
+    seen = asyncio.Event()
+
+    async def handler(_job: Job):
+        seen.set()
+        return {"ok": 1}
+
+    worker = Worker(
+        queue_name,
+        handler,
+        redis_url=redis_url,
+        concurrency=1,
+        max_attempts=3,
+        read_block_ms=200,
+        delayed_enabled=False,
+        run_scheduler=False,
+        # store_results omitted -> defaults to False
+    )
+
+    run_task = asyncio.create_task(worker.run())
+    try:
+        job = await queue.add("no-store", {"x": 1})
+        await asyncio.wait_for(seen.wait(), timeout=10.0)
+        with pytest.warns(RuntimeWarning, match=r"store_results=True"):
+            with pytest.raises(asyncio.TimeoutError):
+                await job.wait_for_result(timeout=1.5, poll_interval=0.05)
+    finally:
+        await worker.close()
+        try:
+            await asyncio.wait_for(run_task, timeout=5.0)
+        except asyncio.TimeoutError:
+            pass
+        await queue.close()
+
+
+@pytest.mark.asyncio
+async def test_wait_for_result_does_not_warn_on_fast_success(
+    redis_url: str, queue_name: str
+) -> None:
+    """Result lands inside the first 1s heuristic window → no warning."""
+    import warnings
+
+    queue = Queue(queue_name, redis_url=redis_url)
+
+    async def handler(job: Job):
+        return {"ok": True, "echo": job.data}
+
+    worker = Worker(
+        queue_name,
+        handler,
+        redis_url=redis_url,
+        concurrency=1,
+        max_attempts=3,
+        read_block_ms=50,
+        delayed_enabled=False,
+        run_scheduler=False,
+        store_results=True,
+    )
+
+    run_task = asyncio.create_task(worker.run())
+    try:
+        job = await queue.add("fast", {"x": 1})
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = await job.wait_for_result(timeout=10.0, poll_interval=0.05)
+            assert result == {"ok": True, "echo": {"x": 1}}
+            assert not any(
+                issubclass(w.category, RuntimeWarning)
+                and "store_results=True" in str(w.message)
+                for w in caught
+            ), f"unexpected warnings: {[str(w.message) for w in caught]}"
+    finally:
+        await worker.close()
+        try:
+            await asyncio.wait_for(run_task, timeout=5.0)
+        except asyncio.TimeoutError:
+            pass
+        await queue.close()
