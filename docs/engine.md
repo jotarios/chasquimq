@@ -46,6 +46,15 @@ Opt-in per-job result storage. `ConsumerConfig::store_results = true` enables it
 
 Default-config consumers (`store_results = false`) skip the writer task entirely — zero overhead vs. the no-result-backend path.
 
+### Behavior under `maxmemory` eviction
+
+`JOB_OK_SCRIPT` carries the `#!lua flags=allow-oom` shebang and wraps the result `SET` in `redis.pcall`, so the XACKDEL always commits even when Redis is at the `maxmemory` ceiling. The two policies that matter:
+
+- **`noeviction`**: when `used_memory >= maxmemory`, Redis rejects new writes with `OOM`. The script's XACKDEL still runs (it frees memory). The `SET` may be rejected or accepted depending on whether the freed bytes leave headroom — either way, `pcall` swallows the rejection and the script returns success. The job is acked, the result may be missing. `get_result` returns `None`, which is the documented "indistinguishable from expired / never written" case.
+- **`allkeys-lru` / `allkeys-lfu`**: writes succeed by evicting older keys to make room. Result-keys are eligible for eviction (no protection by hash tag); a tight cap will reap older results before their TTL. `get_result` returns `None` for evicted keys; the engine never observes the eviction.
+
+What the engine guarantees regardless of policy: every accepted handler delivery either acks cleanly or reclaims via CLAIM after a worker crash. There is no scenario where `JOB_OK_SCRIPT`'s SET failure leaves an entry pending forever — the integration test in `chasquimq/tests/maxmemory.rs` (gated behind `CHASQUIMQ_RUN_MAXMEMORY_TEST=1` because it mutates Redis CONFIG) exercises both policies end-to-end. What is **not** guaranteed: that the result was written. Treat `get_result` returning `None` as ambiguous and use `QueueEvents` for deterministic completion-detection.
+
 ## Observability
 
 Every load-bearing engine subsystem emits structured events through the single `chasquimq::MetricsSink` trait:
