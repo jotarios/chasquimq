@@ -6,7 +6,7 @@ ChasquiMQ is a Rust-native job queue / message broker built on **Redis**, Messag
 
 Named after the *chasquis* — the relay runners of the Inca road system who carried messages across the Andes.
 
-> **Status:** Phases 1–4 complete plus name-on-wire shipped as a post-Phase-4 polish slice; the project is approaching v1.0. Phase 1 (MVP) shipped: producer, consumer pool, batched acks, DLQ, graceful shutdown. Phase 2 added delayed jobs (`add_in` / `add_at` / `add_in_bulk` backed by Redis Sorted Sets + a leader-elected promoter), exponential-backoff retries via delayed-ZSET re-scheduling, DLQ inspect/replay tooling, full observability covering both the promoter and the consumer hot path (`MetricsSink` trait with `ReaderBatch` / `JobOutcome` / `RetryScheduled` / `DlqRouted` events; per-handler latency in microseconds; `chasquimq-metrics` adapter for Prometheus/OTel/StatsD with a `QueueLabeled<S>` wrapper for per-queue labels), idempotent delayed scheduling, and `cancel_delayed` / `cancel_delayed_bulk`. Phase 3 ships the Node.js bindings via NAPI-RS — high-level shim (`Queue` / `Worker` / `Job` / `QueueEvents`), per-job retries, repeatable / cron jobs (DST-aware via `chrono-tz`), and `UnrecoverableError` short-circuit to DLQ. Phase 4 ships the Python bindings via PyO3 + the `chasqui` CLI for queue inspection: `pip install chasquimq` gets you `Queue` / `Worker` / `Job` / `QueueEvents` with asyncio-first ergonomics; `cargo install chasquimq-cli` (or grab a prebuilt binary) gets you `chasqui inspect / dlq peek / dlq replay / repeatable list / repeatable remove / watch / events`. CI runs rustfmt + clippy `-D warnings` + the full test suite against a `redis:8.6.2` service container on every PR; abi3 wheels build for 5 platforms (linux x86_64 / aarch64, macOS x86_64 / aarch64, windows x86_64) and publish to PyPI on `chore(release):` commits. Public API is still pre-1.0 and will change.
+> **Status:** 1.0 polish complete; ready for the 1.0 tag. All three PRD-listed 1.0 release blockers shipped: stable `jobId` + `Queue.addUnique` for function-reference enqueue, opt-in per-job result backends (`Queue.getJobResult` + `Job.waitForResult` / `wait_for_result` polling helper), and deeper bench coverage with a non-Rust handler in the loop (Python-handler-in-loop scenario + FFI buffer-copy Criterion microbench). Phase 1 (MVP) shipped: producer, consumer pool, batched acks, DLQ, graceful shutdown. Phase 2 added delayed jobs (`add_in` / `add_at` / `add_in_bulk` backed by Redis Sorted Sets + a leader-elected promoter), exponential-backoff retries via delayed-ZSET re-scheduling, DLQ inspect/replay tooling, full observability covering both the promoter and the consumer hot path (`MetricsSink` trait with `ReaderBatch` / `JobOutcome` / `RetryScheduled` / `DlqRouted` events; per-handler latency in microseconds; `chasquimq-metrics` adapter for Prometheus/OTel/StatsD with a `QueueLabeled<S>` wrapper for per-queue labels), idempotent delayed scheduling, and `cancel_delayed` / `cancel_delayed_bulk`. Phase 3 shipped Node.js bindings via NAPI-RS — high-level shim (`Queue` / `Worker` / `Job` / `QueueEvents`), per-job retries, repeatable / cron jobs (DST-aware via `chrono-tz`), and `UnrecoverableError` short-circuit to DLQ. Phase 4 shipped Python bindings via PyO3 + the `chasqui` CLI for queue inspection: `pip install chasquimq` gets you `Queue` / `Worker` / `Job` / `QueueEvents` with asyncio-first ergonomics; `cargo install chasquimq-cli` (or grab a prebuilt binary) gets you `chasqui inspect / dlq peek / dlq replay / repeatable list / repeatable remove / watch / events`. CI runs rustfmt + clippy `-D warnings` + the full test suite against a `redis:8.6.2` service container on every PR; abi3 wheels build for 5 platforms (linux x86_64 / aarch64, macOS x86_64 / aarch64, windows x86_64) and publish to PyPI on `chore(release):` commits. The 1.0 tag is the next milestone.
 
 ## Headline numbers
 
@@ -171,19 +171,27 @@ import { Queue, Worker } from "chasquimq"
 const queue = new Queue("emails", { connection: { host: "127.0.0.1", port: 6379 } })
 await queue.add("welcome", { to: "alice@example.com" })
 
+// Stable jobId + idempotent enqueue — second call dedups on the same id.
+await queue.addUnique("welcome", { to: "alice@example.com" }, { jobId: "welcome:alice" })
+
 const worker = new Worker("emails", async (job) => {
     console.log(`processing ${job.name} (${job.id})`)  // job.name === "welcome"
     await sendEmail(job.data)
-}, { connection: { host: "127.0.0.1", port: 6379 } })
+    return { delivered: true }   // captured when storeResults is on
+}, { connection: { host: "127.0.0.1", port: 6379 }, storeResults: true })
 
 worker.on("completed", (job) => console.log(`sent ${job.name} ${job.id}`))
+
+// Block on the result from anywhere — across processes / event-loop boundaries.
+const job = await queue.add("welcome", { to: "ada@example.com" })
+const result = await job.waitForResult({ timeoutMs: 30_000 })
 ```
 
 The high-level surface — `Queue`, `Worker`, `Job`, `QueueEvents` — uses MessagePack on the wire and dispatches handler invocations across a tokio thread pool inside the addon, so JS event-loop pressure stays low. `job.name` round-trips end-to-end (separate `n` field on the stream entry; preserved across delayed adds, retries, repeatable scheduler fires, DLQ, and the events stream).
 
 **Native API.** Power users wanting the unwrapped engine can `import { Producer, Consumer, Promoter, Scheduler } from "chasquimq"` for direct access — same package, same namespace as the high-level shim. Bytes pass through as opaque MessagePack — you control encoding and the `Job<T>` shape end-to-end.
 
-**Status.** Phase 3 is **complete** per the [PRD](prd/prd.md): JavaScript workers process jobs pulled by the Rust engine via NAPI-RS bindings. The shipped surface covers `Queue.add` (incl. `{ delay, attempts, backoff, repeat, jobId }`), `Queue.addBulk`, `Queue.getRepeatableJobs` / `removeRepeatableByKey`, `Worker` (the engine `Consumer` auto-embeds `Scheduler`; opt-out via `runScheduler: false`), `QueueEvents` cross-process fan-out, DLQ peek/replay, delayed cancel, and the `UnrecoverableError → HandlerError::unrecoverable` short-circuit. Surfaces outside the PRD's Phase 3 scope (parent/child flows, etc.) throw `NotSupportedError` — `import { NotSupportedError, UnrecoverableError } from "chasquimq"` to handle them.
+**Status.** Phase 3 is **complete** per the [PRD](prd/prd.md): JavaScript workers process jobs pulled by the Rust engine via NAPI-RS bindings. The shipped surface covers `Queue.add` (incl. `{ delay, attempts, backoff, repeat, jobId, missedFires }`), `Queue.addBulk`, `Queue.addUnique` (idempotent enqueue keyed on `jobId`), `Queue.getJobResult<ResultType>` (opt-in result backend), `Queue.getRepeatableJobs` / `removeRepeatableByKey`, `Worker` (the engine `Consumer` auto-embeds `Scheduler`; opt-out via `runScheduler: false`; `storeResults: true` opts into result writes), `Job.waitForResult({ timeoutMs, intervalMs, signal })`, `QueueEvents` cross-process fan-out, DLQ peek/replay, delayed cancel, and the `UnrecoverableError → HandlerError::unrecoverable` short-circuit. Surfaces outside the PRD's Phase 3 scope (parent/child flows, etc.) throw `NotSupportedError` — `import { NotSupportedError, UnrecoverableError } from "chasquimq"` to handle them.
 
 See [`docs/phase3-napi-design.md`](docs/phase3-napi-design.md) for the design doc and [`chasquimq-node/README.md`](chasquimq-node/README.md) for package-specific docs.
 
