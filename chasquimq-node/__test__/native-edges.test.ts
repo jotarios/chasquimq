@@ -11,7 +11,7 @@
 //   3. RepeatPattern parsing edges (cron expr, tz, every interval)
 //   4. AddOptions name field round-trips through XADD's `n` field
 
-import { beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { encode } from '@msgpack/msgpack'
 import IORedis from 'ioredis'
 import { Producer } from '../dist/index.js'
@@ -52,8 +52,8 @@ d('NAPI edge: f64→u64 boundary casts', () => {
       await expect(producer.addAt(-1, samplePayload())).rejects.toThrow(/non-negative/i)
     })
 
-    it('accepts now', async () => {
-      await expect(producer.addAt(Date.now(), samplePayload())).resolves.toMatch(/.+/)
+    it('accepts a future timestamp', async () => {
+      await expect(producer.addAt(Date.now() + 60_000, samplePayload())).resolves.toMatch(/.+/)
     })
   })
 
@@ -105,21 +105,9 @@ d('NAPI edge: f64→u64 boundary casts', () => {
       await producer.removeRepeatable(key)
     })
 
-    it('truncates non-integer floats (current contract: f64_to_u64 silent truncate)', async () => {
-      // Documents current behavior. f64_to_u64 just does `n as u64` after
-      // the finite/non-negative/in-range guard, so 60_000.7 round-trips as
-      // 60_000. If we ever switch to reject-non-integer, update this test.
-      const key = await producer.upsertRepeatable({
-        ...baseSpec,
-        pattern: { kind: 'every', intervalMs: 60_000.7 },
-      })
-      const list = await producer.listRepeatable(10)
-      const meta = list.find((m) => m.key === key)
-      expect(meta).toBeDefined()
-      expect(meta!.pattern.kind).toBe('every')
-      expect(meta!.pattern.intervalMs).toBe(60_000)
-      await producer.removeRepeatable(key)
-    })
+    // Desired future behavior: addIn / upsertRepeatable should reject
+    // non-integer delays instead of silently truncating via `n as u64`.
+    it.todo('rejects non-integer intervalMs')
   })
 
   describe('RepeatableSpec.{limit,startAfterMs,endBeforeMs} — f64_to_u64 path', () => {
@@ -170,11 +158,11 @@ d('NAPI edge: f64→u64 boundary casts', () => {
     })
 
     it('accepts MAX_SAFE_INTEGER+1 (above 2^53; documents current bound)', async () => {
-      // f64_to_u64 caps on `u64::MAX as f64`, not 2^53 — so values above
-      // Number.MAX_SAFE_INTEGER pass the guard. Mantissa aliasing means
-      // adjacent integers in this range collapse to the same u64. The
-      // engine clamps `endBeforeMs` to a sane window in practice; this
-      // test pins the binding's truncation contract.
+      // PIN: f64 mantissa aliasing — known soft contract; do not cite this
+      // test as a guarantee. f64_to_u64 caps on `u64::MAX as f64`, not 2^53,
+      // so values above Number.MAX_SAFE_INTEGER pass the guard but adjacent
+      // integers collapse to the same u64. The engine clamps `endBeforeMs`
+      // to a sane window in practice.
       const key = await producer.upsertRepeatable({
         jobName: 'edge-job',
         payload: samplePayload(),
@@ -436,6 +424,10 @@ d('NAPI edge: AddOptions.name round-trips through XADD `n` field', () => {
 
   beforeAll(() => {
     raw = new IORedis(REDIS_URL, { lazyConnect: true })
+  })
+
+  afterAll(async () => {
+    await raw.quit().catch(() => {})
   })
 
   beforeEach(async () => {
