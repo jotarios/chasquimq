@@ -21,6 +21,7 @@ import type {
   QueueOptions,
   JobState,
   JobType,
+  MissedFiresOption,
   RepeatOptions,
   RepeatableJobMeta,
 } from './types.js'
@@ -184,6 +185,7 @@ export class Queue<
       limit: repeat.limit,
       startAfterMs,
       endBeforeMs,
+      missedFires: translateMissedFires(repeat.missedFires),
     })
     // The repeatable upsert is a *spec*, not a job invocation; the engine
     // mints a fresh ULID for each fire. Returning a Job here gives callers
@@ -221,6 +223,16 @@ export class Queue<
         base.tz = m.pattern.tz ?? undefined
       } else {
         base.every = m.pattern.intervalMs ?? undefined
+      }
+      if (m.missedFires) {
+        if (m.missedFires.kind === 'fire-once') {
+          base.missedFires = { kind: 'fire-once' }
+        } else if (m.missedFires.kind === 'fire-all') {
+          base.missedFires = {
+            kind: 'fire-all',
+            maxCatchup: m.missedFires.maxCatchup ?? 0,
+          }
+        }
       }
       return base
     })
@@ -378,6 +390,38 @@ function translateRepeatPattern(repeat: RepeatOptions): {
   return {
     kind: 'every',
     intervalMs: repeat.every,
+  }
+}
+
+/**
+ * Translate a {@link MissedFiresOption} (the JS-shaped policy users pass
+ * via `RepeatOptions.missedFires`) into the NAPI-shaped policy object the
+ * native binding accepts. `undefined` → `undefined` so the engine default
+ * (`Skip`) applies. `fire-all` requires a non-negative finite
+ * `maxCatchup`; the cap is propagated through to the engine where the
+ * Lua tick clamps replay to `max_catchup` fires per spec.
+ */
+function translateMissedFires(
+  policy: MissedFiresOption | undefined,
+): { kind: string; maxCatchup?: number } | undefined {
+  if (policy == null) return undefined
+  switch (policy.kind) {
+    case 'skip':
+    case 'fire-once':
+      return { kind: policy.kind }
+    case 'fire-all': {
+      const n = policy.maxCatchup
+      if (!Number.isFinite(n) || n < 0) {
+        throw new RangeError(
+          `missedFires.maxCatchup must be a finite non-negative number, got ${n}`,
+        )
+      }
+      return { kind: 'fire-all', maxCatchup: n }
+    }
+    default: {
+      const _exhaustive: never = policy
+      throw new Error(`Unknown missedFires kind ${JSON.stringify(_exhaustive)}`)
+    }
   }
 }
 

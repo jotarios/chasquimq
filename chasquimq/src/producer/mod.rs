@@ -383,6 +383,7 @@ impl<T> Producer<T> {
                 limit: stored.limit,
                 start_after_ms: stored.start_after_ms,
                 end_before_ms: stored.end_before_ms,
+                missed_fires: stored.missed_fires,
             });
         }
         Ok(out)

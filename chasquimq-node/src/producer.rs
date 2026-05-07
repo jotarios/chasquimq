@@ -554,6 +554,21 @@ fn engine_meta_into_native(m: chasquimq::RepeatableMeta) -> RepeatableMeta {
         limit: m.limit.map(|v| v as f64),
         start_after_ms: m.start_after_ms.map(|v| v as f64),
         end_before_ms: m.end_before_ms.map(|v| v as f64),
+        missed_fires: engine_missed_fires_into_native(m.missed_fires),
+    }
+}
+
+fn engine_missed_fires_into_native(p: EngineMissedFiresPolicy) -> Option<MissedFiresPolicy> {
+    match p {
+        EngineMissedFiresPolicy::Skip => None,
+        EngineMissedFiresPolicy::FireOnce => Some(MissedFiresPolicy {
+            kind: "fire-once".to_string(),
+            max_catchup: None,
+        }),
+        EngineMissedFiresPolicy::FireAll { max_catchup } => Some(MissedFiresPolicy {
+            kind: "fire-all".to_string(),
+            max_catchup: Some(max_catchup),
+        }),
     }
 }
 

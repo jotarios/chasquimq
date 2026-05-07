@@ -16,7 +16,7 @@ from .errors import NotSupportedError, UnrecoverableError
 from .job import Job
 from .queue import Queue
 from .queue_events import QueueEvent, QueueEvents
-from .repeat import BackoffSpec, RepeatableMeta, RepeatPattern
+from .repeat import BackoffSpec, MissedFiresPolicy, RepeatableMeta, RepeatPattern
 from .worker import Handler, Worker
 
 
@@ -24,6 +24,7 @@ __all__ = [
     "BackoffSpec",
     "Handler",
     "Job",
+    "MissedFiresPolicy",
     "NotSupportedError",
     "Queue",
     "QueueEvent",

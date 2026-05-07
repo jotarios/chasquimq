@@ -247,6 +247,14 @@ pub struct RepeatableMeta {
     pub limit: Option<u64>,
     pub start_after_ms: Option<u64>,
     pub end_before_ms: Option<u64>,
+    /// Catch-up policy for windows missed during scheduler downtime.
+    /// Mirrors [`RepeatableSpec::missed_fires`] so callers can verify and
+    /// audit the policy a given spec was upserted with without re-fetching
+    /// the full payload. Trailing-optional with `skip_serializing_if` —
+    /// pre-existing wire encodings of `RepeatableMeta` (this is an
+    /// in-memory projection; no on-the-wire storage today) decode unchanged.
+    #[serde(default, skip_serializing_if = "is_default_missed_fires_policy")]
+    pub missed_fires: MissedFiresPolicy,
 }
 
 /// Wire-format spec stored in the repeat:spec:<key> hash. Separate from the

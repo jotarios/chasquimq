@@ -18,7 +18,7 @@ from . import _native
 from ._encoding import encode_payload
 from .errors import NotSupportedError
 from .job import Job
-from .repeat import BackoffSpec, RepeatableMeta, RepeatPattern
+from .repeat import BackoffSpec, MissedFiresPolicy, RepeatableMeta, RepeatPattern
 
 
 DelayLike = Union[int, float, datetime, timedelta]
@@ -40,6 +40,13 @@ BackoffLike = Union[int, BackoffSpec, dict]
 """
 
 RepeatLike = Union[RepeatPattern, dict]
+
+MissedFiresLike = Union[MissedFiresPolicy, dict]
+"""Anything :meth:`Queue.upsert_repeatable_job` accepts as ``missed_fires``.
+
+* :class:`MissedFiresPolicy` — typed builder (recommended).
+* ``dict`` — raw native shape (``{"kind": "skip" | "fire-once" | "fire-all", "max_catchup"?: int}``).
+"""
 
 
 class Queue:
@@ -90,6 +97,7 @@ class Queue:
         backoff: Optional[BackoffLike] = None,
         job_id: Optional[str] = None,
         repeat: Optional[RepeatLike] = None,
+        missed_fires: Optional[MissedFiresLike] = None,
     ) -> Job:
         """Enqueue a single job.
 
@@ -105,6 +113,12 @@ class Queue:
                 attempts=attempts,
                 backoff=backoff,
                 job_id=job_id,
+                missed_fires=missed_fires,
+            )
+        if missed_fires is not None:
+            raise ValueError(
+                "missed_fires is only meaningful with `repeat`; "
+                "pass repeat=RepeatPattern.cron(...) or .every(...) too"
             )
 
         delay_ms = _coerce_delay_ms(delay)
@@ -232,6 +246,7 @@ class Queue:
         attempts: Optional[int] = None,
         backoff: Optional[BackoffLike] = None,
         job_id: Optional[str] = None,
+        missed_fires: Optional[MissedFiresLike] = None,
     ) -> Job:
         """Upsert a repeatable / cron spec. Returns a :class:`Job`
         whose ``id`` is the resolved spec key — pair with
@@ -253,6 +268,8 @@ class Queue:
             spec["start_after_ms"] = start_after_ms
         if end_before_ms is not None:
             spec["end_before_ms"] = end_before_ms
+        if missed_fires is not None:
+            spec["missed_fires"] = _missed_fires_to_dict(missed_fires)
 
         producer = self._get_producer()
         resolved_key = await producer.upsert_repeatable(spec)
@@ -401,6 +418,29 @@ def _backoff_to_dict(b: BackoffLike) -> dict[str, Any]:
     )
 
 
+def _missed_fires_to_dict(p: MissedFiresLike) -> dict[str, Any]:
+    if isinstance(p, MissedFiresPolicy):
+        return p.to_dict()
+    if isinstance(p, dict):
+        return p
+    raise TypeError(
+        f"missed_fires must be a MissedFiresPolicy or dict; got {type(p).__name__}"
+    )
+
+
+def _missed_fires_from_dict(d: Optional[dict]) -> Optional[MissedFiresPolicy]:
+    if not d:
+        return None
+    kind = d.get("kind")
+    if kind == "skip":
+        return MissedFiresPolicy.skip()
+    if kind == "fire-once":
+        return MissedFiresPolicy.fire_once()
+    if kind == "fire-all":
+        return MissedFiresPolicy.fire_all(int(d.get("max_catchup", 0)))
+    return None
+
+
 def _meta_from_dict(m: dict[str, Any]) -> RepeatableMeta:
     p = m["pattern"]
     if p["kind"] == "cron":
@@ -417,4 +457,5 @@ def _meta_from_dict(m: dict[str, Any]) -> RepeatableMeta:
         limit=m.get("limit"),
         start_after_ms=m.get("start_after_ms"),
         end_before_ms=m.get("end_before_ms"),
+        missed_fires=_missed_fires_from_dict(m.get("missed_fires")),
     )

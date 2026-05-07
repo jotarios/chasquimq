@@ -611,7 +611,32 @@ fn repeatable_meta_to_dict(py: Python<'_>, m: RepeatableMeta) -> PyResult<Bound<
     d.set_item("limit", m.limit)?;
     d.set_item("start_after_ms", m.start_after_ms)?;
     d.set_item("end_before_ms", m.end_before_ms)?;
+    d.set_item("missed_fires", missed_fires_to_dict(py, &m.missed_fires)?)?;
     Ok(d)
+}
+
+fn missed_fires_to_dict<'py>(
+    py: Python<'py>,
+    p: &MissedFiresPolicy,
+) -> PyResult<Option<Bound<'py, PyDict>>> {
+    match p {
+        // `Skip` is the engine default and is omitted from the stored
+        // spec by `skip_serializing_if`. Surface it as `None` on the
+        // Python side so callers can use `if meta["missed_fires"] is
+        // None` as the "default policy" idiom.
+        MissedFiresPolicy::Skip => Ok(None),
+        MissedFiresPolicy::FireOnce => {
+            let d = PyDict::new(py);
+            d.set_item("kind", "fire-once")?;
+            Ok(Some(d))
+        }
+        MissedFiresPolicy::FireAll { max_catchup } => {
+            let d = PyDict::new(py);
+            d.set_item("kind", "fire-all")?;
+            d.set_item("max_catchup", max_catchup)?;
+            Ok(Some(d))
+        }
+    }
 }
 
 fn pattern_to_dict<'py>(py: Python<'py>, p: &RepeatPattern) -> PyResult<Bound<'py, PyDict>> {
