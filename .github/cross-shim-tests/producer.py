@@ -29,8 +29,7 @@ import sys
 from chasquimq import Queue
 
 
-# Match the Node fixture: 100ms delay per job. Encoded as int milliseconds
-# so the Python shim's `delay: int` branch (treats int as ms) lines up.
+# Match the Node fixture: 100ms delay per job.
 DELAYED_MS = 100
 
 
@@ -53,7 +52,7 @@ async def main() -> int:
         for i in range(count):
             if mode == "delayed":
                 job = await queue.add(
-                    job_name, {"i": i, "tag": tag}, delay=DELAYED_MS
+                    job_name, {"i": i, "tag": tag}, delay_ms=DELAYED_MS
                 )
             else:
                 job = await queue.add(job_name, {"i": i, "tag": tag})
