@@ -154,6 +154,9 @@ if type(result) == 'table' then
 else
   first = tonumber(result)
 end
+-- XACKDEL returns 1 (acked + removed), -1 (id not found), or 0 (not in
+-- group); only 1 means we own this delivery — both other values mean a
+-- concurrent CLAIM/replay won the race and SET is correctly skipped.
 if first == 1 and #ARGV[3] > 0 then
   redis.call('SET', KEYS[2], ARGV[3], 'EX', tonumber(ARGV[4]))
 end

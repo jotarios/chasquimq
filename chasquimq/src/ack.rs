@@ -127,17 +127,17 @@ pub(crate) async fn run_ok_result_writer(
     let mut sha = match load_job_ok_script(&client).await {
         Ok(s) => s,
         Err(e) => {
-            tracing::error!(error = %e, "ok-result writer: SCRIPT LOAD failed; results will be dropped (XACKDEL still happens via fallback path)");
-            // Best-effort: keep the writer alive but degrade to plain
-            // XACKDEL without a result write so jobs still ack and don't
-            // pile up on the pending list.
+            tracing::error!(error = %e, "ok-result writer: SCRIPT LOAD failed; falling back to inline EVAL until next successful load");
+            // Fall back to inline EVAL of `JOB_OK_SCRIPT` on each call
+            // until the next successful SCRIPT LOAD; behavior is correct,
+            // just slower per-entry.
             String::new()
         }
     };
     while let Some(item) = rx.recv().await {
         match write_once(&client, &cfg, &item, &mut sha).await {
-            Ok(_acked) => {
-                if !_acked {
+            Ok(acked) => {
+                if !acked {
                     tracing::debug!(entry_id = %item.entry_id, job_id = %item.job_id, "ok-result write gated: entry already removed");
                 }
             }

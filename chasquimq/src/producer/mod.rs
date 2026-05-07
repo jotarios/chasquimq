@@ -297,6 +297,13 @@ impl<T> Producer<T> {
     /// Bytes are returned opaque — every shim msgpack-encoded the user
     /// value before the bytes crossed the FFI boundary, so callers
     /// decode with the same wire format they encoded with.
+    ///
+    /// Note: a `None` return does NOT guarantee the job didn't run. A
+    /// successful handler followed by a retried EVALSHA after a network
+    /// blip can ack-and-remove the stream entry without writing the
+    /// result key (the second EVALSHA sees XACKDEL count=0 and skips
+    /// the SET). For at-most-once result-write semantics, prefer
+    /// `QueueEvents` subscription instead.
     pub async fn get_result(&self, id: &JobId) -> Result<Option<Bytes>> {
         let key = result_key(self.queue_name.as_ref(), id);
         let client = self.pool.next_connected();
@@ -313,6 +320,13 @@ impl<T> Producer<T> {
     /// aligned by index with the input slice — `None` collapses the same
     /// three cases documented on `get_result`. Empty input returns an
     /// empty vec without touching Redis.
+    ///
+    /// Note: a `None` return does NOT guarantee the job didn't run. A
+    /// successful handler followed by a retried EVALSHA after a network
+    /// blip can ack-and-remove the stream entry without writing the
+    /// result key (the second EVALSHA sees XACKDEL count=0 and skips
+    /// the SET). For at-most-once result-write semantics, prefer
+    /// `QueueEvents` subscription instead.
     pub async fn get_result_bulk(&self, ids: &[JobId]) -> Result<Vec<Option<Bytes>>> {
         if ids.is_empty() {
             return Ok(Vec::new());
