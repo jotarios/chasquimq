@@ -1,7 +1,11 @@
 [package]
 name = "chasquimq"
-version = "0.1.0"
-description = "The fastest open-source message broker for Redis."
+version = "1.0.0"
+description = "The fastest open-source message broker for Redis. Rust-native engine on Redis Streams + MessagePack, with Node.js and Python bindings."
+authors = ["Jorge Rios <j29.rios@gmail.com>"]
+readme = "../README.md"
+keywords = ["redis", "queue", "job-queue", "message-broker", "streams"]
+categories = ["asynchronous", "concurrency", "database"]
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
