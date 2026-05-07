@@ -20,7 +20,7 @@ use chasquimq::consumer::Consumer as EngineConsumer;
 use chasquimq::{HandlerError, Job as EngineJob};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyType};
+use pyo3::types::{PyAny, PyBytes, PyType};
 use pyo3_async_runtimes::TaskLocals;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -53,6 +53,8 @@ impl Consumer {
         delayed_enabled = true,
         run_scheduler = true,
         scheduler_tick_ms = None,
+        store_results = false,
+        result_ttl_ms = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -72,6 +74,8 @@ impl Consumer {
         delayed_enabled: bool,
         run_scheduler: bool,
         scheduler_tick_ms: Option<i64>,
+        store_results: bool,
+        result_ttl_ms: Option<i64>,
     ) -> PyResult<Self> {
         let mut cfg = ConsumerConfig {
             queue_name,
@@ -81,8 +85,17 @@ impl Consumer {
             events_enabled,
             delayed_enabled,
             run_scheduler,
+            store_results,
             ..ConsumerConfig::default()
         };
+        if let Some(v) = result_ttl_ms {
+            if v <= 0 {
+                return Err(PyRuntimeError::new_err(format!(
+                    "result_ttl_ms must be positive; got {v}"
+                )));
+            }
+            cfg.result_ttl_secs = (v as u64).div_ceil(1000);
+        }
         if let Some(v) = scheduler_tick_ms {
             if v < 0 {
                 return Err(PyRuntimeError::new_err(format!(
@@ -184,6 +197,7 @@ impl Consumer {
                 let locals = task_locals.clone();
                 let unrecoverable_cls = unrecoverable_cls.clone();
                 async move {
+                    let job_id_for_log = job.id.clone();
                     let coro_result = Python::attach(|py| -> PyResult<_> {
                         let job_py = Job::from_engine(job);
                         let coro = h.call1(py, (job_py,))?;
@@ -193,14 +207,34 @@ impl Consumer {
                         Ok(fut) => fut,
                         Err(e) => return Err(map_py_err(&e, &unrecoverable_cls)),
                     };
-                    // Slice 5a tactical compile-fix: engine handler now
-                    // returns `Bytes`. Slice 5c will plumb the Python-side
-                    // return value through; for now, an empty `Bytes`
-                    // keeps the signature intact and the engine's
-                    // `store_results` gate is a no-op (empty results
-                    // never trigger the per-entry SET).
+                    // Slice 5c: plumb the user's coroutine return value
+                    // through. The Python shim handler msgpack-encodes
+                    // any non-`None` return value into `bytes` before
+                    // it crosses the FFI boundary; we forward those
+                    // bytes opaque to the engine. `None` (or any
+                    // non-`bytes` value) maps to empty `Bytes`, which
+                    // the engine treats as "no result" and short-
+                    // circuits to the batched ack-only path. The
+                    // non-`bytes` case logs a `tracing::warn!` so the
+                    // silent collapse is visible at debug time —
+                    // matches the Node shim's behavior.
                     match coro_fut.await {
-                        Ok(_) => Ok(chasquimq::Bytes::new()),
+                        Ok(obj) => Ok(Python::attach(|py| -> chasquimq::Bytes {
+                            let b = obj.bind(py);
+                            if b.is_none() {
+                                return chasquimq::Bytes::new();
+                            }
+                            match b.cast::<PyBytes>() {
+                                Ok(pb) => chasquimq::Bytes::copy_from_slice(pb.as_bytes()),
+                                Err(_) => {
+                                    tracing::warn!(
+                                        job_id = %job_id_for_log,
+                                        "handler returned non-bytes/non-None; result skipped"
+                                    );
+                                    chasquimq::Bytes::new()
+                                }
+                            }
+                        })),
                         Err(e) => Err(map_py_err(&e, &unrecoverable_cls)),
                     }
                 }

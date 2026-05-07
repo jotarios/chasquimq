@@ -15,7 +15,7 @@ import asyncio
 from typing import Any, Awaitable, Callable, Optional
 
 from . import _native
-from ._encoding import decode_payload
+from ._encoding import decode_payload, encode_payload
 from .job import Job
 
 
@@ -54,6 +54,8 @@ class Worker:
         delayed_enabled: bool = True,
         run_scheduler: bool = True,
         scheduler_tick_ms: Optional[int] = None,
+        store_results: bool = False,
+        result_ttl_ms: Optional[int] = None,
     ) -> None:
         self._queue_name = queue_name
         self._handler = handler
@@ -67,7 +69,10 @@ class Worker:
             "events_enabled": events_enabled,
             "delayed_enabled": delayed_enabled,
             "run_scheduler": run_scheduler,
+            "store_results": store_results,
         }
+        if result_ttl_ms is not None:
+            consumer_kwargs["result_ttl_ms"] = result_ttl_ms
         if consumer_id is not None:
             consumer_kwargs["consumer_id"] = consumer_id
         if read_block_ms is not None:
@@ -109,7 +114,7 @@ class Worker:
 
         self._running = True
 
-        async def native_handler(native_job: Any) -> None:
+        async def native_handler(native_job: Any) -> Optional[bytes]:
             data = decode_payload(bytes(native_job.payload))
             job = Job(
                 id=native_job.id,
@@ -118,7 +123,10 @@ class Worker:
                 attempt=native_job.attempt,
                 created_at_ms=native_job.created_at_ms,
             )
-            await self._handler(job)
+            result = await self._handler(job)
+            if result is None:
+                return None
+            return encode_payload(result)
 
         self._consumer_task = asyncio.ensure_future(
             self._consumer.run(native_handler)

@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional, Sequence, Union
 
 from . import _native
-from ._encoding import encode_payload
+from ._encoding import decode_payload, encode_payload
 from .errors import NotSupportedError
 from .job import Job
 from .repeat import BackoffSpec, MissedFiresPolicy, RepeatableMeta, RepeatPattern
@@ -352,6 +352,35 @@ class Queue:
         producer = self._get_producer()
         metas = await producer.list_repeatable(limit)
         return [_meta_from_dict(m) for m in metas]
+
+    async def get_job_result(self, job_id: str) -> Any:
+        """Read the stored result for ``job_id``.
+
+        Returns the msgpack-decoded value the handler returned, or
+        ``None`` for three indistinguishable cases: the job has not yet
+        completed, the result key already expired (``result_ttl_ms`` on
+        the worker side), or no result was ever written (the handler
+        returned ``None``, the worker ran with ``store_results=False``,
+        or the job was DLQ'd).
+        """
+        producer = self._get_producer()
+        raw = await producer.get_result(job_id)
+        if raw is None:
+            return None
+        return decode_payload(bytes(raw))
+
+    async def get_job_result_bulk(self, job_ids: Sequence[str]) -> list[Any]:
+        """Pipelined bulk variant of :meth:`get_job_result`.
+
+        Returns a list aligned by index with ``job_ids``; entries are
+        the msgpack-decoded value or ``None`` for the same three cases
+        documented on :meth:`get_job_result`.
+        """
+        if not job_ids:
+            return []
+        producer = self._get_producer()
+        raws = await producer.get_result_bulk(list(job_ids))
+        return [None if r is None else decode_payload(bytes(r)) for r in raws]
 
     async def remove_repeatable_by_key(self, key: str) -> bool:
         """Remove a repeatable spec by its resolved key.
