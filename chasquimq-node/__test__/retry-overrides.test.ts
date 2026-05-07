@@ -13,8 +13,7 @@
 // regardless of the queue's retry budget, with `reason === 'unrecoverable'`.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { Queue, Worker, UnrecoverableError } from '../dist/index.js'
-import { Producer } from '../index.js'
+import { Queue, Worker, UnrecoverableError, Producer } from '../dist/index.js'
 
 const REDIS_URL = process.env.REDIS_URL
 const skipIfNoRedis = REDIS_URL ? describe : describe.skip

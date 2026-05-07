@@ -1,10 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { encode, decode } from '@msgpack/msgpack'
-import { Producer, Consumer } from '../index.js'
+import { Producer, Consumer } from '../dist/index.js'
 
 // peekDlq / replayDlq are exposed on the native producer but not on the
-// high-level Queue shim. These tests exercise them directly — same
-// convention as `native.test.ts`.
+// high-level Queue shim. These tests exercise them directly.
 
 const REDIS_URL = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379'
 const HAS_REDIS = Boolean(process.env.REDIS_URL)

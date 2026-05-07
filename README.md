@@ -181,7 +181,7 @@ worker.on("completed", (job) => console.log(`sent ${job.name} ${job.id}`))
 
 The high-level surface — `Queue`, `Worker`, `Job`, `QueueEvents` — uses MessagePack on the wire and dispatches handler invocations across a tokio thread pool inside the addon, so JS event-loop pressure stays low. `job.name` round-trips end-to-end (separate `n` field on the stream entry; preserved across delayed adds, retries, repeatable scheduler fires, DLQ, and the events stream).
 
-**Native API.** Power users wanting the unwrapped engine can `import { Producer, Consumer, Promoter } from "chasquimq/native"` for direct access. Bytes pass through as opaque MessagePack — you control encoding and the `Job<T>` shape end-to-end.
+**Native API.** Power users wanting the unwrapped engine can `import { Producer, Consumer, Promoter, Scheduler } from "chasquimq"` for direct access — same package, same namespace as the high-level shim. Bytes pass through as opaque MessagePack — you control encoding and the `Job<T>` shape end-to-end.
 
 **Status.** Phase 3 is **complete** per the [PRD](prd/prd.md): JavaScript workers process jobs pulled by the Rust engine via NAPI-RS bindings. The shipped surface covers `Queue.add` (incl. `{ delay, attempts, backoff, repeat, jobId }`), `Queue.addBulk`, `Queue.getRepeatableJobs` / `removeRepeatableByKey`, `Worker` (the engine `Consumer` auto-embeds `Scheduler`; opt-out via `runScheduler: false`), `QueueEvents` cross-process fan-out, DLQ peek/replay, delayed cancel, and the `UnrecoverableError → HandlerError::unrecoverable` short-circuit. Surfaces outside the PRD's Phase 3 scope (parent/child flows, etc.) throw `NotSupportedError` — `import { NotSupportedError, UnrecoverableError } from "chasquimq"` to handle them.
 

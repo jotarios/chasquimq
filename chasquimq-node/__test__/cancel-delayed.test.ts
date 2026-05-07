@@ -4,12 +4,11 @@ import {
   Producer,
   Consumer,
   Promoter,
-} from '../index.js'
+} from '../dist/index.js'
 
 // The high-level shim doesn't expose cancelDelayed / cancelDelayedBulk
 // or peekDlq / replayDlq, but the underlying native Producer does. These
-// tests reach into the native binding directly — same convention as
-// `native.test.ts`.
+// tests reach into the native binding directly.
 
 const REDIS_URL = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379'
 const HAS_REDIS = Boolean(process.env.REDIS_URL)

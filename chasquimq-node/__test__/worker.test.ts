@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { encode } from '@msgpack/msgpack'
-import { Queue, Worker, NotSupportedError } from '../dist/index.js'
-import { Producer, Consumer } from '../index.js'
+import { Queue, Worker, NotSupportedError, Producer, Consumer } from '../dist/index.js'
 
 const REDIS_URL = process.env.REDIS_URL
 const skipIfNoRedis = REDIS_URL ? describe : describe.skip

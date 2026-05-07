@@ -9,10 +9,6 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    },
-    "./native": {
-      "types": "./index.d.ts",
-      "default": "./index.js"
     }
   },
   "license": "MIT",

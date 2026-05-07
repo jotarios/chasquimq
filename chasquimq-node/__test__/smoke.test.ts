@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest'
-// `engineVersion` is exposed by the native binding — it's the smoke
-// test that the napi build chain produced a loadable `.node`. The
-// high-level shim re-exports it from the same path; either works.
-import { engineVersion } from '../index.js'
+// `engineVersion` is exposed by the native binding and re-exported
+// from the package root. Smoke-tests that the napi build chain
+// produced a loadable `.node`.
+import { engineVersion } from '../dist/index.js'
 
 describe('smoke', () => {
   it('returns engine version', () => {
