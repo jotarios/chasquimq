@@ -13,11 +13,12 @@
 
 use crate::payload::RawBytes;
 use crate::producer::map_engine_err;
+use bytes::Bytes;
 use chasquimq::config::{ConsumerConfig, RetryConfig};
 use chasquimq::consumer::Consumer as EngineConsumer;
 use chasquimq::{HandlerError, Job as EngineJob};
 use napi::bindgen_prelude::*;
-use napi::threadsafe_function::{ErrorStrategy, ThreadsafeFunction, UnknownReturnValue};
+use napi::threadsafe_function::{ErrorStrategy, ThreadsafeFunction};
 use napi_derive::napi;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -48,6 +49,13 @@ pub struct ConsumerOpts {
     pub delayed_enabled: Option<bool>,
     pub run_scheduler: Option<bool>,
     pub scheduler_tick_ms: Option<i64>,
+    /// When `true`, the engine writes the handler's returned `Buffer`
+    /// to `{chasqui:<queue>}:result:<job_id>` with TTL `resultTtlMs`,
+    /// readable via `Producer.getResult(jobId)`. Default `false`.
+    pub store_results: Option<bool>,
+    /// Result-key TTL in milliseconds when `storeResults = true`.
+    /// Default 3,600,000 (1h). Internally rounded to whole seconds.
+    pub result_ttl_ms: Option<i64>,
 }
 
 #[napi(object)]
@@ -101,7 +109,7 @@ impl Consumer {
     /// `"<name>: <message>"`. We match the prefix `"UnrecoverableError"`
     /// followed by either `:` (the standard `Error.toString()` form) or
     /// end-of-string (an `UnrecoverableError` thrown with no message).
-    #[napi(ts_args_type = "handler: (job: Job) => Promise<void>")]
+    #[napi(ts_args_type = "handler: (job: Job) => Promise<Buffer | undefined | null>")]
     pub async fn run(
         &self,
         // `ErrorStrategy::Fatal` — the JS handler is invoked with **only**
@@ -136,23 +144,19 @@ impl Consumer {
                             attempt: job.attempt,
                         };
 
-                        // `call_async::<Promise<UnknownReturnValue>>` says
-                        // "the JS handler returns a Promise; I don't care
-                        // what it resolves with, just whether it
-                        // resolves." That matches `JobHandler = (job) =>
-                        // Promise<void>` exactly.
-                        //
-                        // With `Fatal` strategy `call_async` takes the
-                        // value directly (not `Result<T>`).
-                        // Slice 5a tactical compile-fix: engine handler now
-                        // returns `Bytes`. Slice 5b will plumb the JS-side
-                        // return value through the TSFN; for now, an empty
-                        // `Bytes` keeps the signature intact and the
-                        // engine's `store_results` gate is a no-op (empty
-                        // results never trigger the per-entry SET).
-                        match tsfn.call_async::<Promise<UnknownReturnValue>>(js_job).await {
+                        // `call_async::<Promise<Option<Buffer>>>` resolves
+                        // the JS handler's returned Promise to either a
+                        // `Buffer` (msgpack-encoded result bytes from the
+                        // shim) or `null` / `undefined` → `None` (no
+                        // result; the engine takes the ack-only fast
+                        // path). Anything else surfaces as a conversion
+                        // error and routes through the standard handler-
+                        // error path. With `Fatal` strategy `call_async`
+                        // takes the value directly (not `Result<T>`).
+                        match tsfn.call_async::<Promise<Option<Buffer>>>(js_job).await {
                             Ok(promise) => match promise.await {
-                                Ok(_) => Ok(chasquimq::Bytes::new()),
+                                Ok(Some(buf)) => Ok(Bytes::copy_from_slice(buf.as_ref())),
+                                Ok(None) => Ok(Bytes::new()),
                                 Err(e) => Err(map_js_rejection(&e)),
                             },
                             Err(e) => Err(HandlerError::new(JsHandlerError(format!(
@@ -232,6 +236,16 @@ fn build_consumer_config(opts: Option<ConsumerOpts>) -> ConsumerConfig {
         if let Some(v) = o.scheduler_tick_ms {
             if v >= 0 {
                 cfg.scheduler.tick_interval_ms = v as u64;
+            }
+        }
+        if let Some(v) = o.store_results {
+            cfg.store_results = v;
+        }
+        if let Some(v) = o.result_ttl_ms {
+            // Engine TTL is in seconds; round up so a sub-second value
+            // doesn't collapse to zero (which Redis rejects on `EX`).
+            if v > 0 {
+                cfg.result_ttl_secs = (v as u64).div_ceil(1000);
             }
         }
         if let Some(r) = o.retry {

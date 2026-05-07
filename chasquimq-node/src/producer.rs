@@ -340,6 +340,33 @@ impl Producer {
             .collect())
     }
 
+    /// Read the stored result bytes for `id`. Returns `null` when no
+    /// result is available (job not yet completed, expired, never written,
+    /// or consumer ran without `storeResults`).
+    ///
+    /// One copy at the FFI boundary (engine `Bytes` → Node `Buffer`),
+    /// matching the existing `peekDlq` shape.
+    #[napi]
+    pub async fn get_result(&self, id: String) -> napi::Result<Option<Buffer>> {
+        let v = self.inner.get_result(&id).await.map_err(map_engine_err)?;
+        Ok(v.map(|b| Buffer::from(b.to_vec())))
+    }
+
+    /// Bulk variant of `getResult`. The returned array is aligned with
+    /// the input; entries are `null` for missing results.
+    #[napi]
+    pub async fn get_result_bulk(&self, ids: Vec<String>) -> napi::Result<Vec<Option<Buffer>>> {
+        let vs = self
+            .inner
+            .get_result_bulk(&ids)
+            .await
+            .map_err(map_engine_err)?;
+        Ok(vs
+            .into_iter()
+            .map(|opt| opt.map(|b| Buffer::from(b.to_vec())))
+            .collect())
+    }
+
     #[napi]
     pub async fn replay_dlq(&self, limit: u32) -> napi::Result<u32> {
         let n = self
