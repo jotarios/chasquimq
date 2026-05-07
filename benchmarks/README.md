@@ -54,6 +54,29 @@ cargo run -p chasquimq-bench --release -- --repeats 5 --scale 5 --discard-slowes
 
 Raw run logs land in `benchmarks/runs/` (gitignored — local only). The committed `.md` files in this directory are the canonical record.
 
+## Interpreting numbers
+
+> **Host-load floor gate.** A "host-load floor" / "host contention" /
+> "concurrent agents" explanation for a `worker-concurrent` regression
+> only applies when `git diff <previous-baseline> -- chasquimq/` is
+> empty. If engine code changed, that explanation is forfeited; the
+> regression must be re-run on a quiet host (`load avg < 1.0`) before
+> being accepted as no-regression.
+
+## When to rerun
+
+The bench is the headline claim — re-measure when it could move:
+
+- Each tagged release.
+- Whenever the engine hot path is touched
+  (`chasquimq/src/{consumer,producer,redis}/`).
+- At least once per major refactor, even if the diff looks
+  hot-path-adjacent rather than hot-path itself.
+
+Rebench cadence is per-PR judgment for changes outside those
+directories; small tweaks to bindings, the CLI, or docs do not need a
+fresh run.
+
 ## Methodology limitations
 
 The numbers above are defensible for *this hardware* and *this setup*. Open caveats, tracked in `TODOS.md`:

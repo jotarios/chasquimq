@@ -152,15 +152,20 @@ async def run_one(args: argparse.Namespace, queue_name: str) -> dict:
     sample_every = max(1, args.jobs // 4096)
     last_ts = 0.0
 
+    # Nonlocal mutations below are GIL-safe only because no awaits in handler;
+    # adding an await requires a lock or asyncio.Queue.
     async def handler(_job) -> None:
         nonlocal seen, started_ts, started_rusage, elapsed, rusage_user, rusage_sys, last_ts
         seen += 1
         now = time.perf_counter()
-        if seen == args.warmup:
+        # Timer starts after `args.warmup` warmup jobs have completed, so the
+        # measured window is exactly `args.jobs` jobs (seen `warmup+1` ..
+        # `warmup+jobs`), not `args.jobs + 1`.
+        if seen == args.warmup + 1:
             started_ts = now
             last_ts = now
             started_rusage = resource.getrusage(resource.RUSAGE_SELF)
-        elif seen >= args.warmup:
+        elif seen > args.warmup + 1:
             # Inter-handler dispatch interval — proxy for handler-side
             # latency, not affected by pre-load dwell time. With
             # concurrency > 1 this measures the *aggregate* dispatch

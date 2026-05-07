@@ -17,7 +17,7 @@ get out of the engine without rewriting their handler in Rust.
 ```bash
 # 1. Build the wheel against this checkout, in a venv:
 cd chasquimq-py
-python3 -m venv .venv && source .venv/bin/activate
+python3 -m venv .venv-bench && source .venv-bench/bin/activate
 pip install msgpack redis maturin
 maturin develop --release
 cd ..
@@ -76,9 +76,15 @@ Host load: ~3 (concurrent agent processes; same conditions as the Phase 4 bench-
 
 `worker-concurrent` (engine, no handler) on this host today: 116,745
 jobs/s. Python-handler-in-loop on the same host: 46,740 jobs/s — **~40%
-of the engine ceiling**. The other 60% is the PyO3 dispatch seam: GIL
-acquire, `into_future_with_locals` setup, asyncio scheduler step, task
-creation, awaitable resolution, exception path check.
+of the degraded host-load ceiling**, not the canonical engine ceiling.
+The Phase 2 final canonical `worker-concurrent` is 415,580 jobs/s; the
+~116k figure is what reproduces on this host today under load avg ~3
+(see [`post-1.0-bench-baseline.md`](post-1.0-bench-baseline.md)). Both
+numbers are measured under the same host conditions, so the ratio is
+the stable signal even if the absolute ceiling is depressed. The other
+60% is the PyO3 dispatch seam: GIL acquire, `into_future_with_locals`
+setup, asyncio scheduler step, task creation, awaitable resolution,
+exception path check.
 
 CPU at ~195% means the bench saturates ~2 cores: roughly one for the
 asyncio loop (single-threaded by GIL, but the engine reader and

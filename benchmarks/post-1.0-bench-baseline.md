@@ -49,6 +49,12 @@ breached, but only by the same amount and for the same reason the
 Phase 4 bench-guard already documented. This is the host-load floor
 on contended Mac hosts; the engine ceiling has not moved.
 
+> **Gate:** this "host-load floor" explanation only applies when
+> `git diff <previous-baseline> -- chasquimq/` is empty. If engine
+> code changed, this explanation is forfeited; the regression must
+> be re-run on a quiet host (`load avg < 1.0`) before being accepted
+> as no-regression.
+
 For belt-and-braces, the producer-only path (which bottlenecks on
 Redis, not on host CPU) reproduces cleanly:
 

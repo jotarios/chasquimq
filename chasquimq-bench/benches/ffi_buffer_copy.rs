@@ -15,7 +15,7 @@
 //! Python variant can't be measured outside an embedded interpreter,
 //! but the underlying `to_vec` cost is identical (it's just a `memcpy`
 //! into a fresh allocation). The end-to-end FFI cross is measured by
-//! the higher-level scripts in `benchmarks/scripts/`.
+//! `benchmarks/scripts/python_handler_bench.py`.
 //!
 //! Payload sizes mirror `bullmq-bench`'s default (10x10 = 100 bytes
 //! after msgpack framing) and the bigger 256-byte case from real
