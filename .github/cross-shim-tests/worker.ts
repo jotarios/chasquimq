@@ -7,6 +7,13 @@
 // EXPECT_JOB_NAME — optional. When non-empty, the handler asserts
 // `job.name === EXPECT_JOB_NAME` so a regression that drops `name`
 // on either shim's wire path is caught here.
+//
+// STORE_RESULT  — optional. When '1', the worker enables `storeResults`
+//                 so the engine persists each handler's return value at
+//                 `{chasqui:<QUEUE>}:result:<jobId>` for the verifier to
+//                 read back. Default off.
+// RESULT_VALUE  — optional, JSON-encoded. When set, the handler returns
+//                 `JSON.parse(RESULT_VALUE)` instead of `undefined`.
 
 import { Worker } from '../../chasquimq-node/dist/index.js'
 
@@ -17,6 +24,11 @@ async function main(): Promise<number> {
   const expectJobName = process.env.EXPECT_JOB_NAME ?? ''
   const timeoutSecs = Number(process.env.TIMEOUT_SECS ?? '30')
   const redisUrl = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379'
+  const storeResults = process.env.STORE_RESULT === '1'
+  const resultValueRaw = process.env.RESULT_VALUE ?? ''
+  const resultValue: unknown = resultValueRaw
+    ? JSON.parse(resultValueRaw)
+    : undefined
 
   const seen = new Set<number>()
   const errors: string[] = []
@@ -25,35 +37,36 @@ async function main(): Promise<number> {
     resolveDone = r
   })
 
-  const worker = new Worker<{ i: number; tag: string }>(
+  const worker = new Worker<{ i: number; tag: string }, unknown>(
     queueName,
     async (job) => {
       const data = job.data as unknown
       if (typeof data !== 'object' || data === null) {
         errors.push(`payload not an object: ${JSON.stringify(data)}`)
         resolveDone()
-        return
+        return resultValue
       }
       const { i, tag } = data as { i?: unknown; tag?: unknown }
       if (typeof i !== 'number' || !Number.isInteger(i) || i < 0 || i >= count) {
         errors.push(`i out of range: ${JSON.stringify(i)}`)
         resolveDone()
-        return
+        return resultValue
       }
       if (tag !== expectTag) {
         errors.push(`tag mismatch: got ${JSON.stringify(tag)}, want '${expectTag}'`)
         resolveDone()
-        return
+        return resultValue
       }
       if (expectJobName && job.name !== expectJobName) {
         errors.push(`name mismatch: got '${job.name}', want '${expectJobName}'`)
         resolveDone()
-        return
+        return resultValue
       }
       seen.add(i)
       if (seen.size >= count) {
         resolveDone()
       }
+      return resultValue
     },
     {
       connection: parseConn(redisUrl),
@@ -62,6 +75,7 @@ async function main(): Promise<number> {
       maxStalledCount: 1,
       drainDelay: 200,
       runScheduler: false,
+      storeResults,
     },
   )
 

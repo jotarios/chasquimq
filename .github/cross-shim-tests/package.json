@@ -6,7 +6,8 @@
   "description": "Cross-shim wire-format contract test fixtures (CI only).",
   "scripts": {
     "producer": "tsx producer.ts",
-    "worker": "tsx worker.ts"
+    "worker": "tsx worker.ts",
+    "verify": "tsx verify_results.ts"
   },
   "devDependencies": {
     "tsx": "^4.19.0",

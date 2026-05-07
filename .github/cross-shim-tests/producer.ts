@@ -12,8 +12,14 @@
 //   JOB_NAME    — optional. When non-empty, jobs are enqueued with this name
 //                  (paired with EXPECT_JOB_NAME on the worker side to assert
 //                  name round-trips through the wire format).
+//   JOB_IDS_FILE — optional. When set, the resolved engine-minted job IDs
+//                  are written one-per-line to this path so a downstream
+//                  verifier (verify_results.{py,ts}) can read them back and
+//                  assert the result-backend round-trip after the worker
+//                  drains.
 //   TAG, REDIS_URL — optional.
 
+import { writeFileSync } from 'node:fs'
 import { Queue } from '../../chasquimq-node/dist/index.js'
 
 const DELAYED_MS = 100
@@ -25,23 +31,32 @@ async function main(): Promise<number> {
   const tag = process.env.TAG ?? 'node'
   const redisUrl = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379'
   const mode = (process.env.MODE ?? 'immediate').toLowerCase()
+  const jobIdsFile = process.env.JOB_IDS_FILE ?? ''
 
   if (mode !== 'immediate' && mode !== 'delayed') {
     console.error(`[node-producer] ERROR: unknown MODE='${mode}'`)
     return 1
   }
 
+  const ids: string[] = []
   const queue = new Queue(queueName, { connection: parseConn(redisUrl) })
   try {
     for (let i = 0; i < count; i++) {
+      let job
       if (mode === 'delayed') {
-        await queue.add(jobName, { i, tag }, { delay: DELAYED_MS })
+        job = await queue.add(jobName, { i, tag }, { delay: DELAYED_MS })
       } else {
-        await queue.add(jobName, { i, tag })
+        job = await queue.add(jobName, { i, tag })
       }
+      ids.push(job.id)
     }
   } finally {
     await queue.close()
+  }
+
+  if (jobIdsFile) {
+    writeFileSync(jobIdsFile, ids.map((id) => `${id}\n`).join(''), 'utf8')
+    console.log(`[node-producer] wrote ${ids.length} ids to '${jobIdsFile}'`)
   }
 
   console.log(
