@@ -154,3 +154,13 @@ class Worker:
     @property
     def is_running(self) -> bool:
         return self._running
+
+    @property
+    def is_closed(self) -> bool:
+        return self._closed
+
+    async def __aenter__(self) -> "Worker":
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        await self.close()

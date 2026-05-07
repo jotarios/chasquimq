@@ -67,3 +67,16 @@ def test_high_level_classes_still_available() -> None:
     worker = Worker("py-smoke-flat", _handler, redis_url=REDIS_URL)
     assert queue.name == "py-smoke-flat"
     assert worker.name == "py-smoke-flat"
+
+
+def test_job_attempts_made_aliases_attempt() -> None:
+    """``Job.attempts_made`` is a read-only BullMQ-compatible alias for
+    the canonical 0-indexed ``attempt`` field."""
+    job = Job(id="x", name="t", data=None, attempt=3, created_at_ms=0)
+    assert job.attempts_made == 3
+    assert job.attempts_made == job.attempt
+    # Read-only — assigning to a property without a setter raises.
+    import pytest
+
+    with pytest.raises(AttributeError):
+        job.attempts_made = 7  # type: ignore[misc]

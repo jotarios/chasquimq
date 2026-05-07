@@ -20,6 +20,8 @@ to deliver to the user's processor) leave it ``None`` — calling
 from __future__ import annotations
 
 import asyncio
+import time
+import warnings
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -44,6 +46,11 @@ class Job:
         default=None, repr=False, compare=False, hash=False
     )
 
+    @property
+    def attempts_made(self) -> int:
+        """Alias for :attr:`attempt` — matches BullMQ naming for compatibility."""
+        return self.attempt
+
     async def wait_for_result(
         self,
         *,
@@ -65,6 +72,15 @@ class Job:
         this method will time out. Mirror the worker's ``store_results``
         config on the consumer side before relying on
         :meth:`wait_for_result`.
+
+        Note:
+            After polling for >1s with no result key, this method emits
+            a one-shot :class:`RuntimeWarning` to surface the most
+            common cause: the worker was started without
+            ``store_results=True``, so no result will ever appear.
+            Either set ``Worker(store_results=True)`` on the consumer
+            side, or switch to :class:`QueueEvents` subscription
+            instead of polling.
 
         **Polling cost.** Default ``poll_interval=0.1`` is fine for one
         or two concurrent waiters; ``N`` simultaneous
@@ -94,11 +110,27 @@ class Job:
                 f"poll_interval must be a positive number of seconds, got {poll_interval!r}"
             )
 
+        started = time.monotonic()
+        warned = False
+
         async def _loop() -> Any | None:
+            nonlocal warned
             while True:
                 value = await self._queue.get_job_result(self.id)  # type: ignore[union-attr]
                 if value is not None:
                     return value
+                if not warned and (time.monotonic() - started) > 1.0:
+                    warnings.warn(
+                        "wait_for_result has been polling for >1s with no "
+                        "result key. If the worker was started without "
+                        "store_results=True, no result will ever appear. "
+                        "Either: (a) ensure Worker(store_results=True) on "
+                        "the consumer side, or (b) switch to QueueEvents "
+                        "subscription instead of polling.",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+                    warned = True
                 await asyncio.sleep(poll_interval)
 
         return await asyncio.wait_for(_loop(), timeout=timeout)
