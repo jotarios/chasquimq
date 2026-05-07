@@ -1,6 +1,6 @@
 [package]
 name = "chasquimq-py"
-version = "1.0.0"
+version = "1.0.1"
 description = "Python PyO3 bindings for the chasquimq message broker."
 edition.workspace = true
 license.workspace = true

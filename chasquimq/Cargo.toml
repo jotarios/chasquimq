@@ -1,6 +1,6 @@
 [package]
 name = "chasquimq"
-version = "1.0.0"
+version = "1.0.1"
 description = "The fastest open-source message broker for Redis. Rust-native engine on Redis Streams + MessagePack, with Node.js and Python bindings."
 authors = ["Jorge Rios <j29.rios@gmail.com>"]
 readme = "../README.md"

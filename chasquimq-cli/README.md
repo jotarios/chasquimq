@@ -2,12 +2,9 @@
 
 `chasqui` — a command-line dashboard for [ChasquiMQ](https://github.com/jotarios/chasquimq).
 
-Phase 4 / Track B of the project. See [`docs/phase4-pyo3-design.md`](../docs/phase4-pyo3-design.md) §8 and §11
-for the full command surface and roadmap.
+> **Status:** 1.0. Prebuilt binaries for x86_64 + aarch64 Linux, x86_64 + aarch64 macOS, and x86_64 Windows.
 
-## Status
-
-Slice B3 complete. Today the CLI ships:
+## What it ships
 
 - `chasqui inspect` — one-shot snapshot of stream depth, pending, DLQ depth, delayed depth, oldest delayed lag, and repeatable count.
 - `chasqui dlq peek` — render the next N DLQ entries plus a `reason` histogram.
@@ -32,7 +29,7 @@ curl --proto '=https' --tlsv1.2 -LsSf \
 powershell -c "irm https://github.com/jotarios/chasquimq/releases/latest/download/chasquimq-cli-installer.ps1 | iex"
 ```
 
-For a specific version, replace `latest` with the tag (e.g., `download/chasquimq-cli-v0.1.0/`).
+For a specific version, replace `latest` with the tag (e.g., `download/chasquimq-cli-v1.0.0/`).
 
 The release pipeline is driven by [`cargo dist`](https://opensource.axo.dev/cargo-dist/) — see the [`CLI Release` workflow](../.github/workflows/release.yml) and the [Releasing chasquimq-cli](../CONTRIBUTING.md#releasing-chasquimq-cli) section of `CONTRIBUTING.md` for the release flow.
 

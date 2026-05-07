@@ -173,6 +173,21 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # `napi build` (in the build matrix) emits the bridge `index.js`
+      # and `index.d.ts` alongside the platform `.node`. Copy them up
+      # from any one artifact subdir so `tsc` and `napi artifacts` can
+      # resolve `../index.js` from `src-ts/*` imports. The bridge is
+      # identical across targets — picking the first directory is fine.
+      - name: Stage napi bridge files at the package root
+        run: |
+          ARTIFACT_DIR=$(ls -d artifacts/bindings-* 2>/dev/null | head -n 1)
+          if [ -z "$ARTIFACT_DIR" ]; then
+            echo "No bindings-* artifact directories found under artifacts/" >&2
+            exit 1
+          fi
+          cp "$ARTIFACT_DIR/index.js" .
+          cp "$ARTIFACT_DIR/index.d.ts" .
+
       - name: Build TS
         run: npm run build:ts
 
