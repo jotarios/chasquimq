@@ -40,11 +40,24 @@ export class QueueEvents extends EventEmitter {
       lazyConnect: true,
       // Blocking XREAD requires maxRetriesPerRequest = null. Common pitfall.
       maxRetriesPerRequest: null,
+      // ioredis auto-issues `CLIENT SETINFO LIB-NAME / LIB-VER` after AUTH/INFO
+      // on every connect (introduced in ioredis 5.4 via PR #2011). Those
+      // commands queue behind the user's first command and, on a client whose
+      // first command is a blocking XREAD, race the close path: when the
+      // socket end()s while SETINFO is still pending, ioredis flushes the
+      // commandQueue with a `Connection is closed.` rejection that is NOT
+      // attached to any awaited promise — it surfaces as an unhandled
+      // rejection from `node_modules/ioredis/built/connectors/...`. We don't
+      // surface client-info anywhere, so disabling SETINFO is free. See
+      // ioredis#2025 for the upstream report; resolved in 5.8.2 for general
+      // teardown but the blocked-XREAD shape still leaks via SETINFO.
+      disableClientInfo: true,
     }
     this.client = new IORedis(ioOpts)
-    // Attach a permanent error listener so post-close "Connection is closed."
-    // events don't escape as unhandled. Operational errors during run() still
-    // re-emit on this EventEmitter via the run-loop catch path.
+    // Operational error pass-through. Open errors during run() also surface
+    // here in addition to the run-loop's xread reject path; close-time
+    // errors are silenced because the SETINFO-removal above eliminates the
+    // only known path that produces benign noise here.
     this.client.on('error', (err: Error) => {
       if (this.closed) return
       this.emit('error', err)
@@ -118,7 +131,12 @@ export class QueueEvents extends EventEmitter {
           sleep(this.blockingTimeoutMs + 1000),
         ])
       }
-      await this.client.quit().catch(() => {})
+      // disconnect(false) tears the socket down immediately without queueing
+      // a QUIT command behind the in-flight BLOCK. `client.quit()` would
+      // enqueue QUIT, and ioredis can't flush it while XREAD is mid-block
+      // — the QUIT then resolves with a `Connection is closed.` rejection
+      // when the socket ends, racing with the close path.
+      this.client.disconnect(false)
     })()
     return this.closePromise
   }
