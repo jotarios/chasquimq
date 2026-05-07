@@ -5,6 +5,17 @@
 // but the engine semantics (FIFO Streams, append-only entries, no
 // per-job priority) are honored under the hood. Options that don't map
 // cleanly are documented as ignored or `NotSupportedError`.
+//
+// Dual taxonomy note. The shim exposes two parallel families of types
+// after the import-surface flatten: the high-level shapes here
+// (`BackoffOptions` / `RepeatOptions` / `JobsOptions` / `RepeatableJobMeta`)
+// are the canonical user-facing API for `Queue.add` / `Worker` /
+// `Queue.getRepeatableJobs`. The wire-format twins re-exported from
+// the native binding (`BackoffSpec` / `RepeatPattern` / `RepeatableSpec`
+// / `RepeatableMeta`) mirror the engine's Rust structs 1:1 and are
+// intended for power users calling the unwrapped `Producer` / `Consumer`
+// classes directly. Both will appear in autocomplete; reach for the
+// high-level shapes unless you've already opted into the native API.
 
 export type JobProgress = number | object
 

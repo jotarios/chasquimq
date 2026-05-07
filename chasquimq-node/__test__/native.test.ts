@@ -1,17 +1,19 @@
 import { describe, it, expect } from 'vitest'
 import { encode, decode } from '@msgpack/msgpack'
 
-// Native bindings are exported from the `chasquimq/native` subpath of
-// the package. The `exports` map in `package.json` resolves the parent
-// path's `./native` entry to the generated `index.js` / `index.d.ts`
-// produced by `napi build`. The bare `'..'` import (no subpath) now
-// resolves to `./dist/index.js` — the high-level shim.
+// Native bindings are re-exported from the package root alongside the
+// high-level shim — one namespace, no subpath. The native `Job` value
+// type is re-exported as `NativeJob` to avoid colliding with the
+// high-level `Job` class. `Promoter` is the only exception: it's not
+// re-exported from the package root (symmetry with the Python shim,
+// which has no `Promoter` pyclass), so import it from the underlying
+// napi binding directly.
 import {
   Producer,
   Consumer,
-  Promoter,
-  type Job,
-} from '../index.js'
+  type NativeJob,
+} from '../dist/index.js'
+import { Promoter } from '../index.js'
 
 const REDIS_URL = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379'
 const HAS_REDIS = Boolean(process.env.REDIS_URL)
@@ -40,7 +42,7 @@ d('Producer + Consumer round-trip', () => {
       delayedEnabled: false,
     })
 
-    const seen: Job[] = []
+    const seen: NativeJob[] = []
     let resolveSeen: () => void
     const handlerSettled = new Promise<void>((r) => (resolveSeen = r))
 
@@ -99,7 +101,7 @@ d('Producer + Consumer round-trip', () => {
       delayedEnabled: false,
     })
 
-    let seen: Job | null = null
+    let seen: NativeJob | null = null
     let resolveSeen: () => void
     const settled = new Promise<void>((r) => (resolveSeen = r))
 
