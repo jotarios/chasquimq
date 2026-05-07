@@ -42,6 +42,13 @@ export class QueueEvents extends EventEmitter {
       maxRetriesPerRequest: null,
     }
     this.client = new IORedis(ioOpts)
+    // Attach a permanent error listener so post-close "Connection is closed."
+    // events don't escape as unhandled. Operational errors during run() still
+    // re-emit on this EventEmitter via the run-loop catch path.
+    this.client.on('error', (err: Error) => {
+      if (this.closed) return
+      this.emit('error', err)
+    })
 
     if (opts.autorun !== false) {
       queueMicrotask(() => { void this.run() })
