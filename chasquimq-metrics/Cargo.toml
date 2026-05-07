@@ -1,14 +1,15 @@
 [package]
 name = "chasquimq-metrics"
-version = "0.1.0"
+version = "1.0.0"
 description = "Bridge ChasquiMQ's MetricsSink to the metrics-rs facade."
+publish = false  # in-tree adapter; users wire their own sink to ConsumerConfig.metrics directly.
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-chasquimq = { path = "../chasquimq", version = "0.1" }
+chasquimq = { path = "../chasquimq", version = "1.0" }
 metrics = "0.24"
 
 [dev-dependencies]

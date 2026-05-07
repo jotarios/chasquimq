@@ -1,11 +1,21 @@
 [package]
 name = "chasquimq-cli"
 description = "Command-line dashboard for ChasquiMQ — inspect queues, peek/replay DLQ, list repeatable jobs."
-version = "0.1.0"
+version = "1.0.0"
+authors = ["Jorge Rios <j29.rios@gmail.com>"]
+keywords = ["redis", "queue", "cli", "dashboard", "chasqui"]
+categories = ["command-line-utilities"]
+publish = false  # ships via cargo-dist (GitHub Releases) — `cargo install --git ...` for source builds.
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+
+# cargo-dist override: include this crate in the release manifest even
+# though publish = false hides it from crates.io. The CLI binary ships
+# via cargo-dist + GitHub Releases on `git tag v*`.
+[package.metadata.dist]
+dist = true
 
 [[bin]]
 name = "chasqui"
@@ -18,6 +28,6 @@ comfy-table = "7"
 crossterm = "0.28"
 fred = { version = "10", features = ["i-streams"] }
 anyhow = "1"
-chasquimq = { path = "../chasquimq" }
+chasquimq = { path = "../chasquimq", version = "1.0" }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 rmpv = { version = "1", features = ["with-serde"] }
