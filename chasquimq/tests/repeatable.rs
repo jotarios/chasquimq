@@ -257,7 +257,7 @@ fn spawn_consumer(
                     let counter = counter.clone();
                     async move {
                         counter.fetch_add(1, Ordering::SeqCst);
-                        Ok(())
+                        Ok(chasquimq::Bytes::new())
                     }
                 },
                 shutdown,
@@ -1100,7 +1100,7 @@ async fn consumer_auto_embeds_scheduler() {
                     let counter = counter_clone.clone();
                     async move {
                         counter.fetch_add(1, Ordering::SeqCst);
-                        Ok(())
+                        Ok(chasquimq::Bytes::new())
                     }
                 },
                 shutdown_clone,

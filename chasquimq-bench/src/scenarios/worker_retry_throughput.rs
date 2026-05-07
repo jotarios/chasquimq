@@ -110,7 +110,7 @@ async fn drive_retry_scenario(
                                 let _ = tx.send(outcome);
                                 shutdown.cancel();
                             }
-                            Ok(())
+                            Ok(chasquimq::Bytes::new())
                         }
                     }
                 },

@@ -66,6 +66,20 @@ pub fn scheduler_lock_key(queue_name: &str) -> String {
     format!("{{chasqui:{queue_name}}}:scheduler:lock")
 }
 
+/// Per-queue, per-job-id result-backend key. Stores the handler's
+/// return value (opaque bytes — every shim msgpack-encodes the user's
+/// native value before the bytes cross the FFI boundary) with a
+/// configurable TTL set by [`crate::config::ConsumerConfig::result_ttl_secs`].
+/// Written by `JOB_OK_SCRIPT` in the same Lua round trip as the
+/// `XACKDEL` so the result write is gated on a successful ack — no
+/// orphan results when a concurrent CLAIM removed the entry first.
+/// Same `{chasqui:<queue>}` hash tag as the rest of the queue's
+/// keyspace so the result key always co-locates on a single Redis
+/// Cluster slot.
+pub fn result_key(queue_name: &str, job_id: &str) -> String {
+    format!("{{chasqui:{queue_name}}}:result:{job_id}")
+}
+
 /// Per-queue, per-job-id side-index key used by `Producer::cancel_delayed`.
 /// Stores the exact encoded ZSET member so cancel can `ZREM` precisely
 /// without a slow `ZRANGE` scan. Written by the idempotent schedule path

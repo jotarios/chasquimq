@@ -202,7 +202,7 @@ async fn err_then_ok_succeeds_normally() {
                         if n < 2 {
                             Err(HandlerError::new(std::io::Error::other("flaky")))
                         } else {
-                            Ok(())
+                            Ok(chasquimq::Bytes::new())
                         }
                     }
                 },
@@ -256,7 +256,7 @@ async fn panic_treated_as_err() {
                 move |_: Job<Sample>| async move {
                     panic!("boom");
                     #[allow(unreachable_code)]
-                    Ok(())
+                    Ok(chasquimq::Bytes::new())
                 },
                 shutdown_clone,
             )
@@ -317,7 +317,7 @@ async fn oversize_payload_lands_in_dlq() {
                     let calls = calls_h.clone();
                     async move {
                         calls.fetch_add(1, Ordering::SeqCst);
-                        Ok(())
+                        Ok(chasquimq::Bytes::new())
                     }
                 },
                 shutdown_clone,
@@ -382,7 +382,7 @@ async fn malformed_entry_without_payload_field_lands_in_dlq() {
                     let calls = calls_h.clone();
                     async move {
                         calls.fetch_add(1, Ordering::SeqCst);
-                        Ok(())
+                        Ok(chasquimq::Bytes::new())
                     }
                 },
                 shutdown_clone,
@@ -447,7 +447,7 @@ async fn poison_message_lands_in_dlq() {
                     let calls = calls_h.clone();
                     async move {
                         calls.fetch_add(1, Ordering::SeqCst);
-                        Ok(())
+                        Ok(chasquimq::Bytes::new())
                     }
                 },
                 shutdown_clone,

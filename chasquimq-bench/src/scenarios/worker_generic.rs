@@ -80,7 +80,7 @@ pub(crate) async fn drive_worker_scenario(
                                 let _ = tx.send(outcome);
                                 shutdown.cancel();
                             }
-                            Ok(())
+                            Ok(chasquimq::Bytes::new())
                         }
                     }
                 },

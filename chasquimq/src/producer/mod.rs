@@ -26,7 +26,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub use crate::redis::keys::{
     dedup_marker_key, delayed_index_key, delayed_key, dlq_key, events_key, promoter_lock_key,
-    repeat_key, repeat_spec_key, scheduler_lock_key, stream_key,
+    repeat_key, repeat_spec_key, result_key, scheduler_lock_key, stream_key,
 };
 
 #[derive(Debug, Clone)]
@@ -286,6 +286,65 @@ impl<T: Serialize> Producer<T> {
 }
 
 impl<T> Producer<T> {
+    /// Read the stored result bytes for `id`, written by a `store_results=true`
+    /// consumer when its handler returned non-empty `Bytes`. Returns `None`
+    /// for three indistinguishable cases: the job has not yet completed,
+    /// the result key already expired (TTL is `result_ttl_secs` on the
+    /// consumer side), or no result was ever written (job failed, was
+    /// DLQ'd, or the consumer ran with `store_results=false`).
+    ///
+    /// One `GET {chasqui:<queue>}:result:<id>` over the producer's pool.
+    /// Bytes are returned opaque — every shim msgpack-encoded the user
+    /// value before the bytes crossed the FFI boundary, so callers
+    /// decode with the same wire format they encoded with.
+    ///
+    /// Note: a `None` return does NOT guarantee the job didn't run. A
+    /// successful handler followed by a retried EVALSHA after a network
+    /// blip can ack-and-remove the stream entry without writing the
+    /// result key (the second EVALSHA sees XACKDEL count=0 and skips
+    /// the SET). For at-most-once result-write semantics, prefer
+    /// `QueueEvents` subscription instead.
+    pub async fn get_result(&self, id: &JobId) -> Result<Option<Bytes>> {
+        let key = result_key(self.queue_name.as_ref(), id);
+        let client = self.pool.next_connected();
+        let cmd = CustomCommand::new_static("GET", ClusterHash::FirstKey, false);
+        let v: Value = client
+            .custom(cmd, vec![Value::from(key)])
+            .await
+            .map_err(Error::Redis)?;
+        Ok(value_as_bytes(&v))
+    }
+
+    /// Pipelined bulk variant of [`Producer::get_result`]. Issues one `GET`
+    /// per id on a single connection. The returned `Vec<Option<Bytes>>` is
+    /// aligned by index with the input slice — `None` collapses the same
+    /// three cases documented on `get_result`. Empty input returns an
+    /// empty vec without touching Redis.
+    ///
+    /// Note: a `None` return does NOT guarantee the job didn't run. A
+    /// successful handler followed by a retried EVALSHA after a network
+    /// blip can ack-and-remove the stream entry without writing the
+    /// result key (the second EVALSHA sees XACKDEL count=0 and skips
+    /// the SET). For at-most-once result-write semantics, prefer
+    /// `QueueEvents` subscription instead.
+    pub async fn get_result_bulk(&self, ids: &[JobId]) -> Result<Vec<Option<Bytes>>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let client = self.pool.next_connected();
+        let pipeline = client.pipeline();
+        let cmd = CustomCommand::new_static("GET", ClusterHash::FirstKey, false);
+        for id in ids {
+            let key = result_key(self.queue_name.as_ref(), id);
+            let _: () = pipeline
+                .custom(cmd.clone(), vec![Value::from(key)])
+                .await
+                .map_err(Error::Redis)?;
+        }
+        let values: Vec<Value> = pipeline.all().await.map_err(Error::Redis)?;
+        Ok(values.iter().map(value_as_bytes).collect())
+    }
+
     /// Remove a repeatable spec by key. Returns `true` if a spec was
     /// removed, `false` if no spec with that key existed.
     ///

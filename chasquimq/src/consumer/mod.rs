@@ -3,7 +3,9 @@ mod reader;
 mod retry;
 mod worker;
 
-use crate::ack::{AckFlusherConfig, run_ack_flusher};
+use crate::ack::{
+    AckFlusherConfig, JobOk, OkResultWriterConfig, run_ack_flusher, run_ok_result_writer,
+};
 use crate::config::{ConsumerConfig, PromoterConfig, SchedulerConfig};
 use crate::error::{HandlerError, Result};
 use crate::events::EventsWriter;
@@ -14,6 +16,7 @@ use crate::redis::group::ensure_group;
 use crate::redis::keys::{delayed_key, dlq_key, stream_key};
 use crate::redis::parse::StreamEntryId;
 use crate::scheduler::Scheduler;
+use bytes::Bytes;
 use dlq::{DlqRelocatorConfig, run_relocator};
 use reader::{ReadState, reader_loop};
 use retry::{RetryRelocatorConfig, run_retry_relocator};
@@ -53,7 +56,7 @@ where
     pub async fn run<H, Fut>(self, handler: H, shutdown: CancellationToken) -> Result<()>
     where
         H: Fn(Job<T>) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = std::result::Result<(), HandlerError>> + Send + 'static,
+        Fut: Future<Output = std::result::Result<Bytes, HandlerError>> + Send + 'static,
     {
         tracing::debug!(
             queue = %self.cfg.queue_name,
@@ -95,6 +98,26 @@ where
         let (ack_tx, ack_rx) = mpsc::channel::<StreamEntryId>(concurrency * 4);
         let (dlq_tx, dlq_rx) = mpsc::channel(self.cfg.dlq_inflight.max(1));
         let (retry_tx, retry_rx) = mpsc::channel(self.cfg.retry_inflight.max(1));
+
+        // Result-backend writer: opt-in. When `store_results` is false the
+        // tx is `None` and the worker's match always takes the batched-ack
+        // fast path — zero overhead for users who never call `get_result`.
+        let (ok_result_tx, ok_result_handle) = if self.cfg.store_results {
+            let (tx, rx) = mpsc::channel::<JobOk>(concurrency * 4);
+            let ok_client = connect(&self.redis_url).await?;
+            let handle = tokio::spawn(run_ok_result_writer(
+                ok_client,
+                OkResultWriterConfig {
+                    stream_key: self.stream_key.clone(),
+                    queue_name: self.cfg.queue_name.clone(),
+                    group: self.cfg.group.clone(),
+                },
+                rx,
+            ));
+            (Some(tx), Some(handle))
+        } else {
+            (None, None)
+        };
 
         let ack_handle = tokio::spawn(run_ack_flusher(
             ack_client,
@@ -145,10 +168,14 @@ where
             retry_cfg: self.cfg.retry.clone(),
             metrics: self.cfg.metrics.clone(),
             events: (*events).clone(),
+            store_results: self.cfg.store_results,
+            result_ttl_secs: self.cfg.result_ttl_secs,
+            ok_result_tx: ok_result_tx.clone(),
         };
         let workers = spawn_workers(concurrency, handler, job_rx, wiring);
         drop(ack_tx);
         drop(retry_tx);
+        drop(ok_result_tx);
 
         let read_state = ReadState {
             reader,
@@ -203,6 +230,11 @@ where
         }
         if let Err(e) = dlq_handle.await {
             tracing::warn!(error = %e, "dlq relocator join error");
+        }
+        if let Some(h) = ok_result_handle
+            && let Err(e) = h.await
+        {
+            tracing::warn!(error = %e, "ok-result writer join error");
         }
 
         match (reader_outcome, promoter_outcome) {

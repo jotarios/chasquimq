@@ -187,7 +187,10 @@ async fn end_to_end_active_and_completed_emitted() {
     let shutdown_h = shutdown.clone();
     let handle = tokio::spawn(async move {
         consumer
-            .run(move |_job: Job<Sample>| async move { Ok(()) }, shutdown_h)
+            .run(
+                move |_job: Job<Sample>| async move { Ok(chasquimq::Bytes::new()) },
+                shutdown_h,
+            )
             .await
     });
 
@@ -272,7 +275,7 @@ async fn retry_then_success_emits_failed_retry_and_active2() {
                     if job.attempt < 1 {
                         Err(HandlerError::new(std::io::Error::other("retry me")))
                     } else {
-                        Ok(())
+                        Ok(chasquimq::Bytes::new())
                     }
                 },
                 shutdown_h,
@@ -428,7 +431,10 @@ async fn promoter_emits_waiting_after_delayed_promote() {
     let shutdown_h = shutdown.clone();
     let handle = tokio::spawn(async move {
         consumer
-            .run(move |_job: Job<Sample>| async move { Ok(()) }, shutdown_h)
+            .run(
+                move |_job: Job<Sample>| async move { Ok(chasquimq::Bytes::new()) },
+                shutdown_h,
+            )
             .await
     });
 
@@ -489,7 +495,10 @@ async fn maxlen_caps_events_stream_growth() {
     let shutdown_h = shutdown.clone();
     let handle = tokio::spawn(async move {
         consumer
-            .run(move |_job: Job<Sample>| async move { Ok(()) }, shutdown_h)
+            .run(
+                move |_job: Job<Sample>| async move { Ok(chasquimq::Bytes::new()) },
+                shutdown_h,
+            )
             .await
     });
 
@@ -561,7 +570,7 @@ async fn events_disabled_produces_no_xadd() {
                     let c = counter_h.clone();
                     async move {
                         c.fetch_add(1, Ordering::SeqCst);
-                        Ok(())
+                        Ok(chasquimq::Bytes::new())
                     }
                 },
                 shutdown_h,
@@ -757,7 +766,10 @@ async fn embedded_promoter_shares_events_writer_with_consumer() {
     let shutdown_h = shutdown.clone();
     let handle = tokio::spawn(async move {
         consumer
-            .run(move |_job: Job<Sample>| async move { Ok(()) }, shutdown_h)
+            .run(
+                move |_job: Job<Sample>| async move { Ok(chasquimq::Bytes::new()) },
+                shutdown_h,
+            )
             .await
     });
 
@@ -833,7 +845,10 @@ async fn events_carry_name_on_success_path() {
     let shutdown_h = shutdown.clone();
     let handle = tokio::spawn(async move {
         consumer
-            .run(move |_job: Job<Sample>| async move { Ok(()) }, shutdown_h)
+            .run(
+                move |_job: Job<Sample>| async move { Ok(chasquimq::Bytes::new()) },
+                shutdown_h,
+            )
             .await
     });
 

@@ -133,6 +133,36 @@ end
 return replayed
 "#;
 
+/// Atomic XACKDEL + result-store. Acks-and-deletes the stream entry from the
+/// consumer group's pending list, then — only if the ack actually removed the
+/// entry — writes the handler's return bytes to `result_key` with TTL
+/// `ttl_secs`. The XACKDEL gate prevents orphan result writes when a
+/// concurrent CLAIM has already removed the entry. An empty `result_bytes`
+/// payload is a deliberate skip-write signal: `JOB_OK_SCRIPT` is invoked
+/// only when the worker opted in to result storage *and* the handler
+/// returned a non-empty value.
+///
+/// KEYS[1] = stream_key, KEYS[2] = result_key
+/// ARGV[1] = group, ARGV[2] = entry_id, ARGV[3] = result_bytes, ARGV[4] = ttl_secs
+///
+/// Returns the XACKDEL count (1 if the entry was acked, 0 otherwise).
+pub(crate) const JOB_OK_SCRIPT: &str = r#"
+local result = redis.call('XACKDEL', KEYS[1], ARGV[1], 'IDS', 1, ARGV[2])
+local first
+if type(result) == 'table' then
+  first = tonumber(result[1])
+else
+  first = tonumber(result)
+end
+-- XACKDEL returns 1 (acked + removed), -1 (id not found), or 0 (not in
+-- group); only 1 means we own this delivery — both other values mean a
+-- concurrent CLAIM/replay won the race and SET is correctly skipped.
+if first == 1 and #ARGV[3] > 0 then
+  redis.call('SET', KEYS[2], ARGV[3], 'EX', tonumber(ARGV[4]))
+end
+return first
+"#;
+
 /// Releases the lock at KEYS[1] only if its current value is ARGV[1] — i.e.
 /// only if we still hold it. A paused promoter that wakes up after its lease
 /// expired and another holder took over must NOT delete the new holder's
@@ -862,6 +892,48 @@ pub(crate) fn eval_schedule_repeatable_args(
         args.push(Value::Bytes(bytes.clone()));
     }
     args
+}
+
+pub(crate) fn evalsha_job_ok_args(
+    sha: &str,
+    stream_key: &str,
+    result_key: &str,
+    group: &str,
+    entry_id: &str,
+    result_bytes: Bytes,
+    ttl_secs: u64,
+) -> Vec<Value> {
+    vec![
+        Value::from(sha),
+        Value::from(2_i64),
+        Value::from(stream_key),
+        Value::from(result_key),
+        Value::from(group),
+        Value::from(entry_id),
+        Value::Bytes(result_bytes),
+        Value::from(ttl_secs as i64),
+    ]
+}
+
+pub(crate) fn eval_job_ok_args(
+    script: &str,
+    stream_key: &str,
+    result_key: &str,
+    group: &str,
+    entry_id: &str,
+    result_bytes: Bytes,
+    ttl_secs: u64,
+) -> Vec<Value> {
+    vec![
+        Value::from(script),
+        Value::from(2_i64),
+        Value::from(stream_key),
+        Value::from(result_key),
+        Value::from(group),
+        Value::from(entry_id),
+        Value::Bytes(result_bytes),
+        Value::from(ttl_secs as i64),
+    ]
 }
 
 pub(crate) fn evalsha_acquire_lock_args(

@@ -11,6 +11,7 @@ pub(crate) mod redis;
 pub mod repeat;
 pub mod scheduler;
 
+pub use bytes::Bytes;
 pub use config::{ConsumerConfig, ProducerConfig, PromoterConfig, RetryConfig, SchedulerConfig};
 pub use consumer::Consumer;
 pub use error::{Error, HandlerError, Result};

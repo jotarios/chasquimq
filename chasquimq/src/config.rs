@@ -87,6 +87,21 @@ pub struct ConsumerConfig {
     /// `holder_id`, `metrics`) is forwarded as-is. Defaults to
     /// [`SchedulerConfig::default`].
     pub scheduler: SchedulerConfig,
+    /// Opt-in result backend. When `true`, the engine writes each handler's
+    /// non-empty `Bytes` return value to a per-job result key
+    /// (`{chasqui:<queue>}:result:<job_id>`) with TTL `result_ttl_secs`,
+    /// readable via [`crate::Producer::get_result`]. The write is gated on
+    /// the same XACKDEL inside a single Lua round trip — no orphan results
+    /// when CLAIM removed the entry first. Default `false` so the BullMQ-
+    /// style "discard handler return" default holds and the hot path stays
+    /// a plain batched XACKDEL for users who never call `get_result`.
+    pub store_results: bool,
+    /// TTL applied to result keys when `store_results = true`. Default
+    /// `3600` (one hour). `Producer::get_result` returns `None` for
+    /// expired keys (indistinguishable from "never existed" / "not yet
+    /// completed"), so set this to comfortably exceed any
+    /// `wait_for_result` polling timeout your shim uses.
+    pub result_ttl_secs: u64,
     /// Forwarded to the inline promoter the consumer spawns when
     /// `delayed_enabled` is true. Defaults to [`crate::metrics::NoopSink`].
     pub metrics: std::sync::Arc<dyn crate::metrics::MetricsSink>,
@@ -120,6 +135,8 @@ impl std::fmt::Debug for ConsumerConfig {
             .field("events_max_stream_len", &self.events_max_stream_len)
             .field("run_scheduler", &self.run_scheduler)
             .field("scheduler", &self.scheduler)
+            .field("store_results", &self.store_results)
+            .field("result_ttl_secs", &self.result_ttl_secs)
             .field("metrics", &"<dyn MetricsSink>")
             .finish()
     }
@@ -153,6 +170,8 @@ impl Default for ConsumerConfig {
             events_max_stream_len: 100_000,
             run_scheduler: true,
             scheduler: SchedulerConfig::default(),
+            store_results: false,
+            result_ttl_secs: 3600,
             metrics: crate::metrics::noop_sink(),
         }
     }

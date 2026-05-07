@@ -1,3 +1,4 @@
+use crate::ack::JobOk;
 use crate::config::RetryConfig;
 use crate::consumer::dlq::{self, DlqReason, DlqRelocate};
 use crate::consumer::retry::{self, RetryRelocate};
@@ -33,6 +34,16 @@ pub(crate) struct WorkerWiring {
     pub retry_cfg: RetryConfig,
     pub metrics: Arc<dyn MetricsSink>,
     pub events: EventsWriter,
+    /// When `true` and the handler returned a non-empty `Bytes`, route the
+    /// entry through `ok_result_tx` (per-entry `JOB_OK_SCRIPT` — XACKDEL +
+    /// SET result_key), otherwise stay on the batched `ack_tx` fast path.
+    pub store_results: bool,
+    pub result_ttl_secs: u64,
+    /// `Some` when the consumer was configured with `store_results=true` and
+    /// `run_ok_result_writer` was spawned. `None` is the zero-overhead path:
+    /// the worker's match unconditionally takes the existing batched ack
+    /// branch.
+    pub ok_result_tx: Option<mpsc::Sender<JobOk>>,
 }
 
 pub(crate) fn spawn_workers<T, H, Fut>(
@@ -44,7 +55,7 @@ pub(crate) fn spawn_workers<T, H, Fut>(
 where
     T: Serialize + Clone + Send + 'static,
     H: Fn(Job<T>) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = std::result::Result<(), HandlerError>> + Send + 'static,
+    Fut: Future<Output = std::result::Result<Bytes, HandlerError>> + Send + 'static,
 {
     let handler = Arc::new(handler);
     let wiring = Arc::new(wiring);
@@ -86,7 +97,7 @@ where
                 let duration_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
 
                 let kind = match &outcome {
-                    Ok(Ok(())) => JobOutcomeKind::Ok,
+                    Ok(Ok(_)) => JobOutcomeKind::Ok,
                     Ok(Err(_)) => JobOutcomeKind::Err,
                     Err(_) => JobOutcomeKind::Panic,
                 };
@@ -100,12 +111,31 @@ where
                 metrics::dispatch("job_outcome", move || sink.job_outcome(event));
 
                 match outcome {
-                    Ok(Ok(())) => {
+                    Ok(Ok(result_bytes)) => {
                         wiring
                             .events
                             .emit_completed(&job_id, &job_name, attempt_index, duration_us)
                             .await;
-                        if wiring.ack_tx.send(entry_id).await.is_err() {
+                        // Route through the result-writer only when the
+                        // worker opted in *and* the handler returned a
+                        // non-empty payload. The `JOB_OK_SCRIPT` itself
+                        // also gates the SET on a non-empty payload, so
+                        // this Rust-side check just keeps the per-entry
+                        // EVALSHA off the fast path for empty results.
+                        if wiring.store_results
+                            && !result_bytes.is_empty()
+                            && let Some(tx) = wiring.ok_result_tx.as_ref()
+                        {
+                            let item = JobOk {
+                                entry_id,
+                                job_id: job_id.clone(),
+                                result_bytes,
+                                ttl_secs: wiring.result_ttl_secs,
+                            };
+                            if tx.send(item).await.is_err() {
+                                break;
+                            }
+                        } else if wiring.ack_tx.send(entry_id).await.is_err() {
                             break;
                         }
                     }

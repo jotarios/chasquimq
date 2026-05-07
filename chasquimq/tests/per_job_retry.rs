@@ -142,7 +142,7 @@ async fn per_job_max_attempts_smaller_than_queue() {
                     let calls = calls_h.clone();
                     async move {
                         calls.fetch_add(1, Ordering::SeqCst);
-                        Err::<(), _>(HandlerError::new(std::io::Error::other("nope")))
+                        Err::<chasquimq::Bytes, _>(HandlerError::new(std::io::Error::other("nope")))
                     }
                 },
                 shutdown_clone,
@@ -205,7 +205,7 @@ async fn per_job_max_attempts_larger_than_queue() {
                     let calls = calls_h.clone();
                     async move {
                         calls.fetch_add(1, Ordering::SeqCst);
-                        Err::<(), _>(HandlerError::new(std::io::Error::other("nope")))
+                        Err::<chasquimq::Bytes, _>(HandlerError::new(std::io::Error::other("nope")))
                     }
                 },
                 shutdown_clone,
@@ -275,7 +275,7 @@ async fn per_job_fixed_backoff_intervals() {
                     let timestamps = timestamps_h.clone();
                     async move {
                         timestamps.lock().unwrap().push(Instant::now());
-                        Err::<(), _>(HandlerError::new(std::io::Error::other("nope")))
+                        Err::<chasquimq::Bytes, _>(HandlerError::new(std::io::Error::other("nope")))
                     }
                 },
                 shutdown_clone,
@@ -362,7 +362,7 @@ async fn per_job_exponential_backoff_intervals() {
                     let timestamps = timestamps_h.clone();
                     async move {
                         timestamps.lock().unwrap().push(Instant::now());
-                        Err::<(), _>(HandlerError::new(std::io::Error::other("nope")))
+                        Err::<chasquimq::Bytes, _>(HandlerError::new(std::io::Error::other("nope")))
                     }
                 },
                 shutdown_clone,
@@ -445,7 +445,7 @@ async fn per_job_override_survives_retry_round_trip() {
                         if job.attempt < 2 {
                             Err(HandlerError::new(std::io::Error::other("flaky")))
                         } else {
-                            Ok(())
+                            Ok(chasquimq::Bytes::new())
                         }
                     }
                 },
@@ -618,7 +618,7 @@ async fn per_job_override_honored_after_claim_reclaim() {
                         // Park the handler past A's lifetime so the entry
                         // never gets acked and stays pending.
                         tokio::time::sleep(Duration::from_secs(60)).await;
-                        Ok::<(), HandlerError>(())
+                        Ok::<chasquimq::Bytes, HandlerError>(chasquimq::Bytes::new())
                     }
                 },
                 shutdown_a_clone,
@@ -665,7 +665,7 @@ async fn per_job_override_honored_after_claim_reclaim() {
                     let calls = b_calls_h.clone();
                     async move {
                         calls.fetch_add(1, Ordering::SeqCst);
-                        Err::<(), _>(HandlerError::new(std::io::Error::other("nope")))
+                        Err::<chasquimq::Bytes, _>(HandlerError::new(std::io::Error::other("nope")))
                     }
                 },
                 shutdown_b_clone,
@@ -765,7 +765,7 @@ async fn add_at_with_options_carries_retry_override() {
                     let observed = observed_h.clone();
                     async move {
                         observed.lock().unwrap().push(job.retry);
-                        Ok::<(), HandlerError>(())
+                        Ok::<chasquimq::Bytes, HandlerError>(chasquimq::Bytes::new())
                     }
                 },
                 shutdown_clone,

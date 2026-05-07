@@ -160,7 +160,7 @@ async fn busygroup_is_idempotent() {
                         let counter = counter_h.clone();
                         async move {
                             counter.fetch_add(1, Ordering::SeqCst);
-                            Ok(())
+                            Ok(chasquimq::Bytes::new())
                         }
                     },
                     shutdown_clone,
@@ -212,7 +212,7 @@ async fn two_consumers_split_work() {
                     let counter = count_a_h.clone();
                     async move {
                         counter.fetch_add(1, Ordering::SeqCst);
-                        Ok(())
+                        Ok(chasquimq::Bytes::new())
                     }
                 },
                 shutdown_a,
@@ -230,7 +230,7 @@ async fn two_consumers_split_work() {
                     let counter = count_b_h.clone();
                     async move {
                         counter.fetch_add(1, Ordering::SeqCst);
-                        Ok(())
+                        Ok(chasquimq::Bytes::new())
                     }
                 },
                 shutdown_b,
@@ -285,7 +285,7 @@ async fn consumer_happy_path_acks_all() {
                     let counter = counter_handler.clone();
                     async move {
                         counter.fetch_add(1, Ordering::SeqCst);
-                        Ok(())
+                        Ok(chasquimq::Bytes::new())
                     }
                 },
                 shutdown_clone,
