@@ -4,26 +4,31 @@ ChasquiMQ's headline claim is **"the fastest open-source message broker for Redi
 
 ## Headline numbers
 
-Measured on Apple M3, Redis 8.6 (Docker, loopback), single host. BullMQ 5.76.4 baseline run on the same machine. Latest committed run is slice 5 (5 repeats × scale=5, drop-slowest, mean of 2 invocations) — slices 6 (idempotent delayed scheduling) and 7 (`cancel_delayed` + promoter side-index cleanup) are not on the throughput hot path the bench measures, so the slice 5 numbers are still the canonical snapshot. A re-bench after each future hot-path change is the convention.
+Apple M3, Redis 8.6 (Docker, loopback), same host for both queues. Two snapshots:
 
-| Scenario                    | BullMQ 5.76.4 | ChasquiMQ        | Ratio       |
-|-----------------------------|--------------:|-----------------:|------------:|
-| `queue-add-bulk` (50)       |     60,828/s  | **196,038/s**    | **3.22×**   |
-| `worker-concurrent` (100)   |     47,707/s  | **419,004/s**    | **8.78×**   |
-| `worker-delayed-end-to-end` |          n/a  |     **755,034/s**|         n/a |
-| `worker-retry-throughput`   |          n/a  |     **116,542/s**|         n/a |
-| `queue-add` (single)        |     13,961/s  |       16,548/s   |     1.19×   |
-| `queue-add-delayed`         |          n/a  |       16,618/s   |         n/a |
-| `worker-generic` ⚠          |     13,250/s  |      414,010/s   |    31.2×    |
+- **Quiet-host canonical** (Phase 2 final, load avg < 1) — the marketing-defensible upper bound.
+- **Today's contended-host run** (2026-05-07, BullMQ + ChasquiMQ both re-measured under load avg ~1.8–4.3) — what reproduces on a dev laptop with other workloads.
 
-`queue-add` and `worker-generic` are latency-bound (single in-flight op) — they aren't the throughput claim. The two scenarios that matter for "fastest broker on Redis" are `queue-add-bulk` and `worker-concurrent`; both clear the 3× gate, and `worker-concurrent` clears 5× comfortably.
+The BullMQ column shows quiet / today; same for ChasquiMQ.
 
-⚠ `worker-generic`'s bench window is too small for stable measurement (~12ms at 419k/s); treat the ratio as direction-only.
+| Scenario | BullMQ 5.76.4 (quiet / today) | ChasquiMQ (quiet) | ratio | ChasquiMQ (today) | ratio |
+|---|---:|---:|---:|---:|---:|
+| `queue-add-bulk` (50) | 60,828 / 54,455 | **196,038/s** | 3.22× | **188,775/s** | **3.47×** |
+| `worker-concurrent` (100) | 47,707 / 45,643 | **419,004/s** | 8.78× | **111,968/s** | 2.45× |
+| `queue-add` (single) | 13,961 / 13,245 | 16,548/s | 1.19× | 15,366/s | 1.16× |
+| `worker-generic` ⚠ | 13,250 / 12,658 | 414,010/s | 31.2× | 9,517/s ⚠ | 0.75× ⚠ |
+| `worker-delayed-end-to-end` | n/a | 755,034/s | n/a | n/a | n/a |
+| `worker-retry-throughput` | n/a | 116,542/s | n/a | n/a | n/a |
+
+The two scenarios that matter for "fastest broker on Redis" are `queue-add-bulk` (producer) and `worker-concurrent` (consumer). The producer ratio is stable across runs — 3.22× → 3.47× — because it bottlenecks at Redis, not host CPU. The consumer ratio drops sharply under host contention because it spawns 100 workers + a tokio thread pool that competes with everything else on the box; the engine ceiling itself hasn't moved (the 419k number reproduces when the host is quiet, see `chasquimq-phase2-final.md`).
+
+`queue-add` and `worker-generic` are latency-bound (single in-flight op) — they aren't the throughput claim. ⚠ `worker-generic`'s bench window is too small for stable measurement (~12ms at 419k/s); treat the ratio as direction-only.
 
 `worker-delayed-end-to-end` and `worker-retry-throughput` are Phase 2 paths (no BullMQ counterpart in `bullmq-bench`).
 
 ## Detailed reports
 
+- [`chasquimq-1.0.md`](chasquimq-1.0.md) — **1.0 same-host re-bench (2026-05-07).** Today's contended-host BullMQ + ChasquiMQ numbers side-by-side: `queue-add-bulk` 3.47×, `worker-concurrent` 2.45× (host-load floor explained). The numbers the README quotes.
 - [`baseline-bullmq.md`](baseline-bullmq.md) — full BullMQ baseline methodology, raw numbers, lessons from running the suite (notably: `enableAutoPipelining` *hurts* on loopback).
 - [`chasquimq-phase1.md`](chasquimq-phase1.md) — full ChasquiMQ Phase 1 results, post-critique iterations, and harness improvements (distribution stats, `--scale` flag, slowest-discard).
 - [`chasquimq-phase2-slice2.md`](chasquimq-phase2-slice2.md) — Phase 2 slices 1 (delayed jobs) and 2 (retry backoff). No-regression check on Phase 1 hot-path scenarios + three new scenarios for the delayed and retry paths.
