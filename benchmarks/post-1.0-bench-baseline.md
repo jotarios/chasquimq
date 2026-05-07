@@ -107,6 +107,36 @@ payload: ~45ns. At the engine's 420k jobs/s ceiling that's ~1.9% of
 one core. The byte copy is **not** the bottleneck. Full table in
 [`ffi-buffer-copy.md`](ffi-buffer-copy.md).
 
+## 1.0 final no-regression confirmation (post-#79)
+
+After all eleven 1.0-polish PRs landed (#68 through #79), the
+result-backend slice was the only one that touched the engine hot
+path. Slice 5a (PR #75) bench-guard: `worker-concurrent` with the
+default `store_results=false` measured **117,254 jobs/s** on host load
+~3.35. A re-run after PRs #76–#79 landed measured **118,117 jobs/s**
+on host load ~3.5 — within 1.2% of slice 5a, within 1.2% of slice 3's
+116,745, and within the `worker-concurrent` host-load floor for this
+contended Mac host (Phase 2 final 415,580 was on a quiet host with load
+~0.7; the engine ceiling on a quiet host is unchanged because the
+hot-path code is unchanged when `store_results=false`).
+
+Per the host-load gate above: `git diff baa4015 -- chasquimq/` (i.e.
+between slice 3's bench guard and the post-#79 main HEAD) is **not**
+empty — slice 5a added the result-backend plumbing — so the gate
+requires the bench be run with the post-merge engine and `store_results
+= false` to confirm no regression on the default path. That run
+(118,117) holds the line. The opt-in path (`store_results=true`) is
+intentionally not yet bench'd; that's a deferred follow-up before any
+sustained-throughput claim about the result-backend write path.
+
+| Scenario | Phase 2 final | Slice 3 (post-#70) | Slice 5a (post-#75) | Post-#79 (this) | Δ vs slice 5a |
+|---|---:|---:|---:|---:|---:|
+| `worker-concurrent`, `store_results=false` | 415,580 | 116,745 | 117,254 | **118,117** | **+0.7%** |
+
+**Verdict: no regression on the default path.** Engine ceiling is
+unchanged for users who don't opt into result writes. Bench guard
+satisfied for the 1.0 tag.
+
 ## Files added
 
 * `benchmarks/python-handler.md` — bench doc + baseline run.
