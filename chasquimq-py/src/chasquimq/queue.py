@@ -163,6 +163,7 @@ class Queue:
             data=data,
             attempt=0,
             created_at_ms=_now_ms(),
+            _queue=self,
         )
 
     async def add_unique(
@@ -258,6 +259,7 @@ class Queue:
                     data=j["data"],
                     attempt=0,
                     created_at_ms=now,
+                    _queue=self,
                 )
                 for i, j in enumerate(jobs)
             ]
@@ -345,6 +347,7 @@ class Queue:
             data=data,
             attempt=0,
             created_at_ms=_now_ms(),
+            _queue=self,
         )
 
     async def get_repeatable_jobs(self, limit: int = 100) -> list[RepeatableMeta]:

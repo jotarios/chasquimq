@@ -12,7 +12,7 @@ import {
   type AddOptions as NativeAddOptions,
   type BackoffSpec as NativeBackoffSpec,
   type JobRetryOverride as NativeJobRetryOverride,
-} from '../index.js'
+} from "../index.js";
 import type {
   BackoffOptions,
   ConnectionOptions,
@@ -24,35 +24,35 @@ import type {
   MissedFiresOption,
   RepeatOptions,
   RepeatableJobMeta,
-} from './types.js'
-import { NotSupportedError } from './errors.js'
-import { Job } from './job.js'
-import { decodePayload, encodePayload } from './encoding.js'
+} from "./types.js";
+import { NotSupportedError } from "./errors.js";
+import { Job } from "./job.js";
+import { decodePayload, encodePayload } from "./encoding.js";
 
-let warnedPriority = false
-let warnedLifo = false
+let warnedPriority = false;
+let warnedLifo = false;
 
 export class Queue<
   DataType = unknown,
   ResultType = unknown,
   NameType extends string = string,
 > {
-  readonly name: string
-  readonly opts: QueueOptions
-  private producerPromise?: Promise<NativeProducer>
+  readonly name: string;
+  readonly opts: QueueOptions;
+  private producerPromise?: Promise<NativeProducer>;
 
   constructor(name: string, opts: QueueOptions) {
-    this.name = name
-    this.opts = opts
+    this.name = name;
+    this.opts = opts;
   }
 
   private async producer(): Promise<NativeProducer> {
     if (!this.producerPromise) {
-      const url = buildRedisUrl(this.opts.connection)
-      const native: NativeProducerOpts = { queueName: this.name }
-      this.producerPromise = NativeProducer.connect(url, native)
+      const url = buildRedisUrl(this.opts.connection);
+      const native: NativeProducerOpts = { queueName: this.name };
+      this.producerPromise = NativeProducer.connect(url, native);
     }
-    return this.producerPromise
+    return this.producerPromise;
   }
 
   async add(
@@ -63,10 +63,10 @@ export class Queue<
     const merged: JobsOptions = {
       ...(this.opts.defaultJobOptions ?? {}),
       ...opts,
-    }
+    };
 
     if (merged.repeat) {
-      return await this.upsertRepeatableJob(name, data, merged)
+      return await this.upsertRepeatableJob(name, data, merged);
     }
     // Defense in depth: TS types nest `missedFires` under `RepeatOptions`,
     // but `Queue.add(name, data, { missedFires } as any)` would silently
@@ -74,63 +74,68 @@ export class Queue<
     // meaningful with repeat...")`.
     if ((merged as { missedFires?: unknown }).missedFires !== undefined) {
       throw new Error(
-        'missedFires is only meaningful with `repeat`; pass it as { repeat: { missedFires } }',
-      )
+        "missedFires is only meaningful with `repeat`; pass it as { repeat: { missedFires } }",
+      );
     }
     if (merged.parent) {
-      throw new NotSupportedError('Parent/child flows are not supported')
+      throw new NotSupportedError("Parent/child flows are not supported");
     }
     if (merged.priority != null && merged.priority !== 0 && !warnedPriority) {
       console.warn(
-        '[chasquimq] JobsOptions.priority is ignored (FIFO Streams). Set to 0 to silence this warning.',
-      )
-      warnedPriority = true
+        "[chasquimq] JobsOptions.priority is ignored (FIFO Streams). Set to 0 to silence this warning.",
+      );
+      warnedPriority = true;
     }
     if (merged.lifo === true && !warnedLifo) {
-      console.warn('[chasquimq] JobsOptions.lifo is ignored (FIFO Streams).')
-      warnedLifo = true
+      console.warn("[chasquimq] JobsOptions.lifo is ignored (FIFO Streams).");
+      warnedLifo = true;
     }
 
     if (merged.delay !== undefined) {
       if (!Number.isFinite(merged.delay)) {
-        throw new RangeError(`delay must be a finite number, got ${merged.delay}`)
+        throw new RangeError(
+          `delay must be a finite number, got ${merged.delay}`,
+        );
       }
       if (merged.delay < 0) {
-        throw new RangeError(`delay must be non-negative, got ${merged.delay}`)
+        throw new RangeError(`delay must be non-negative, got ${merged.delay}`);
       }
     }
 
     if (merged.jobId !== undefined) {
-      if (typeof merged.jobId !== 'string' || merged.jobId.trim().length === 0) {
+      if (
+        typeof merged.jobId !== "string" ||
+        merged.jobId.trim().length === 0
+      ) {
         throw new TypeError(
-          'Queue.add: opts.jobId must be a non-empty, non-whitespace string',
-        )
+          "Queue.add: opts.jobId must be a non-empty, non-whitespace string",
+        );
       }
     }
 
-    const isDelayed = !!(merged.delay && merged.delay > 0)
-    const retryOverride = buildRetryOverride(merged)
+    const isDelayed = !!(merged.delay && merged.delay > 0);
+    const retryOverride = buildRetryOverride(merged);
     const nativeOpts = buildNativeAddOptions(
       merged.jobId,
       retryOverride,
       name as string,
-    )
+    );
 
-    const buf = encodePayload(data)
-    const producer = await this.producer()
-    let id: string
+    const buf = encodePayload(data);
+    const producer = await this.producer();
+    let id: string;
     if (isDelayed) {
       if (nativeOpts) {
-        id = await producer.addInWithOptions(merged.delay!, buf, nativeOpts)
+        id = await producer.addInWithOptions(merged.delay!, buf, nativeOpts);
       } else {
-        id = await producer.addIn(merged.delay!, buf)
+        id = await producer.addIn(merged.delay!, buf);
       }
     } else if (nativeOpts) {
-      id = await producer.addWithOptions(buf, nativeOpts)
+      id = await producer.addWithOptions(buf, nativeOpts);
     } else {
-      id = await producer.add(buf)
+      id = await producer.add(buf);
     }
-    return new Job(name, data, merged, id)
+    return new Job(name, data, merged, id, this);
   }
 
   /**
@@ -168,29 +173,29 @@ export class Queue<
     data: DataType,
     opts: JobsOptions = {},
   ): Promise<Job<DataType, ResultType, NameType>> {
-    if (typeof opts.jobId !== 'string' || opts.jobId.trim().length === 0) {
+    if (typeof opts.jobId !== "string" || opts.jobId.trim().length === 0) {
       throw new TypeError(
-        'Queue.addUnique: opts.jobId must be a non-empty, non-whitespace string',
-      )
+        "Queue.addUnique: opts.jobId must be a non-empty, non-whitespace string",
+      );
     }
-    return await this.add(name, data, opts)
+    return await this.add(name, data, opts);
   }
 
   async addBulk(
     jobs: Array<{ name: NameType; data: DataType; opts?: BulkJobOptions }>,
   ): Promise<Job<DataType, ResultType, NameType>[]> {
-    if (jobs.length === 0) return []
+    if (jobs.length === 0) return [];
     if (jobs.some((j) => j.opts?.parent)) {
-      throw new NotSupportedError('Parent options not supported in addBulk')
+      throw new NotSupportedError("Parent options not supported in addBulk");
     }
     for (const j of jobs) {
-      const d = j.opts?.delay
+      const d = j.opts?.delay;
       if (d !== undefined) {
         if (!Number.isFinite(d)) {
-          throw new RangeError(`delay must be a finite number, got ${d}`)
+          throw new RangeError(`delay must be a finite number, got ${d}`);
         }
         if (d < 0) {
-          throw new RangeError(`delay must be non-negative, got ${d}`)
+          throw new RangeError(`delay must be non-negative, got ${d}`);
         }
       }
     }
@@ -198,16 +203,16 @@ export class Queue<
     // delay / jobId / attempts / backoff. Anything else falls back to the
     // per-entry add() loop below — losing the bulk pipelining win.
     const allSimple = jobs.every((j) => {
-      const o = j.opts ?? {}
-      return !o.delay && !o.jobId && !o.attempts && !o.backoff
-    })
+      const o = j.opts ?? {};
+      return !o.delay && !o.jobId && !o.attempts && !o.backoff;
+    });
     if (allSimple) {
       const named = jobs.map((j) => ({
         name: j.name as string,
         payload: encodePayload(j.data),
-      }))
-      const producer = await this.producer()
-      const ids = await producer.addBulkNamed(named)
+      }));
+      const producer = await this.producer();
+      const ids = await producer.addBulkNamed(named);
       return jobs.map(
         (j, i) =>
           new Job(
@@ -215,15 +220,16 @@ export class Queue<
             j.data,
             { ...(this.opts.defaultJobOptions ?? {}), ...(j.opts ?? {}) },
             ids[i]!,
+            this,
           ),
-      )
+      );
     }
     // Mixed path: per-entry add(). Loses bulk pipelining.
-    const out: Job<DataType, ResultType, NameType>[] = []
+    const out: Job<DataType, ResultType, NameType>[] = [];
     for (const j of jobs) {
-      out.push(await this.add(j.name, j.data, j.opts as JobsOptions))
+      out.push(await this.add(j.name, j.data, j.opts as JobsOptions));
     }
-    return out
+    return out;
   }
 
   private async upsertRepeatableJob(
@@ -231,14 +237,14 @@ export class Queue<
     data: DataType,
     merged: JobsOptions,
   ): Promise<Job<DataType, ResultType, NameType>> {
-    const repeat = merged.repeat as RepeatOptions
-    const pattern = translateRepeatPattern(repeat)
-    const buf = encodePayload(data)
-    const startAfterMs = coerceDateLike(repeat.startDate)
-    const endBeforeMs = coerceDateLike(repeat.endDate)
-    const producer = await this.producer()
+    const repeat = merged.repeat as RepeatOptions;
+    const pattern = translateRepeatPattern(repeat);
+    const buf = encodePayload(data);
+    const startAfterMs = coerceDateLike(repeat.startDate);
+    const endBeforeMs = coerceDateLike(repeat.endDate);
+    const producer = await this.producer();
     const resolvedKey = await producer.upsertRepeatable({
-      key: merged.repeatJobKey ?? '',
+      key: merged.repeatJobKey ?? "",
       jobName: name,
       pattern,
       payload: buf,
@@ -246,14 +252,14 @@ export class Queue<
       startAfterMs,
       endBeforeMs,
       missedFires: translateMissedFires(repeat.missedFires),
-    })
+    });
     // The repeatable upsert is a *spec*, not a job invocation; the engine
     // mints a fresh ULID for each fire. Returning a Job here gives callers
     // a stable handle (the resolved spec key as `id`) to pair with
     // `Queue.removeRepeatableByKey(job.id)` for symmetry with the
     // single-add API. The `id` shape is therefore intentionally **not** a
     // ULID for repeatable upserts.
-    return new Job(name, data, merged, resolvedKey)
+    return new Job(name, data, merged, resolvedKey, this);
   }
 
   // --- Repeatable / cron jobs (engine slice 10) ---
@@ -266,36 +272,36 @@ export class Queue<
    * { repeat })` to inspect or modify a spec's payload.
    */
   async getRepeatableJobs(limit: number = 100): Promise<RepeatableJobMeta[]> {
-    const producer = await this.producer()
-    const metas = await producer.listRepeatable(limit)
+    const producer = await this.producer();
+    const metas = await producer.listRepeatable(limit);
     return metas.map((m): RepeatableJobMeta => {
       const base: RepeatableJobMeta = {
         key: m.key,
         jobName: m.jobName,
-        patternKind: m.pattern.kind === 'cron' ? 'cron' : 'every',
+        patternKind: m.pattern.kind === "cron" ? "cron" : "every",
         nextFireMs: m.nextFireMs,
         limit: m.limit,
         startAfterMs: m.startAfterMs,
         endBeforeMs: m.endBeforeMs,
-      }
-      if (m.pattern.kind === 'cron') {
-        base.pattern = m.pattern.expression ?? undefined
-        base.tz = m.pattern.tz ?? undefined
+      };
+      if (m.pattern.kind === "cron") {
+        base.pattern = m.pattern.expression ?? undefined;
+        base.tz = m.pattern.tz ?? undefined;
       } else {
-        base.every = m.pattern.intervalMs ?? undefined
+        base.every = m.pattern.intervalMs ?? undefined;
       }
       if (m.missedFires) {
-        if (m.missedFires.kind === 'fire-once') {
-          base.missedFires = { kind: 'fire-once' }
-        } else if (m.missedFires.kind === 'fire-all') {
+        if (m.missedFires.kind === "fire-once") {
+          base.missedFires = { kind: "fire-once" };
+        } else if (m.missedFires.kind === "fire-all") {
           base.missedFires = {
-            kind: 'fire-all',
+            kind: "fire-all",
             maxCatchup: m.missedFires.maxCatchup ?? 0,
-          }
+          };
         }
       }
-      return base
-    })
+      return base;
+    });
   }
 
   /**
@@ -308,8 +314,8 @@ export class Queue<
    * derives one as `<jobName>::<patternSignature>`.
    */
   async removeRepeatableByKey(key: string): Promise<boolean> {
-    const producer = await this.producer()
-    return producer.removeRepeatable(key)
+    const producer = await this.producer();
+    return producer.removeRepeatable(key);
   }
 
   /**
@@ -324,16 +330,16 @@ export class Queue<
    * the natural return type.
    */
   async getJobResult(jobId: string): Promise<ResultType | undefined> {
-    const producer = await this.producer()
-    const buf = await producer.getResult(jobId)
-    if (buf == null) return undefined
-    return decodePayload(buf) as ResultType
+    const producer = await this.producer();
+    const buf = await producer.getResult(jobId);
+    if (buf == null) return undefined;
+    return decodePayload(buf) as ResultType;
   }
 
   // --- Stubs (NotSupportedError) ---
 
   async getJob(_id: string): Promise<Job | undefined> {
-    throw new NotSupportedError('Queue.getJob not implemented in v1')
+    throw new NotSupportedError("Queue.getJob not implemented in v1");
   }
 
   async getJobs(
@@ -342,67 +348,64 @@ export class Queue<
     _end?: number,
     _asc?: boolean,
   ): Promise<Job[]> {
-    throw new NotSupportedError('Queue.getJobs not implemented in v1')
+    throw new NotSupportedError("Queue.getJobs not implemented in v1");
   }
 
-  async getJobState(_id: string): Promise<JobState | 'unknown'> {
-    return 'unknown'
+  async getJobState(_id: string): Promise<JobState | "unknown"> {
+    return "unknown";
   }
 
   async getJobCounts(..._types: JobType[]): Promise<Record<string, number>> {
-    throw new NotSupportedError('Queue.getJobCounts not implemented in v1')
+    throw new NotSupportedError("Queue.getJobCounts not implemented in v1");
   }
 
   async getWaitingCount(): Promise<number> {
-    throw new NotSupportedError('not implemented')
+    throw new NotSupportedError("not implemented");
   }
   async getActiveCount(): Promise<number> {
-    throw new NotSupportedError('not implemented')
+    throw new NotSupportedError("not implemented");
   }
   async getDelayedCount(): Promise<number> {
-    throw new NotSupportedError('not implemented')
+    throw new NotSupportedError("not implemented");
   }
   async getCompletedCount(): Promise<number> {
-    return 0 // engine doesn't persist completions
+    return 0; // engine doesn't persist completions
   }
   async getFailedCount(): Promise<number> {
-    throw new NotSupportedError('not implemented')
+    throw new NotSupportedError("not implemented");
   }
   async count(): Promise<number> {
-    throw new NotSupportedError('not implemented')
+    throw new NotSupportedError("not implemented");
   }
 
   async pause(): Promise<void> {
-    throw new NotSupportedError('Queue.pause not implemented in v1')
+    throw new NotSupportedError("Queue.pause not implemented in v1");
   }
   async resume(): Promise<void> {
-    throw new NotSupportedError('Queue.resume not implemented in v1')
+    throw new NotSupportedError("Queue.resume not implemented in v1");
   }
   async isPaused(): Promise<boolean> {
-    return false
+    return false;
   }
 
   async remove(jobId: string): Promise<number> {
     // Best-effort: cancelDelayed for delayed jobs. Stream entries can't be
     // removed from a consumer group's PEL by id alone, so we throw instead
     // of silently returning 0.
-    const producer = await this.producer()
-    const removed = await producer.cancelDelayed(jobId)
-    if (removed) return 1
+    const producer = await this.producer();
+    const removed = await producer.cancelDelayed(jobId);
+    if (removed) return 1;
     throw new NotSupportedError(
-      'Removing in-stream entries is not supported; only delayed-stage cancellation works in v1',
-    )
+      "Removing in-stream entries is not supported; only delayed-stage cancellation works in v1",
+    );
   }
 
   async drain(_delayed?: boolean): Promise<void> {
-    throw new NotSupportedError('Queue.drain not implemented in v1')
+    throw new NotSupportedError("Queue.drain not implemented in v1");
   }
 
-  async obliterate(_opts?: {
-    force?: boolean
-    count?: number
-  }): Promise<void> {
-    throw new NotSupportedError('Queue.obliterate not implemented in v1')
+  async obliterate(_opts?: { force?: boolean; count?: number }): Promise<void> {
+    throw new NotSupportedError("Queue.obliterate not implemented in v1");
   }
 
   async clean(
@@ -410,25 +413,25 @@ export class Queue<
     _limit: number,
     _type?: JobType,
   ): Promise<string[]> {
-    throw new NotSupportedError('Queue.clean not implemented in v1')
+    throw new NotSupportedError("Queue.clean not implemented in v1");
   }
 
   async close(): Promise<void> {
     // The native producer manages its own pool lifetime; nothing to
     // explicitly close yet. Drop the cached promise so a future call
     // would lazily re-connect.
-    this.producerPromise = undefined
+    this.producerPromise = undefined;
   }
 }
 
 function buildRedisUrl(c: ConnectionOptions): string {
-  const host = c.host ?? '127.0.0.1'
-  const port = c.port ?? 6379
+  const host = c.host ?? "127.0.0.1";
+  const port = c.port ?? 6379;
   const auth = c.password
-    ? `${c.username ?? ''}:${encodeURIComponent(c.password)}@`
-    : ''
-  const db = c.db != null ? `/${c.db}` : ''
-  return `redis://${auth}${host}:${port}${db}`
+    ? `${c.username ?? ""}:${encodeURIComponent(c.password)}@`
+    : "";
+  const db = c.db != null ? `/${c.db}` : "";
+  return `redis://${auth}${host}:${port}${db}`;
 }
 
 /**
@@ -441,34 +444,35 @@ function buildRedisUrl(c: ConnectionOptions): string {
  * mistake the caller can fix in their own code, not a missing feature.
  */
 function translateRepeatPattern(repeat: RepeatOptions): {
-  kind: 'cron' | 'every'
-  expression?: string
-  tz?: string
-  intervalMs?: number
+  kind: "cron" | "every";
+  expression?: string;
+  tz?: string;
+  intervalMs?: number;
 } {
-  const hasPattern = typeof repeat.pattern === 'string' && repeat.pattern.length > 0
-  const hasEvery = typeof repeat.every === 'number' && repeat.every >= 0
+  const hasPattern =
+    typeof repeat.pattern === "string" && repeat.pattern.length > 0;
+  const hasEvery = typeof repeat.every === "number" && repeat.every >= 0;
   if (hasPattern && hasEvery) {
     throw new Error(
-      'RepeatOptions: pass either `pattern` (cron) or `every` (ms), not both',
-    )
+      "RepeatOptions: pass either `pattern` (cron) or `every` (ms), not both",
+    );
   }
   if (!hasPattern && !hasEvery) {
     throw new Error(
-      'RepeatOptions: one of `pattern` (cron) or `every` (ms) is required',
-    )
+      "RepeatOptions: one of `pattern` (cron) or `every` (ms) is required",
+    );
   }
   if (hasPattern) {
     return {
-      kind: 'cron',
+      kind: "cron",
       expression: repeat.pattern,
       tz: repeat.tz,
-    }
+    };
   }
   return {
-    kind: 'every',
+    kind: "every",
     intervalMs: repeat.every,
-  }
+  };
 }
 
 /**
@@ -484,36 +488,40 @@ function translateRepeatPattern(repeat: RepeatOptions): {
 function translateMissedFires(
   policy: MissedFiresOption | undefined,
 ): { kind: string; maxCatchup?: number } | undefined {
-  if (policy == null) return undefined
+  if (policy == null) return undefined;
   switch (policy.kind) {
-    case 'skip':
-    case 'fire-once':
-      return { kind: policy.kind }
-    case 'fire-all': {
-      const n = policy.maxCatchup
+    case "skip":
+    case "fire-once":
+      return { kind: policy.kind };
+    case "fire-all": {
+      const n = policy.maxCatchup;
       if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1) {
         throw new RangeError(
           `missedFires.maxCatchup must be a positive integer (>= 1), got ${n}`,
-        )
+        );
       }
-      return { kind: 'fire-all', maxCatchup: n }
+      return { kind: "fire-all", maxCatchup: n };
     }
     default: {
-      const _exhaustive: never = policy
-      throw new Error(`Unknown missedFires kind ${JSON.stringify(_exhaustive)}`)
+      const _exhaustive: never = policy;
+      throw new Error(
+        `Unknown missedFires kind ${JSON.stringify(_exhaustive)}`,
+      );
     }
   }
 }
 
-function coerceDateLike(d: Date | string | number | undefined): number | undefined {
-  if (d == null) return undefined
-  if (d instanceof Date) return d.getTime()
-  if (typeof d === 'number') return d
-  const parsed = Date.parse(d)
+function coerceDateLike(
+  d: Date | string | number | undefined,
+): number | undefined {
+  if (d == null) return undefined;
+  if (d instanceof Date) return d.getTime();
+  if (typeof d === "number") return d;
+  const parsed = Date.parse(d);
   if (Number.isNaN(parsed)) {
-    throw new Error(`RepeatOptions: invalid date string ${JSON.stringify(d)}`)
+    throw new Error(`RepeatOptions: invalid date string ${JSON.stringify(d)}`);
   }
-  return parsed
+  return parsed;
 }
 
 /**
@@ -525,8 +533,8 @@ function coerceDateLike(d: Date | string | number | undefined): number | undefin
  * `multiplier` and `jitterMs` fields keep their JS-side names.
  */
 function translateBackoff(b: number | BackoffOptions): NativeBackoffSpec {
-  if (typeof b === 'number') {
-    return { kind: 'fixed', delayMs: b }
+  if (typeof b === "number") {
+    return { kind: "fixed", delayMs: b };
   }
   // Pass `kind` straight through; the engine's NAPI binding rejects
   // anything other than `'fixed'` / `'exponential'` so a typo here
@@ -534,19 +542,21 @@ function translateBackoff(b: number | BackoffOptions): NativeBackoffSpec {
   const out: NativeBackoffSpec = {
     kind: b.type,
     delayMs: b.delay ?? 0,
-  }
-  if (b.maxDelay != null) out.maxDelayMs = b.maxDelay
-  if (b.multiplier != null) out.multiplier = b.multiplier
-  if (b.jitterMs != null) out.jitterMs = b.jitterMs
-  return out
+  };
+  if (b.maxDelay != null) out.maxDelayMs = b.maxDelay;
+  if (b.multiplier != null) out.multiplier = b.multiplier;
+  if (b.jitterMs != null) out.jitterMs = b.jitterMs;
+  return out;
 }
 
-function buildRetryOverride(opts: JobsOptions): NativeJobRetryOverride | undefined {
-  if (opts.attempts == null && opts.backoff == null) return undefined
-  const out: NativeJobRetryOverride = {}
-  if (opts.attempts != null) out.maxAttempts = opts.attempts
-  if (opts.backoff != null) out.backoff = translateBackoff(opts.backoff)
-  return out
+function buildRetryOverride(
+  opts: JobsOptions,
+): NativeJobRetryOverride | undefined {
+  if (opts.attempts == null && opts.backoff == null) return undefined;
+  const out: NativeJobRetryOverride = {};
+  if (opts.attempts != null) out.maxAttempts = opts.attempts;
+  if (opts.backoff != null) out.backoff = translateBackoff(opts.backoff);
+  return out;
 }
 
 function buildNativeAddOptions(
@@ -554,10 +564,10 @@ function buildNativeAddOptions(
   retry: NativeJobRetryOverride | undefined,
   name: string | undefined,
 ): NativeAddOptions | undefined {
-  if (jobId == null && retry == null && !name) return undefined
-  const out: NativeAddOptions = {}
-  if (jobId != null) out.id = jobId
-  if (retry != null) out.retry = retry
-  if (name) out.name = name
-  return out
+  if (jobId == null && retry == null && !name) return undefined;
+  const out: NativeAddOptions = {};
+  if (jobId != null) out.id = jobId;
+  if (retry != null) out.retry = retry;
+  if (name) out.name = name;
+  return out;
 }
