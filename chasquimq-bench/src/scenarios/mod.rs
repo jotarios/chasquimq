@@ -3,6 +3,7 @@ pub mod queue_add;
 pub mod queue_add_bulk;
 pub mod queue_add_delayed;
 pub mod worker_concurrent;
+pub mod worker_concurrent_store_results;
 pub mod worker_delayed_end_to_end;
 pub mod worker_generic;
 pub mod worker_retry_throughput;
