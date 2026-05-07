@@ -202,8 +202,20 @@ jobs:
       - name: Move artifacts into per-target npm packages
         run: npx napi artifacts
 
-      - name: Publish (root + platform sub-packages)
+      # `napi prepublish -t npm` publishes the per-platform sub-packages
+      # (`chasquimq-darwin-arm64`, etc.) but does NOT publish the root
+      # `chasquimq` package. The root needs a separate `npm publish`.
+      - name: Publish platform sub-packages
         run: npm run prepublishOnly
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish root chasquimq package
+        # --ignore-scripts skips `prepublishOnly` (which would re-fire
+        # `napi prepublish -t npm` and attempt to re-publish the
+        # already-published sub-packages, erroring on duplicate version).
+        run: npm publish --access public --provenance --ignore-scripts
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
