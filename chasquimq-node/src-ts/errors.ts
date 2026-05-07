@@ -6,8 +6,8 @@
 
 export class NotSupportedError extends Error {
   constructor(message: string) {
-    super(message)
-    this.name = 'NotSupportedError'
+    super(message);
+    this.name = "NotSupportedError";
   }
 }
 
@@ -32,14 +32,35 @@ export class NotSupportedError extends Error {
  */
 export class UnrecoverableError extends Error {
   constructor(message?: string) {
-    super(message ?? 'Unrecoverable')
-    this.name = 'UnrecoverableError'
+    super(message ?? "Unrecoverable");
+    this.name = "UnrecoverableError";
   }
 }
 
 export class RateLimitError extends Error {
   constructor(message?: string) {
-    super(message ?? 'Rate limited')
-    this.name = 'RateLimitError'
+    super(message ?? "Rate limited");
+    this.name = "RateLimitError";
+  }
+}
+
+/**
+ * Thrown by {@link Job.waitForResult} when the polling loop's
+ * `timeoutMs` elapses without the result key becoming visible.
+ *
+ * Distinct from a successful `undefined` resolution: a handler that
+ * returned `undefined` (or a worker running with `storeResults=false`)
+ * will *also* time out, because there is no way for the polling loop
+ * to distinguish "result was never written" from "result not yet
+ * written" — see {@link Job.waitForResult} for the full table.
+ *
+ * Detect via `err.name === 'WaitForResultTimeoutError'` rather than
+ * `err instanceof WaitForResultTimeoutError` so subclasses across
+ * realms (workers / vm contexts) still match.
+ */
+export class WaitForResultTimeoutError extends Error {
+  constructor(message?: string) {
+    super(message ?? "waitForResult timed out");
+    this.name = "WaitForResultTimeoutError";
   }
 }
