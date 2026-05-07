@@ -38,6 +38,7 @@ def test_high_level_job_wins_unqualified_name() -> None:
 
 
 def test_native_producer_constructs_from_top_level() -> None:
+    """Producer constructs cleanly against a live Redis (``__new__`` connects)."""
     producer = Producer(REDIS_URL, "py-smoke-flat")
     assert producer.stream_key() == "{chasqui:py-smoke-flat}:stream"
     assert producer.delayed_key() == "{chasqui:py-smoke-flat}:delayed"
