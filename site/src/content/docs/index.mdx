@@ -128,7 +128,7 @@ use chasquimq::{Producer, Consumer, ProducerConfig, ConsumerConfig};
 use serde::{Serialize, Deserialize};
 use tokio_util::sync::CancellationToken;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct EmailJob { to: String }
 
 #[tokio::main]
