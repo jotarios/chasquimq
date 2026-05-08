@@ -38,7 +38,7 @@ name = "chasqui"
 path = "src/main.rs"
 
 [dependencies]
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "signal", "time"] }
 comfy-table = "7"
 crossterm = "0.28"
