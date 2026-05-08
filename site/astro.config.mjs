@@ -4,7 +4,7 @@ import starlight from "@astrojs/starlight";
 
 // https://astro.build/config
 export default defineConfig({
-  site: "https://chasquimq.pages.dev",
+  site: "https://chasquimq.io",
   integrations: [
     starlight({
       title: "ChasquiMQ",
