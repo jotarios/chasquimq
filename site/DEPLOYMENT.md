@@ -57,27 +57,67 @@ The next push to `main` that touches `site/**` will publish to
 <https://chasquimq.pages.dev>. You can also trigger a deploy manually from
 the GitHub Actions tab → *Docs Deploy* → *Run workflow*.
 
-## Custom domain
+## Custom domain — chasquimq.io
 
-Until you point a real domain at it, the site lives at the auto-assigned
-`https://chasquimq.pages.dev`.
+The production hostname is **`chasquimq.io`**, registered at Namecheap. We
+move DNS to Cloudflare (rather than CNAMEing from Namecheap) so the apex
+record works cleanly, the cert auto-provisions, and we get CF analytics +
+bot protection for free. Total flip time: 5 minutes of clicks plus 1–24
+hours of DNS propagation.
 
-To attach a custom domain (e.g. `docs.chasquimq.dev`):
+### One-time setup (in order)
 
-1. In the Cloudflare dashboard: *Workers & Pages* → `chasquimq` → *Custom
-   domains* → *Set up a custom domain* → enter the hostname.
-2. Cloudflare guides you through the DNS setup. You'll add **one** of:
-   - **Apex / root** (`chasquimq.dev`): a `CNAME` flattened to
-     `chasquimq.pages.dev` (Cloudflare DNS supports CNAME flattening at
-     the apex; on other DNS providers, use the `A`/`AAAA` records the
-     dashboard provides).
-   - **Subdomain** (`docs.chasquimq.dev`): a plain
-     `CNAME docs → chasquimq.pages.dev`.
-3. Cloudflare auto-provisions a TLS certificate (Universal SSL). It's
-   typically live within a few minutes; the dashboard shows status.
+1. **Add the zone in Cloudflare.** Dashboard → *Add a domain* → enter
+   `chasquimq.io` → *Free* plan. Cloudflare scans Namecheap's existing
+   DNS and imports any records it finds. There shouldn't be much for a
+   freshly-registered domain.
 
-If your DNS already lives on Cloudflare, the dashboard creates the records
-for you in one click.
+2. **Copy the two Cloudflare nameservers.** They look like
+   `ada.ns.cloudflare.com` and `kai.ns.cloudflare.com` (the names rotate
+   per zone). The dashboard shows them on the next screen.
+
+3. **Swap nameservers at Namecheap.** Namecheap dashboard → *Domain List*
+   → *Manage* on `chasquimq.io` → *Nameservers* → *Custom DNS* → paste
+   the two CF nameservers → save. **This is the load-bearing change.**
+   Propagation usually completes within an hour but can take up to 24h.
+   Watch the CF zone overview; status flips from *Pending* to *Active*
+   once it sees the nameserver change.
+
+4. **Attach the domain to the Pages project.** CF dashboard →
+   *Workers & Pages* → `chasquimq` → *Custom domains* → *Set up a custom
+   domain* → enter `chasquimq.io`. Because DNS is already in CF, this is
+   a one-click setup: CF auto-creates the CNAME-flattened record at the
+   apex and provisions a Universal SSL cert. Live within ~5 minutes of
+   the zone going Active.
+
+5. **Add `www.chasquimq.io` as a redirect** (optional but recommended).
+   Same flow: *Custom domains* → *Set up* → `www.chasquimq.io`. Then in
+   *Rules* → *Redirect Rules* → add a 301 from
+   `(http.host eq "www.chasquimq.io")` to `https://chasquimq.io/$1`.
+   Keeps the canonical URL singular.
+
+6. **Update the Astro site config** to use the production URL. After the
+   domain is live, change `astro.config.mjs` `site:` from
+   `https://chasquimq.pages.dev` to `https://chasquimq.io` so the
+   sitemap, canonical tags, and OG URLs reflect the canonical host.
+   Commit, push, redeploy. (Skip this step until DNS is Active — until
+   then, `chasquimq.pages.dev` is the only working URL.)
+
+### Until DNS propagates
+
+The site is reachable at `https://chasquimq.pages.dev` from the moment
+the first deploy lands, regardless of whether the custom domain is set
+up yet. You can hand out that URL while waiting on nameserver
+propagation. Once `chasquimq.io` flips to Active, both URLs work; CF
+serves the same artifact from both edges.
+
+### If you change your mind on DNS provider later
+
+Cloudflare lets you remove the zone and revert nameservers at Namecheap
+at any time. The Pages project itself is unaffected — it lives at
+`*.pages.dev` regardless of which DNS provider points at it. Migration
+out is one-way for active visitors during the propagation window
+(usually a few hours), so plan migrations during low-traffic times.
 
 ## Local preview
 
