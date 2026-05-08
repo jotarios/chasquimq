@@ -161,7 +161,7 @@ async fn main() -> anyhow::Result<()> {
   <p class="chasqui-section__lede">Three things justify a new queue. Performance, operability, and the option to write your handler in the language your team already ships.</p>
   <div class="chasqui-features">
     <FeatureCard title="Rust-native throughput" href="/benchmarks/" linkLabel="See the numbers"><span class="mono">188,775 jobs/s</span> sustained on a single M3 host. MessagePack on the wire. No Lua scripts. No JSON on the hot path. Pipelined <span class="mono">XACK</span> and <span class="mono">XACKDEL</span> close the round-trip tax that breaks naive Streams consumers.</FeatureCard>
-    <FeatureCard title="Operator-grade reliability" href="/concepts/job-lifecycle/" linkLabel="Job lifecycle">Per-job retry budgets. Exponential backoff with jitter. DLQ replay tooling baked in. Repeatable jobs with cron and <span class="mono">every</span> patterns &mdash; DST-aware, with a <span class="mono">MissedFiresPolicy</span> for clock skips.</FeatureCard>
+    <FeatureCard title="Operator-grade reliability" href="/concepts/thinking-in-chasquimq/" linkLabel="Job lifecycle">Per-job retry budgets. Exponential backoff with jitter. DLQ replay tooling baked in. Repeatable jobs with cron and <span class="mono">every</span> patterns &mdash; DST-aware, with a <span class="mono">MissedFiresPolicy</span> for clock skips.</FeatureCard>
     <FeatureCard title="Multi-language at zero cost" href="/reference/" linkLabel="API reference">Native bindings via <span class="mono">napi-rs</span> (Node) and <span class="mono">PyO3</span> (Python). The engine is the same Rust binary in every package &mdash; no protocol bridge, no sidecar process. Pick your language; pay no performance tax for it.</FeatureCard>
   </div>
 </section>

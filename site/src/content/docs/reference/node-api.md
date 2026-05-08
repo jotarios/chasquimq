@@ -221,8 +221,8 @@ in v1: `getJob`, `getJobs`, `getJobCounts`, `getWaitingCount`,
 `getActiveCount`, `getDelayedCount`, `getFailedCount`, `count`,
 `pause`, `resume`, `drain`, `obliterate`, `clean`. Some pure-stat
 methods return `0` or `'unknown'` instead. See the [options
-index](/reference/options/) and [job lifecycle
-concept](/concepts/job-lifecycle/) for the engine semantics that
+index](/reference/options/) and [Thinking in
+ChasquiMQ](/concepts/thinking-in-chasquimq/) for the engine semantics that
 make these intentionally unsupported.
 
 ## Worker
