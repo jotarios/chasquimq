@@ -36,16 +36,22 @@ import { Tabs, TabItem } from "@astrojs/starlight/components";
 <Tabs syncKey="binding">
 <TabItem label="Node">
 
+In a fresh directory:
+
 ```bash
-npm install chasquimq
+npm init -y && npm pkg set type=module
+npm install chasquimq tsx
 ```
 
-Prebuilt binaries ship for darwin / linux / win32 on arm64 + x64. There is no install-time compilation.
+Prebuilt binaries ship for darwin / linux / win32 on arm64 + x64. There is no install-time compilation. `tsx` runs the TypeScript snippet below without a build step; `type=module` enables top-level `await`.
 
 </TabItem>
 <TabItem label="Python">
 
+In a fresh directory:
+
 ```bash
+python -m venv .venv && source .venv/bin/activate
 pip install chasquimq
 ```
 
@@ -54,9 +60,14 @@ pip install chasquimq
 </TabItem>
 <TabItem label="Rust">
 
+In a fresh `cargo new` project:
+
 ```bash
-cargo add chasquimq tokio --features tokio/macros,tokio/rt-multi-thread
-cargo add tokio-util bytes serde --features serde/derive
+cargo new chasquimq-hello && cd chasquimq-hello
+cargo add chasquimq anyhow bytes
+cargo add tokio --features macros,rt-multi-thread
+cargo add tokio-util --features rt
+cargo add serde --features derive
 ```
 
 </TabItem>
@@ -64,7 +75,7 @@ cargo add tokio-util bytes serde --features serde/derive
 
 ## 3. Produce one job, consume one job
 
-Save this as `hello.{js,py,rs}` and run it.
+Save the snippet from your tab as `hello.ts`, `hello.py`, or `src/main.rs`, then run it.
 
 <Tabs syncKey="binding">
 <TabItem label="Node">
@@ -97,7 +108,7 @@ await queue.close();
 Run it:
 
 ```bash
-node --experimental-strip-types hello.ts
+npx tsx hello.ts
 # processing welcome: {"to":"ada@example.com"}
 ```
 
@@ -137,8 +148,10 @@ python hello.py
 </TabItem>
 <TabItem label="Rust">
 
+Run it with `cargo run` from inside the project. The snippet goes in `src/main.rs`:
+
 ```rust
-// hello.rs
+// src/main.rs
 use chasquimq::{Consumer, ConsumerConfig, Producer, ProducerConfig};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
