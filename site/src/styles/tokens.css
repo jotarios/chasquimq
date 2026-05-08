@@ -106,6 +106,56 @@ header.header site-search button {
   --ec-brdRad: 4px;
 }
 
+/* ---------- Asides (Starlight :::note / :::tip / :::caution / :::danger) ----------
+ * Starlight ships with saturated blue/purple/orange/red panels. DESIGN.md §10.5
+ * specifies callouts as: hairline left border in the semantic color, surface
+ * background, no icon-in-circle, no saturated fill. DESIGN.md §12 explicitly
+ * forbids purple anywhere — the default 'tip' variant violates this. Map all
+ * four variants to the §5.3 semantic palette and the §10.5 visual treatment. */
+.starlight-aside {
+  background-color: var(--sl-color-bg-sidebar);
+  border-inline-start-width: 3px;
+  border-radius: 4px;
+  padding: 12px 16px;
+}
+.starlight-aside__title {
+  font-size: 0.875rem;
+  letter-spacing: 0;
+  text-transform: none;
+}
+:root[data-theme="dark"] .starlight-aside--note {
+  --sl-color-asides-text-accent: #58b8ff;
+  --sl-color-asides-border: #58b8ff;
+}
+:root[data-theme="dark"] .starlight-aside--tip {
+  --sl-color-asides-text-accent: #3dd68c;
+  --sl-color-asides-border: #3dd68c;
+}
+:root[data-theme="dark"] .starlight-aside--caution {
+  --sl-color-asides-text-accent: #f2a93b;
+  --sl-color-asides-border: #f2a93b;
+}
+:root[data-theme="dark"] .starlight-aside--danger {
+  --sl-color-asides-text-accent: #ff5670;
+  --sl-color-asides-border: #ff5670;
+}
+:root[data-theme="light"] .starlight-aside--note {
+  --sl-color-asides-text-accent: #0066ff;
+  --sl-color-asides-border: #0066ff;
+}
+:root[data-theme="light"] .starlight-aside--tip {
+  --sl-color-asides-text-accent: #1f9e5c;
+  --sl-color-asides-border: #1f9e5c;
+}
+:root[data-theme="light"] .starlight-aside--caution {
+  --sl-color-asides-text-accent: #c77700;
+  --sl-color-asides-border: #c77700;
+}
+:root[data-theme="light"] .starlight-aside--danger {
+  --sl-color-asides-text-accent: #d7263d;
+  --sl-color-asides-border: #d7263d;
+}
+
 /* ---------- Display utility (use on hero only) ---------- */
 .chasqui-display {
   font-family: var(--chasqui-font-display);

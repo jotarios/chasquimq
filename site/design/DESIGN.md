@@ -187,9 +187,13 @@ Designed for Geist Mono on `--code-bg`. Keep distinct from semantic palette — 
 
 Light-mode code is intentionally inverted (light text on navy `#0A2540` block) — this is a deliberate choice, see §11 Risks taken.
 
-### 5.5 Accent rule (hard)
+### 5.5 Accent rule
 
-**One accent moment per viewport.** If the eye lands on a primary CTA, the link in the paragraph above and the badge below should not also be `--accent`. Demote them to `--text` underline, or `--text-muted`. The accent earns its loudness by being rare.
+**One accent moment per landing-page viewport.** On the homepage and other compositional pages (benchmarks index, comparison, the perf row), the eye should land on exactly one `--accent` element above the fold — typically the primary CTA. Demote competing accents in the same viewport to `--text` underline or `--text-muted`. The accent earns its loudness by being rare *in marketing context*.
+
+**In-prose links use `--accent`.** Long-form pages (tutorials, guides, concepts, reference) carry many links by nature; demoting them all to underlined `--text` made the prose feel unstyled in practice and broke a hard web convention (links are blue and underlined). The "one accent moment" rule applies to compositional layouts, not to body prose.
+
+Hover state deepens to `--accent-hover` (light: `#0052CC` for AAA on white; dark: `#86CCFF`). Visited links are not specially styled — Starlight's default visited handling is sufficient.
 
 ---
 
@@ -318,6 +322,43 @@ Inline code uses page-tone surface, not the inverted block — readability insid
 
 `<kbd>` styled as Geist Mono `--text-xs`, `--surface-2` background, `1px solid --border`, `--radius-sm`, padding `1px 6px`, displayed inline.
 
+### 10.7 Navigation chrome
+
+The two persistent UI elements: the top header and the docs sidebar. Both visible on every page; both must read as "the building," not "the content."
+
+**Top header** — full-width, navy in both themes for brand consistency:
+
+- Background: `#0A2540` (logo navy). Same color in light AND dark to give the brand mark one consistent home across themes. The only element in the system that ignores theme.
+- Text and links: `--code-text` (`#E6EEF8`).
+- Search box: `rgba(255,255,255,0.06)` background, `#B9C1CB` placeholder, `1px solid rgba(255,255,255,0.08)`. On focus: ring becomes `--accent` (cyan-on-navy in dark, blue-on-navy in light — both pass AA).
+- Bottom border: `1px solid rgba(255,255,255,0.06)` — barely visible, separates header from page.
+- Height: 60px desktop, 56px mobile. Logo + product name flush left, search center-right, theme toggle far right.
+
+**Sidebar** — left rail, persistent on `lg` and above, collapses to a drawer below `md`:
+
+- Background: `--surface` (`#F7F8FA` light, `#0E1B2C` dark) — quieter than the page.
+- Width: 280px fixed.
+- Hairline border on the right: `1px solid --border`.
+- Group headings: Geist 600, `--text-sm`, `--text-muted`, `letter-spacing: 0.04em`, uppercase.
+- Items: Geist 400, `--text-sm`, `--text-muted` resting, `--text` on hover.
+- Active item: `--text` color, `--accent-soft` background, `2px solid --accent` left border. No fill, no pill.
+- Item padding: `--space-2 --space-4` (8px 16px). Items click anywhere in their row.
+- Internal scroll on overflow with `--surface-2` thin scrollbar.
+
+**Mobile drawer** (≤768px):
+
+- Trigger: `Menu` icon in the top-left of the header, 24px Lucide.
+- Drawer overlay: 80% width (max 320px), slides in from left.
+- Backdrop: `rgba(7,16,28,0.6)` (dark navy, 60% opacity), click-to-dismiss.
+- Animation: `--motion-medium` (250ms) translateX. Respects `prefers-reduced-motion`.
+
+**Right rail (table-of-contents on docs pages)** — Tailwind-style sticky outline:
+
+- Background: transparent.
+- Items: Geist 400, `--text-xs`, `--text-muted` resting, `--text` on hover, `--accent` for the active heading.
+- Active indicator: `2px solid --accent` left border on the active item, no fill.
+- Width: 200px. Hidden below `lg`.
+
 ---
 
 ## 11. Risks taken (and why)
@@ -394,8 +435,12 @@ The runner glyph is the one custom asset — treat it like the React or Rust log
 | Date | Decision | Why |
 |---|---|---|
 | 2026-05-08 | Lock Geist + Geist Mono + Instrument Serif via Bunny Fonts | Three is the budget; serif is the load-bearing flourish; Bunny Fonts because GDPR + no Google CDN dep |
-| 2026-05-08 | Light-mode accent `#0066FF` (electric blue) over cyan `#00B4D8` | Cyan AA-fails on body links at body size against white; blue gives 7.4:1 |
+| 2026-05-08 | Light-mode accent `#0066FF` (electric blue) over cyan `#00B4D8` | Cyan AA-fails on body links at body size against white; blue measures 4.83:1 (AA for normal text). Hover deepens to `#0052CC` (≈7.0:1, AAA-equivalent) |
 | 2026-05-08 | Dark-mode accent `#58B8FF` (lighter), not same `#0066FF` | `#0066FF` on `#07101C` is 3.8:1 — fails AA. Lift accent for the dark theme |
+| 2026-05-09 | Relax §5.5: in-prose links keep `--accent`, "one accent moment" applies to landing/compositional pages only | Demoting prose links broke the "links are blue" web convention and made long-form pages read as unstyled. Caught in /plan-design-review |
+| 2026-05-09 | Add §10.7 Navigation chrome (top header + sidebar + mobile drawer) | Plan covered every other component but skipped the two persistent UI elements. Future redesigns need an anchor |
+| 2026-05-09 | Override Starlight Aside variants to remove default purple tip color | Default `:::tip` aside used `--sl-color-purple-*`, violating §12 ("no purple anywhere"). Mapped all 4 variants (note/tip/caution/danger) to §5.3 semantic palette with §10.5 hairline-border treatment |
+| 2026-05-09 | Document browser baseline: Safari 16.2+, Chrome 111+, Firefox 113+ | We use `color-mix(in oklab)` in badges and hover states. Baseline locked to 2023+ browsers |
 | 2026-05-08 | Hero word in Instrument Serif italic, capped at one per page | Adds a human signal; would dilute if reused |
 | 2026-05-08 | Code blocks `--radius-none` and inverted on light theme | Reads as terminal output; consistent with Rust Book / Redis docs |
 | 2026-05-08 | Spacing scale stops at 96px (`--space-9`) | Anything bigger is theatre; if a section needs more rhythm, the section is too long |
@@ -420,3 +465,24 @@ The runner glyph is the one custom asset — treat it like the React or Rust log
 - [`typography.html`](./typography.html) — type ramp specimen for all three families.
 
 These are static, frameworkless HTML. They render in any browser. They are the visual contract.
+
+---
+
+## 20. Browser baseline
+
+The site uses modern CSS deliberately. Minimum supported browser versions:
+
+| Browser | Minimum | Why |
+|---|---|---|
+| Safari | 16.2 (Dec 2022) | `color-mix(in oklab)`, `:has()` |
+| Chrome / Edge | 111 (Mar 2023) | `color-mix(in oklab)` |
+| Firefox | 113 (May 2023) | `color-mix(in oklab)` |
+
+Specific modern features in use:
+
+- `color-mix(in oklab, ...)` — used in badge backgrounds, log-header tints, and destructive-button hover. Falls back gracefully on older browsers (the mixed color is the only fallback, but the unmixed property is never the primary signal — borders and text carry the meaning).
+- `:has()` — used to hide Starlight's empty splash hero container on the homepage.
+- CSS custom properties — non-negotiable.
+- `mask-image` with `currentColor` background — used for the language brand-marks in the segmented control.
+
+We do **not** target IE11, Safari 15, or Chrome 110. Visitors on those browsers see a degraded but readable experience.
