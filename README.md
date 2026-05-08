@@ -141,7 +141,7 @@ asyncio.run(main())
 
 ## CLI
 
-`cargo install chasquimq-cli` (or grab a prebuilt binary from [Releases](https://github.com/jotarios/chasquimq/releases)) gets you `chasqui`:
+Install the `chasqui` binary from [Releases](https://github.com/jotarios/chasquimq/releases) (`curl -LsSf https://github.com/jotarios/chasquimq/releases/latest/download/chasquimq-cli-installer.sh | sh`), or `cargo install --git https://github.com/jotarios/chasquimq chasquimq-cli` from source:
 
 ```bash
 chasqui inspect emails              # one-shot: stream depth, pending, DLQ, delayed, repeatable
