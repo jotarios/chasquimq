@@ -49,34 +49,45 @@ npx tsx worker.ts
 // worker.ts
 import { Queue, Worker } from "chasquimq"
 
-const queue = new Queue("emails", {
-  connection: { host: "127.0.0.1", port: 6379 },
-})
+const connection = { host: "127.0.0.1", port: 6379 }
+const queue = new Queue("emails", { connection })
 
-// Stable jobId: the second call dedups on the same id.
-await queue.addUnique(
-  "welcome",
-  { to: "alice@example.com" },
-  { jobId: "welcome:alice" },
-)
-
+// Worker: receives jobs and returns a result the producer can read back.
 const worker = new Worker(
   "emails",
   async (job) => {
-    console.log(`processing ${job.name} (${job.id})`)
-    return { delivered: true } // captured when storeResults: true
+    console.log(`[worker] sending email to ${job.data.to}`)
+    return { delivered: true, to: job.data.to }
   },
-  {
-    connection: { host: "127.0.0.1", port: 6379 },
-    storeResults: true,
-  },
+  { connection, storeResults: true },
 )
 
-// Block on the result from anywhere.
+// 1. Enqueue twice with the same jobId. Only one job actually runs.
+await queue.addUnique("welcome", { to: "alice@example.com" }, { jobId: "welcome:alice" })
+await queue.addUnique("welcome", { to: "alice@example.com" }, { jobId: "welcome:alice" })
+console.log("[producer] enqueued welcome:alice (deduped on second call)")
+
+// 2. Enqueue a second, distinct job and block on its result.
 const job = await queue.add("welcome", { to: "ada@example.com" })
+console.log(`[producer] waiting on result for job ${job.id}`)
 const result = await job.waitForResult({ timeoutMs: 30_000 })
-console.log(result)
+console.log("[producer] got result:", result)
+
+await worker.close()
+await queue.close()
 ```
+
+You should see something like:
+
+```text
+[producer] enqueued welcome:alice (deduped on second call)
+[worker] sending email to alice@example.com
+[producer] waiting on result for job 01KR4EHEGCXGEE57B57HBZSGW9
+[worker] sending email to ada@example.com
+[producer] got result: { delivered: true, to: 'ada@example.com' }
+```
+
+Two enqueues for `alice` produced one `[worker]` line — that's `addUnique` deduping on `jobId`. The `[producer] got result` line is `waitForResult` blocking until the worker's return value is stored in Redis.
 
   </TabItem>
   <TabItem label="Python">
@@ -95,30 +106,42 @@ import asyncio
 from chasquimq import Queue, Worker, Job
 
 async def send_email(job: Job) -> dict:
-    print(f"sending {job.data}")
-    return {"delivered": True}  # captured when store_results=True
+    print(f"[worker] sending email to {job.data['to']}")
+    return {"delivered": True, "to": job.data["to"]}
 
 async def main() -> None:
     queue = Queue("emails")
-
-    job = await queue.add("welcome", {"to": "ada@example.com"})
-    await queue.add_unique(
-        "welcome",
-        {"to": "alice@example.com"},
-        job_id="welcome:alice",
-    )
-
     worker = Worker("emails", send_email, store_results=True)
     asyncio.create_task(worker.run())
 
+    # 1. Enqueue twice with the same job_id. Only one job actually runs.
+    await queue.add_unique("welcome", {"to": "alice@example.com"}, job_id="welcome:alice")
+    await queue.add_unique("welcome", {"to": "alice@example.com"}, job_id="welcome:alice")
+    print("[producer] enqueued welcome:alice (deduped on second call)")
+
+    # 2. Enqueue a second, distinct job and block on its result.
+    job = await queue.add("welcome", {"to": "ada@example.com"})
+    print(f"[producer] waiting on result for job {job.id}")
     result = await job.wait_for_result(timeout=30.0)
-    print(result)
+    print("[producer] got result:", result)
 
     await worker.close()
     await queue.close()
 
 asyncio.run(main())
 ```
+
+You should see something like:
+
+```text
+[producer] enqueued welcome:alice (deduped on second call)
+[worker] sending email to alice@example.com
+[producer] waiting on result for job 01KR4EHEGCXGEE57B57HBZSGW9
+[worker] sending email to ada@example.com
+[producer] got result: {'delivered': True, 'to': 'ada@example.com'}
+```
+
+Two enqueues for `alice` produced one `[worker]` line — that's `add_unique` deduping on `job_id`. The `[producer] got result` line is `wait_for_result` blocking until the worker's return value is stored in Redis.
 
   </TabItem>
   <TabItem label="Rust">
@@ -147,13 +170,11 @@ struct EmailJob { to: String }
 async fn main() -> anyhow::Result<()> {
     let producer = Producer::<EmailJob>::connect(
         "redis://127.0.0.1:6379",
-        ProducerConfig {
-            queue_name: "emails".into(),
-            ..Default::default()
-        },
+        ProducerConfig { queue_name: "emails".into(), ..Default::default() },
     ).await?;
 
-    producer.add(EmailJob { to: "ada@example.com".into() }).await?;
+    let id = producer.add(EmailJob { to: "ada@example.com".into() }).await?;
+    println!("[producer] enqueued job {id}");
 
     let consumer = Consumer::<EmailJob>::new(
         "redis://127.0.0.1:6379",
@@ -164,14 +185,25 @@ async fn main() -> anyhow::Result<()> {
         },
     );
 
+    println!("[consumer] running, Ctrl+C to stop");
     consumer.run(|job| async move {
-        println!("sending to {}", job.payload.to);
+        println!("[worker] sending email to {}", job.payload.to);
         Ok(bytes::Bytes::new())
     }, CancellationToken::new()).await?;
 
     Ok(())
 }
 ```
+
+You should see something like:
+
+```text
+[producer] enqueued job 01KR4EHEGCXGEE57B57HBZSGW9
+[consumer] running, Ctrl+C to stop
+[worker] sending email to ada@example.com
+```
+
+The first line is the producer; the third is the worker draining the queue. The consumer keeps running forever — Ctrl+C to stop it.
 
   </TabItem>
 </Tabs>
