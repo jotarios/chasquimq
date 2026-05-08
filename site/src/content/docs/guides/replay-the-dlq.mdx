@@ -1,0 +1,81 @@
+---
+title: Replay the DLQ
+description: Move DLQ entries back into the main stream after fixing the underlying bug.
+sidebar:
+  order: 3
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+You've shipped a fix for whatever was failing. Now move the dead-lettered jobs back into the main stream so the worker can take another swing.
+
+Two paths: the CLI and the shim helper. Pick the one that matches your blast radius.
+
+## CLI: one-shot, scriptable
+
+```bash
+chasqui dlq replay emails --limit 50
+```
+
+Replays up to 50 entries (oldest first). The command prints how many were actually moved.
+
+Behavior:
+
+- Each entry is removed from `{chasqui:emails}:dlq` and re-`XADD`'d to `{chasqui:emails}` in one Lua script — no torn state if the script aborts.
+- The `attempt` counter is reset to zero before re-encode, so the replayed job gets a fresh retry budget. Otherwise a job that hit `RetriesExhausted` would land in DLQ again on first dispatch.
+- The dispatch `name` is preserved.
+
+## Shim helper: replay from your application
+
+<Tabs syncKey="binding">
+<TabItem label="Node">
+
+```ts
+const moved = await queue.replayDlq(100);
+console.log(`replayed ${moved} entries`);
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+moved = await queue.replay_dlq(limit=100)
+print(f"replayed {moved} entries")
+```
+
+</TabItem>
+</Tabs>
+
+Same script, same atomicity. Use this when replay is part of your application's runbook (a feature flag flip, a scheduled cleanup, a one-time migration).
+
+## CLI versus shim — which to use
+
+- **CLI** when an operator is on a terminal and needs to act now. Quick, no app deploy.
+- **Shim** when replay is a code path: a feature-flagged self-heal, a scheduled cron that trims old failures, or a migration script.
+
+## Idempotency caveats
+
+Replay is **not** an idempotent operation — calling `replay_dlq(100)` twice may produce a duplicate execution if the first call's replayed jobs successfully completed before the second call drained DLQ.
+
+Two contracts:
+
+- **Within one call, replay is atomic.** A single `replay_dlq(N)` invocation moves exactly the entries that were in DLQ at the snapshot moment. Concurrent replays serialize at Redis under the queue's hash tag.
+- **Across calls, replay is at-least-once.** If you replay, an old entry runs successfully, and you replay again before noticing — the entry's source ID has already been consumed but the *replayed copy* has been acked. There is no re-replay of an acked entry.
+
+The risk is when you replay, your fix is wrong, and the job lands in DLQ again. In that case `replay_dlq` will move it back. To break that loop:
+
+1. Peek DLQ first (`peek_dlq`).
+2. Assert the new failure mode is not what just got replayed.
+3. Replay only a small batch at a time during fix verification.
+
+## When NOT to replay
+
+- **The bug is in the producer.** If the entry is malformed (`DlqReason::Malformed`) or fails to decode (`DlqReason::DecodeFailed`), replay won't help — the consumer will route it back to DLQ on the first read. Fix the producer and drop the entries instead.
+- **The entry is structurally invalid.** Same as above for `DlqReason::Oversize` — the entry is bigger than `max_payload_bytes`. Replay just sends it back to DLQ.
+- **The handler is non-idempotent and the entry already partially completed.** A `RetriesExhausted` entry may have produced side effects on its way to DLQ (e.g., sent the email but then crashed). Replaying re-runs the handler — make sure your handler is idempotent before reaching for replay.
+
+## Drop instead
+
+The CLI does not currently have a "drop without replay" command — DLQ entries expire when you trim the stream. To clear DLQ entirely, use `redis-cli DEL '{chasqui:emails}:dlq'` (operator-only, last resort).
+
+For the underlying mechanics: [DLQ and recovery](/concepts/dlq-and-recovery/).

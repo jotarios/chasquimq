@@ -1,0 +1,126 @@
+---
+title: Enable result storage
+description: Opt in to per-job result storage and block on results from the producer side.
+sidebar:
+  order: 4
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+By default, ChasquiMQ's worker acks the job and discards the handler's return value — there's nothing to store. That's the cheapest path through the engine and the right default for fire-and-forget jobs.
+
+When you need the result, opt in to **result storage** on the worker side, then `waitForResult` (Node) or `wait_for_result` (Python) on the producer side.
+
+## 1. Opt in on the worker
+
+<Tabs syncKey="binding">
+<TabItem label="Node">
+
+```ts
+const worker = new Worker(
+  "renders",
+  async (job) => {
+    const url = await renderImage(job.data.spec);
+    return { url };  // ← captured because storeResults: true
+  },
+  {
+    connection,
+    storeResults: true,
+    resultTtlMs: 600_000,  // 10 minutes
+  },
+);
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+worker = Worker(
+    "renders",
+    handler,
+    store_results=True,
+    result_ttl_ms=600_000,  # 10 minutes
+)
+```
+
+</TabItem>
+</Tabs>
+
+When `storeResults` is on:
+
+- The handler's return value is msgpack-encoded.
+- A single Lua script atomically `XACKDEL`'s the stream entry and `SET ... EX <ttl>`s the bytes under `{chasqui:<queue>}:result:<job_id>`.
+- Default TTL is 1 hour. Configure via `result_ttl_ms` (Python) / `resultTtlMs` (Node).
+
+## 2. Block on the result from the producer
+
+<Tabs syncKey="binding">
+<TabItem label="Node">
+
+```ts
+const job = await queue.add("render", { spec: someSpec });
+
+const result = await job.waitForResult({
+  timeoutMs: 30_000,
+  intervalMs: 100,
+});
+
+console.log(result?.url);
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+job = await queue.add("render", {"spec": some_spec})
+
+result = await job.wait_for_result(timeout=30.0, poll_interval=0.1)
+print(result["url"] if result else "timed out")
+```
+
+</TabItem>
+</Tabs>
+
+`waitForResult` polls `Queue.getJobResult(job_id)` until the result key is readable, the timeout fires, or (Node only) the supplied `AbortSignal` aborts.
+
+## 3. Read a result by id
+
+If you already have the job id:
+
+<Tabs syncKey="binding">
+<TabItem label="Node">
+
+```ts
+const result = await queue.getJobResult<{ url: string }>(jobId);
+if (result) console.log(result.url);
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+result = await queue.get_job_result(job_id)
+# Bulk variant pipelines a list of GETs in one round trip.
+results = await queue.get_job_result_bulk([id_a, id_b, id_c])
+```
+
+</TabItem>
+</Tabs>
+
+## The throughput cost
+
+Opt-in result writes cost **7.1% of opt-out throughput** at concurrency=100 on the same host (see [`benchmarks/store-results-opt-in.md`](https://github.com/jotarios/chasquimq/blob/main/benchmarks/store-results-opt-in.md)).
+
+The cost source: the result-write path is per-entry `EVALSHA` (with `NOSCRIPT` fallback), not the batched `XACKDEL` fast path the default takes. Acks no longer batch when `storeResults` is on.
+
+If you don't need results for every job, set `storeResults: false` (the default) and use [QueueEvents](/concepts/result-backends/) for `completed` events instead — they fan out to many subscribers without per-handler write cost.
+
+## Gotchas
+
+- **`undefined`/`None` returns are not stored.** The shim short-circuits to ack-only. `waitForResult` will time out waiting for a result that never gets written. The Python `wait_for_result` emits a one-shot `RuntimeWarning` after 1s of polling to surface this.
+- **TTL race with long timeouts.** A short `resultTtlMs` plus a long `timeoutMs` can race — the result expires mid-wait. Rule of thumb: `resultTtlMs >= timeoutMs * 2`.
+- **Worker-side jobs have no queue ref.** Calling `waitForResult` from inside a handler (on the `Job` you got delivered) raises a clear error — there's no producer-side queue handle to poll with.
+- **`None` from `getJobResult` is ambiguous.** It collapses three cases: not yet completed, expired, never written. For deterministic completion-detection, subscribe to [`QueueEvents`](/concepts/result-backends/) instead.
+- **At Redis `maxmemory` ceiling, the result may be missing even though the job acked.** `JOB_OK_SCRIPT` carries `flags=allow-oom` and wraps the SET in `pcall`, so the ack always commits. The SET may be rejected; `getJobResult` returns `None`. The engine never observes the rejection. See [`docs/engine.md`](https://github.com/jotarios/chasquimq/blob/main/docs/engine.md#behavior-under-maxmemory-eviction) for the per-policy table.
+
+For the underlying mechanics: [Result backends](/concepts/result-backends/).

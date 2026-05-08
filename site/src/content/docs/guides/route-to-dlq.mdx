@@ -1,0 +1,103 @@
+---
+title: Route to the DLQ
+description: Use UnrecoverableError to skip retries, and recognize every DlqReason the engine fires.
+sidebar:
+  order: 2
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+The dead-letter queue (`{chasqui:<queue>}:dlq`) is just another Redis Stream. The engine routes entries there in five distinct cases. Knowing which is firing is the first step in any debugging session.
+
+## Skip retries with `UnrecoverableError`
+
+When you know a job will never succeed (bad input, blocked address, payload schema mismatch), throw `UnrecoverableError` to bypass the retry budget.
+
+<Tabs syncKey="binding">
+<TabItem label="Node">
+
+```ts
+import { Worker, UnrecoverableError } from "chasquimq";
+
+new Worker("emails", async (job) => {
+  if (!job.data.to.includes("@")) {
+    throw new UnrecoverableError(`invalid address: ${job.data.to}`);
+  }
+  await sendEmail(job.data);
+}, { connection });
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+from chasquimq import Worker, UnrecoverableError
+
+async def handler(job):
+    if "@" not in job.data["to"]:
+        raise UnrecoverableError(f"invalid address: {job.data['to']}")
+    await send_email(job.data)
+```
+
+</TabItem>
+</Tabs>
+
+The native binding maps any error whose class name is `UnrecoverableError` to `HandlerError::unrecoverable(...)` on the Rust side. Subclasses work — `class PoisonPill extends UnrecoverableError {}` (Node) or `class PoisonPill(UnrecoverableError)` (Python) get the same routing.
+
+## The five DLQ reasons
+
+The engine writes a `reason` field on every DLQ entry. `chasqui dlq peek` renders a histogram. The five values:
+
+| Reason | When it fires | Handler ran? |
+|---|---|---|
+| `retries_exhausted` | Handler returned `Err` / threw, `attempt + 1 >= max_attempts` | Yes |
+| `unrecoverable` | Handler threw `UnrecoverableError` | Yes (once) |
+| `decode_fail` | Reader couldn't msgpack-decode the entry payload | No |
+| `malformed` | Stream entry missing required fields, or unparseable | No |
+| `oversize` | Payload exceeded `ConsumerConfig::max_payload_bytes` | No |
+
+The reader-side reasons (`decode_fail`, `malformed`, `oversize`) carry `attempt: 0` because the handler never ran. Useful when triaging: a high `decode_fail` rate means a producer is writing in a different schema, not a handler bug.
+
+## Inspecting
+
+```bash
+chasqui dlq peek emails --limit 50
+```
+
+Renders the histogram plus the most recent entries with `source_id`, `reason`, `attempt`, dispatch `name`, and the raw payload bytes.
+
+In code:
+
+<Tabs syncKey="binding">
+<TabItem label="Node">
+
+```ts
+const entries = await queue.peekDlq(50);
+for (const e of entries) {
+  console.log(e.dlqId, e.reason, e.detail);
+}
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+entries = await queue.peek_dlq(limit=50)
+for e in entries:
+    print(e["dlq_id"], e["reason"], e.get("detail"))
+```
+
+</TabItem>
+</Tabs>
+
+## Bounded growth
+
+The DLQ stream is capped via `ConsumerConfig::dlq_max_stream_len` (default 100,000). The engine uses `XADD MAXLEN ~ N` so the cap is approximate — a runaway error rate may overshoot temporarily but won't grow unboundedly.
+
+## Gotchas
+
+- **Panics route to DLQ but with `DlqReason::Panic` on the metrics path.** A handler that throws an uncaught exception does not retry. Treat it as a code bug.
+- **`UnrecoverableError` is per-handler-call.** If the worker crashes mid-handler before the engine sees the throw, idle-pending CLAIM re-delivers the entry on the next read and the handler runs again.
+- **The DLQ keeps the dispatch `name`.** When `Queue.add(name, data)` set `n` on the wire, the DLQ entry preserves it. `chasqui dlq peek` and the metrics path surface it for filtering.
+
+For the architecture: [DLQ and recovery](/concepts/dlq-and-recovery/). For replay: [Replay the DLQ](/guides/replay-the-dlq/).
