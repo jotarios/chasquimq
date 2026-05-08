@@ -32,11 +32,41 @@ export default defineConfig({
           items: [
             { label: "Introduction", slug: "index" },
             { label: "Getting started", slug: "start/getting-started" },
+            { label: "Your first job with retries", slug: "start/first-job" },
+            {
+              label: "Delayed and repeatable jobs",
+              slug: "start/delayed-and-repeatable",
+            },
+            {
+              label: "Inspecting with the CLI",
+              slug: "start/inspecting-with-cli",
+            },
           ],
         },
         {
           label: "Guides",
-          autogenerate: { directory: "guides" },
+          items: [
+            { label: "Overview", slug: "guides" },
+            { label: "Configure retries", slug: "guides/configure-retries" },
+            { label: "Route to the DLQ", slug: "guides/route-to-dlq" },
+            { label: "Replay the DLQ", slug: "guides/replay-the-dlq" },
+            {
+              label: "Enable result storage",
+              slug: "guides/enable-result-storage",
+            },
+            {
+              label: "Schedule repeatable jobs",
+              slug: "guides/schedule-repeatable-jobs",
+            },
+            { label: "Idempotent add", slug: "guides/idempotent-add" },
+            { label: "Observe the engine", slug: "guides/observe-the-engine" },
+            { label: "Tune for throughput", slug: "guides/tune-for-throughput" },
+            { label: "Migrate from BullMQ", slug: "guides/migrate-from-bullmq" },
+            {
+              label: "Migrate from Sidekiq or Celery",
+              slug: "guides/migrate-from-sidekiq-celery",
+            },
+          ],
         },
         {
           label: "Reference",
@@ -44,11 +74,45 @@ export default defineConfig({
         },
         {
           label: "Concepts",
-          autogenerate: { directory: "concepts" },
+          items: [
+            { label: "Overview", slug: "concepts" },
+            {
+              label: "Thinking in ChasquiMQ",
+              slug: "concepts/thinking-in-chasquimq",
+            },
+            {
+              label: "Redis Streams primer",
+              slug: "concepts/redis-streams-primer",
+            },
+            {
+              label: "Delivery semantics",
+              slug: "concepts/delivery-semantics",
+            },
+            { label: "Retry and backoff", slug: "concepts/retry-and-backoff" },
+            { label: "DLQ and recovery", slug: "concepts/dlq-and-recovery" },
+            { label: "Result backends", slug: "concepts/result-backends" },
+            { label: "The scheduler", slug: "concepts/the-scheduler" },
+            {
+              label: "Architecture decisions",
+              slug: "concepts/architecture-decisions",
+            },
+            {
+              label: "Performance trade-offs",
+              slug: "concepts/performance-trade-offs",
+            },
+          ],
         },
         {
           label: "Benchmarks",
-          autogenerate: { directory: "benchmarks" },
+          items: [
+            { label: "Overview", slug: "benchmarks" },
+            { label: "Methodology", slug: "benchmarks/methodology" },
+            { label: "The 1.0 numbers", slug: "benchmarks/the-1-0-numbers" },
+            {
+              label: "Regressions and floors",
+              slug: "benchmarks/regressions-and-floors",
+            },
+          ],
         },
       ],
     }),
