@@ -71,14 +71,6 @@ await worker.close()
 await queue.close()
 ```
 
-You should see:
-
-```text
-[producer] enqueued job 01KR4EHEGCXGEE57B57HBZSGW9
-[worker] sending email to ada@example.com
-🎉 your first ChasquiMQ job ran end-to-end
-```
-
   </TabItem>
   <TabItem label="Python">
 
@@ -114,14 +106,6 @@ async def main() -> None:
     await queue.close()
 
 asyncio.run(main())
-```
-
-You should see:
-
-```text
-[producer] enqueued job 01KR4EHEGCXGEE57B57HBZSGW9
-[worker] sending email to ada@example.com
-🎉 your first ChasquiMQ job ran end-to-end
 ```
 
   </TabItem>
@@ -170,14 +154,6 @@ async fn main() -> anyhow::Result<()> {
 
     Ok(())
 }
-```
-
-You should see:
-
-```text
-[producer] enqueued job 01KR4EHEGCXGEE57B57HBZSGW9
-[worker] sending email to ada@example.com
-🎉 your first ChasquiMQ job ran end-to-end
 ```
 
 The consumer keeps running after the first job — Ctrl+C to stop it.
