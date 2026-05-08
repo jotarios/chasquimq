@@ -12,12 +12,21 @@ acts on a queue name and a Redis URL.
 
 ## Install
 
+Prebuilt binary (recommended; covers macOS / Linux / Windows):
+
 ```bash
-cargo install --path chasquimq-cli
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jotarios/chasquimq/releases/latest/download/chasquimq-cli-installer.sh | sh
 ```
 
-A pre-built binary is not yet published; install from source. The
-crate compiles against stable Rust.
+Or download a platform-specific tarball from the [Releases page](https://github.com/jotarios/chasquimq/releases).
+
+From source (Rust 1.85+):
+
+```bash
+cargo install --git https://github.com/jotarios/chasquimq chasquimq-cli
+```
+
+The crate is intentionally not published to crates.io — releases ship as binaries via [cargo-dist](https://opensource.axo.dev/cargo-dist/) on GitHub Releases.
 
 ## Global flags
 

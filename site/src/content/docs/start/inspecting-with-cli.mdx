@@ -9,13 +9,21 @@ You've got jobs flowing. Now learn the operator surface — the CLI you'll reach
 
 ## 1. Install `chasqui`
 
-The CLI ships as a separate Rust crate so you don't drag operator tooling into your application bindings.
+The CLI ships as a separate Rust binary so you don't drag operator tooling into your application bindings. Pick whichever path fits your environment:
+
+**Prebuilt binary (recommended).** One-liner installer covers macOS (Apple Silicon + Intel), Linux (x86_64 + aarch64), and Windows:
 
 ```bash
-cargo install chasquimq-cli
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jotarios/chasquimq/releases/latest/download/chasquimq-cli-installer.sh | sh
 ```
 
-That puts a `chasqui` binary on your `$PATH`. If you don't have Rust, prebuilt binaries land on the [GitHub Releases page](https://github.com/jotarios/chasquimq/releases) under `chasquimq-cli-v*`.
+Or download a platform-specific tarball from the [Releases page](https://github.com/jotarios/chasquimq/releases) and extract `chasqui` somewhere on your `$PATH`.
+
+**From source** (you have Rust 1.85+ already):
+
+```bash
+cargo install --git https://github.com/jotarios/chasquimq chasquimq-cli
+```
 
 Verify:
 
