@@ -13,7 +13,7 @@ export default defineConfig({
         src: "./src/assets/chasquimq.jpeg",
         alt: "ChasquiMQ",
       },
-      favicon: "/favicon.ico",
+      favicon: "/favicon.jpeg",
       social: [
         {
           icon: "github",
