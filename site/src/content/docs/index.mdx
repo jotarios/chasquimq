@@ -37,10 +37,11 @@ docker run -d --name chasquimq-redis -p 6379:6379 redis:8.6
 <Tabs syncKey="lang">
   <TabItem label="Node.js">
 
-**Requires Node.js 18+.** Save the snippet as <code>worker.ts</code>, then:
+**Requires Node.js 18+.** In a fresh directory, save the snippet as <code>worker.ts</code>, then:
 
 ```bash
-npm install chasquimq
+npm init -y && npm pkg set type=module
+npm install chasquimq tsx
 npx tsx worker.ts
 ```
 
@@ -80,9 +81,10 @@ console.log(result)
   </TabItem>
   <TabItem label="Python">
 
-**Requires Python 3.9+.** Save the snippet as <code>worker.py</code>, then:
+**Requires Python 3.9+.** In a fresh directory, save the snippet as <code>worker.py</code>, then:
 
 ```bash
+python -m venv .venv && source .venv/bin/activate
 pip install chasquimq
 python worker.py
 ```
@@ -121,12 +123,15 @@ asyncio.run(main())
   </TabItem>
   <TabItem label="Rust">
 
-**Requires Rust 1.85+ (edition 2024).** Inside a fresh `cargo new` project, paste this into `src/main.rs`, then:
+**Requires Rust 1.85+ (edition 2024).** Spin up a project, paste the snippet into `src/main.rs`, then:
 
 ```bash
-cargo add chasquimq tokio anyhow bytes serde --features tokio/macros,tokio/rt-multi-thread,serde/derive
-cargo add tokio-util --features tokio-util/rt
-cargo run
+cargo new chasquimq-hello && cd chasquimq-hello
+cargo add chasquimq anyhow bytes
+cargo add tokio --features macros,rt-multi-thread
+cargo add tokio-util --features rt
+cargo add serde --features derive
+cargo run            # Ctrl+C to stop the consumer loop
 ```
 
 ```rust
