@@ -1,9 +1,11 @@
 /* ChasquiMQ design tokens.
  *
  * Visual direction: monochrome-first, high-contrast, systems-tool feel.
- * Primary navy is logo-derived. Accent is electric cyan, used sparingly for
+ * Primary navy is logo-derived. Accent is electric blue, used sparingly for
  * CTAs and links. No purple gradients, no bubbly radius, no centered-everything.
- */
+ *
+ * Color values come from site/design/DESIGN.md — that file is the source of
+ * truth for the system. Update there first, then bridge here. */
 
 /* ---------- Fonts (Bunny Fonts; privacy-respecting Google Fonts mirror) ---------- */
 @import url("https://fonts.bunny.net/css?family=geist:400,500,600,700|geist-mono:400,500,600|instrument-serif:400");
@@ -25,10 +27,10 @@
 
 /* ---------- Dark theme (default) ---------- */
 :root[data-theme="dark"] {
-  /* Accent: electric cyan */
-  --sl-color-accent-low: #053842;
-  --sl-color-accent: #00b8d4;
-  --sl-color-accent-high: #7feaf6;
+  /* Accent: electric blue (DESIGN.md §5 dark, AA on dark surfaces) */
+  --sl-color-accent-low: #0a2a4d;
+  --sl-color-accent: #58b8ff;
+  --sl-color-accent-high: #7cc7ff;
 
   /* Surfaces: near-black, navy-tinted */
   --sl-color-white: #f5f7fa;
@@ -54,9 +56,10 @@
 
 /* ---------- Light theme ---------- */
 :root[data-theme="light"] {
-  --sl-color-accent-low: #d6f5fb;
-  --sl-color-accent: #00838f; /* darker cyan for contrast on white */
-  --sl-color-accent-high: #006770;
+  /* Accent: electric blue (DESIGN.md §5 light) */
+  --sl-color-accent-low: #e6efff;
+  --sl-color-accent: #0066ff; /* AA on white at 4.83:1 — design agent flagged tight; OK for now */
+  --sl-color-accent-high: #0052cc; /* hover/active deepens to AAA-equivalent */
 
   --sl-color-white: #0c1117;
   --sl-color-gray-1: #1a1f27;
