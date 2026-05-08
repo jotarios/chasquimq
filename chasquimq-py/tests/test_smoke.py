@@ -1,6 +1,5 @@
 import chasquimq
-from chasquimq import Job, Queue, Worker
-from chasquimq._native import Consumer, Producer, Scheduler
+from chasquimq import Consumer, Job, Producer, Queue, Scheduler, Worker
 
 
 REDIS_URL = "redis://127.0.0.1:6379"
@@ -13,21 +12,28 @@ def test_version_is_non_empty_string() -> None:
 
 
 def test_minimal_public_surface() -> None:
-    """The top-level package exposes only the documented user surface.
-
-    Native engine handles (``Producer`` / ``Consumer`` / ``Scheduler``) and
-    the wire-format ``_Job`` pyclass live in ``chasquimq._native`` —
-    they are not re-exported.
+    """The top-level package exposes the engine handles and the
+    high-level surface, but the wire-format ``_Job`` pyclass stays
+    underscore-prefixed in ``chasquimq._native``.
     """
     from chasquimq import _native
 
-    assert "Producer" not in chasquimq.__all__
-    assert "Consumer" not in chasquimq.__all__
-    assert "Scheduler" not in chasquimq.__all__
-    assert not hasattr(chasquimq, "Producer")
-    assert not hasattr(chasquimq, "Consumer")
-    assert not hasattr(chasquimq, "Scheduler")
+    assert "Producer" in chasquimq.__all__
+    assert "Consumer" in chasquimq.__all__
+    assert "Scheduler" in chasquimq.__all__
     assert _native._Job.__name__ == "_Job"
+
+
+def test_native_classes_reexported_from_top_level() -> None:
+    """``Producer`` / ``Consumer`` / ``Scheduler`` at the package root
+    are the same objects as their ``chasquimq._native`` counterparts —
+    the top-level names are re-exports, not re-implementations.
+    """
+    from chasquimq import _native
+
+    assert Producer is _native.Producer
+    assert Consumer is _native.Consumer
+    assert Scheduler is _native.Scheduler
 
 
 def test_high_level_job_wins_unqualified_name() -> None:

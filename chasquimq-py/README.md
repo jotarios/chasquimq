@@ -75,13 +75,13 @@ asyncio.run(main())
 
 ## Power-user surface
 
-The documented public surface is `Queue` + `Worker`. The native engine handles live in `chasquimq._native` for anyone who needs raw FFI access:
+The native engine handles ship from the same top-level package:
 
 ```python
-from chasquimq._native import Producer, Consumer, Scheduler
+from chasquimq import Producer, Consumer, Scheduler
 ```
 
-There is one user-facing `Job` — the high-level dataclass returned by `Queue.add` and passed to your `Worker` handler. The low-level `Consumer.run(handler)` path keeps working for backward compat but is undocumented — use `Worker` instead.
+There is one user-facing `Job` — the high-level dataclass returned by `Queue.add` and passed to your `Worker` handler. The native binding's wire-format pyclass is internal-only (`chasquimq._native._Job`) and not re-exported (mirrors the Node shim).
 
 ## Build from source
 
