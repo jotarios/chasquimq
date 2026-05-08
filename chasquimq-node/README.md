@@ -86,7 +86,7 @@ The native engine handles ship from the same top-level package:
 import { Producer, Consumer, Scheduler } from "chasquimq"
 ```
 
-The high-level `Job` class owns the unqualified `Job` name; the native binding's `Job` value-type is exported as `NativeJob` if you need it.
+There is one user-facing `Job` — the high-level class returned by `Queue.add` and passed to your `Worker` processor. The native binding's `Job` value-type is internal-only and not re-exported (mirrors the Python shim).
 
 ## See also
 

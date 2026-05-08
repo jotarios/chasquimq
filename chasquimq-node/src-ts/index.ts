@@ -6,7 +6,12 @@
 //
 //   import { Queue, Worker, Producer, Consumer } from "chasquimq";
 //
-// `Promoter` is intentionally NOT re-exported here — symmetry with the
+// There is one user-facing `Job` — the high-level class above. The
+// native binding's `Job` value-type is intentionally NOT re-exported
+// here; it is an internal implementation detail of the worker shim.
+// Mirrors the Python shim's minimal surface.
+//
+// `Promoter` is also intentionally NOT re-exported — symmetry with the
 // Python shim, which has no `Promoter` pyclass. The engine `Consumer`
 // auto-embeds promotion since PR #64; producer-only deployments that
 // need the standalone `Promoter` can still import it from
@@ -19,10 +24,6 @@
 // gets renamed, this list will silently drop the renamed export. Run
 // `npm run build:all:debug && npm run lint` after any binding rename
 // to catch divergence; if a new binding type lands, add it here.
-//
-// The native binding's `Job` value type is re-exported as `NativeJob`
-// to avoid colliding with the high-level `Job` class above; everything
-// else is exported under its native name.
 
 export { Queue } from './queue.js'
 export { Job } from './job.js'
@@ -42,7 +43,6 @@ export {
   engineVersion,
 } from '../index.js'
 export type {
-  Job as NativeJob,
   ProducerOpts,
   ConsumerOpts,
   SchedulerOpts,

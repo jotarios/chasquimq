@@ -3,17 +3,17 @@ import { encode, decode } from '@msgpack/msgpack'
 
 // Native bindings are re-exported from the package root alongside the
 // high-level shim — one namespace, no subpath. The native `Job` value
-// type is re-exported as `NativeJob` to avoid colliding with the
-// high-level `Job` class. `Promoter` is the only exception: it's not
-// re-exported from the package root (symmetry with the Python shim,
-// which has no `Promoter` pyclass), so import it from the underlying
-// napi binding directly.
+// type is internal-only and not re-exported from the package root
+// (mirrors the Python shim, where it lives in `chasquimq._native`);
+// these tests reach into the underlying napi binding directly. The
+// leading underscore signals the internal-test-only import. `Promoter`
+// is also not re-exported (symmetry with the Python shim, which has
+// no `Promoter` pyclass), so import it from the same place.
 import {
   Producer,
   Consumer,
-  type NativeJob,
 } from '../dist/index.js'
-import { Promoter } from '../index.js'
+import { Promoter, type Job as _NativeJob } from '../index.js'
 
 const REDIS_URL = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379'
 const HAS_REDIS = Boolean(process.env.REDIS_URL)
@@ -42,7 +42,7 @@ d('Producer + Consumer round-trip', () => {
       delayedEnabled: false,
     })
 
-    const seen: NativeJob[] = []
+    const seen: _NativeJob[] = []
     let resolveSeen: () => void
     const handlerSettled = new Promise<void>((r) => (resolveSeen = r))
 
@@ -101,7 +101,7 @@ d('Producer + Consumer round-trip', () => {
       delayedEnabled: false,
     })
 
-    let seen: NativeJob | null = null
+    let seen: _NativeJob | null = null
     let resolveSeen: () => void
     const settled = new Promise<void>((r) => (resolveSeen = r))
 
