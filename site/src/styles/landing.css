@@ -160,6 +160,20 @@
 .chasqui-quickstart__hint code {
   font-family: var(--sl-font-mono);
 }
+.chasqui-quickstart__prereq {
+  font-size: 0.9375rem;
+  color: var(--sl-color-gray-2);
+  margin: 0 0 0.75rem;
+}
+.chasqui-quickstart__prereq code {
+  font-family: var(--sl-font-mono);
+}
+.chasqui-feature__meta {
+  display: inline-block;
+  margin-top: 0.5rem;
+  font-size: 0.8125rem;
+  color: var(--sl-color-gray-3);
+}
 
 /* ---------- Feature cards ---------- */
 .chasqui-features {

@@ -28,14 +28,24 @@ import DiataxisGrid from "../../components/DiataxisGrid.astro";
   <h2 id="quickstart-title" class="chasqui-section__opener">Pick your language</h2>
   <p class="chasqui-section__lede">The engine is the same Rust binary in every package. Install, enqueue a job, run a worker.</p>
 
+<p class="chasqui-quickstart__prereq">All three quickstarts assume Redis 8.6 running on <code>127.0.0.1:6379</code>:</p>
+
+```bash
+docker run -d --name chasquimq-redis -p 6379:6379 redis:8.6
+```
+
 <Tabs syncKey="lang">
   <TabItem label="Node.js">
 
+**Requires Node.js 18+.** Save the snippet as <code>worker.ts</code>, then:
+
 ```bash
 npm install chasquimq
+npx tsx worker.ts
 ```
 
 ```ts
+// worker.ts
 import { Queue, Worker } from "chasquimq"
 
 const queue = new Queue("emails", {
@@ -64,16 +74,21 @@ const worker = new Worker(
 // Block on the result from anywhere.
 const job = await queue.add("welcome", { to: "ada@example.com" })
 const result = await job.waitForResult({ timeoutMs: 30_000 })
+console.log(result)
 ```
 
   </TabItem>
   <TabItem label="Python">
 
+**Requires Python 3.9+.** Save the snippet as <code>worker.py</code>, then:
+
 ```bash
 pip install chasquimq
+python worker.py
 ```
 
 ```python
+# worker.py
 import asyncio
 from chasquimq import Queue, Worker, Job
 
@@ -106,12 +121,16 @@ asyncio.run(main())
   </TabItem>
   <TabItem label="Rust">
 
+**Requires Rust 1.85+ (edition 2024).** Inside a fresh `cargo new` project, paste this into `src/main.rs`, then:
+
 ```bash
-docker run -d --name chasquimq-redis -p 6379:6379 redis:8.6
-cargo add chasquimq tokio --features tokio/macros,tokio/rt-multi-thread
+cargo add chasquimq tokio anyhow bytes serde --features tokio/macros,tokio/rt-multi-thread,serde/derive
+cargo add tokio-util --features tokio-util/rt
+cargo run
 ```
 
 ```rust
+// src/main.rs
 use chasquimq::{Producer, Consumer, ProducerConfig, ConsumerConfig};
 use serde::{Serialize, Deserialize};
 use tokio_util::sync::CancellationToken;
@@ -162,7 +181,7 @@ async fn main() -> anyhow::Result<()> {
   <div class="chasqui-features">
     <FeatureCard title="Rust-native throughput" href="/benchmarks/" linkLabel="See the numbers"><span class="mono">188,775 jobs/s</span> sustained on a single M3 host. MessagePack on the wire. No Lua scripts. No JSON on the hot path. Pipelined <span class="mono">XACK</span> and <span class="mono">XACKDEL</span> close the round-trip tax that breaks naive Streams consumers.</FeatureCard>
     <FeatureCard title="Operator-grade reliability" href="/concepts/thinking-in-chasquimq/" linkLabel="Job lifecycle">Per-job retry budgets. Exponential backoff with jitter. DLQ replay tooling baked in. Repeatable jobs with cron and <span class="mono">every</span> patterns &mdash; DST-aware, with a <span class="mono">MissedFiresPolicy</span> for clock skips.</FeatureCard>
-    <FeatureCard title="Multi-language at zero cost" href="/reference/" linkLabel="API reference">Native bindings via <span class="mono">napi-rs</span> (Node) and <span class="mono">PyO3</span> (Python). The engine is the same Rust binary in every package &mdash; no protocol bridge, no sidecar process. Pick your language; pay no performance tax for it.</FeatureCard>
+    <FeatureCard title="Multi-language at zero cost" href="/reference/" linkLabel="API reference">Native bindings via <span class="mono">napi-rs</span> (Node) and <span class="mono">PyO3</span> (Python). The engine is the same Rust binary in every package &mdash; no protocol bridge, no sidecar process. Pick your language; pay no performance tax for it.<br /><span class="chasqui-feature__meta">Requires <span class="mono">Node 18+</span>, <span class="mono">Python 3.9+</span>, or <span class="mono">Rust 1.85+</span>.</span></FeatureCard>
   </div>
 </section>
 
