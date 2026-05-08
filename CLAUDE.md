@@ -129,3 +129,15 @@ BULLMQ_BENCH_REDIS_HOST=127.0.0.1 bun src/index.ts
 ```
 
 Note: `bullmq-bench`'s `package.json` says `"bullmq": "latest"` but the lockfile pinned an older 4.x. Run `bun add bullmq@latest` after cloning if you re-baseline.
+
+## Design System
+
+**Always read [`site/design/DESIGN.md`](site/design/DESIGN.md) before making any UI/visual decisions for the docs site.** All tokens (color, type, spacing, radius, motion), the type ramp, the component primitives, the accessibility floor, and the explicit anti-patterns are defined there. **Do not deviate without explicit user approval.**
+
+Companion specimens (standalone, frameworkless, openable in any browser):
+
+- [`site/design/preview.html`](site/design/preview.html) — full visual contract (hero, buttons, code, table, lifecycle diagram, benchmark bars, swatches, type scale).
+- [`site/design/colors.html`](site/design/colors.html) — every token with computed WCAG 2.2 contrast ratios, light + dark.
+- [`site/design/typography.html`](site/design/typography.html) — Geist + Geist Mono + Instrument Serif at the full modular scale.
+
+Token names are stable; if a value is missing, add it to `DESIGN.md` first, then to `site/src/styles/tokens.css`. The Starlight site consumes the design system, it does not define it.

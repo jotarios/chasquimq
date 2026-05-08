@@ -1,0 +1,440 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ChasquiMQ — color specimen</title>
+  <meta name="description" content="Color tokens with WCAG 2.2 contrast ratios for ChasquiMQ in light and dark themes." />
+
+  <link rel="preconnect" href="https://fonts.bunny.net" crossorigin />
+  <link rel="stylesheet" href="https://fonts.bunny.net/css?family=geist:400,500,600,700|geist-mono:400,500,600|instrument-serif:400,400i&display=swap" />
+
+  <style>
+    :root {
+      --font-sans: 'Geist', ui-sans-serif, -apple-system, sans-serif;
+      --font-mono: 'Geist Mono', ui-monospace, 'SF Mono', Consolas, monospace;
+      --font-display: 'Instrument Serif', Georgia, serif;
+    }
+    html { -webkit-text-size-adjust: 100%; }
+    body {
+      margin: 0;
+      background: #FFFFFF;
+      color: #0A2540;
+      font-family: var(--font-sans);
+      font-size: 16px;
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+    .page { max-width: 1100px; margin: 0 auto; padding: 64px 32px 96px; }
+    @media (max-width: 640px) { .page { padding: 32px 16px 64px; } }
+
+    header.top { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; margin-bottom: 64px; }
+    .h-eyebrow { font-family: var(--font-mono); font-size: 13px; color: #4A5A6E; letter-spacing: 0.04em; text-transform: uppercase; }
+    h1 {
+      font-family: var(--font-sans);
+      font-weight: 600;
+      font-size: 48px;
+      letter-spacing: -0.02em;
+      line-height: 1.1;
+      margin: 8px 0 0;
+    }
+    h1 .serif { font-family: var(--font-display); font-style: italic; font-weight: 400; }
+    p.lede { color: #4A5A6E; max-width: 60ch; margin: 24px 0 0; font-size: 18px; line-height: 1.55; }
+    a { color: #0A2540; text-decoration-color: #DDE3EB; text-underline-offset: 3px; }
+    a:hover { color: #0066FF; text-decoration-color: #0066FF; }
+
+    .section { margin-top: 96px; }
+    .section h2 { margin: 0 0 32px; font-size: 26px; font-weight: 600; letter-spacing: -0.01em; display: flex; justify-content: space-between; align-items: baseline; gap: 16px; }
+    .section h2 .tag { font-family: var(--font-mono); font-size: 13px; color: #6B7A8F; font-weight: 400; letter-spacing: 0.02em; }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+    }
+    @media (max-width: 900px) { .grid { grid-template-columns: repeat(2, 1fr); } }
+    @media (max-width: 540px) { .grid { grid-template-columns: 1fr; } }
+
+    .swatch {
+      border: 1px solid #DDE3EB;
+      border-radius: 6px;
+      overflow: hidden;
+      background: #FFFFFF;
+    }
+    .swatch .chip {
+      height: 96px;
+      display: flex;
+      align-items: flex-end;
+      padding: 12px 16px;
+    }
+    .swatch .chip .label {
+      font-family: var(--font-mono);
+      font-size: 13px;
+      letter-spacing: 0.02em;
+    }
+    .swatch .meta {
+      padding: 12px 16px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .swatch .role { font-size: 14px; color: #0A2540; font-weight: 500; }
+    .swatch .hex { font-family: var(--font-mono); font-size: 13px; color: #4A5A6E; }
+    .swatch .desc { font-size: 13px; color: #6B7A8F; margin-top: 4px; }
+
+    .table-wrap { overflow-x: auto; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+      font-feature-settings: 'tnum';
+    }
+    thead th {
+      text-align: left;
+      font-weight: 500;
+      font-size: 13px;
+      color: #4A5A6E;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      padding: 0 16px 12px;
+      border-bottom: 1px solid #DDE3EB;
+    }
+    tbody td {
+      padding: 12px 16px;
+      border-bottom: 1px solid #EEF1F5;
+      vertical-align: middle;
+    }
+    tbody tr:last-child td { border-bottom: 0; }
+    .num { text-align: right; font-family: var(--font-mono); }
+    .pair {
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      font-family: var(--font-mono);
+      font-size: 13px;
+    }
+    .chip-mini {
+      width: 28px; height: 18px; border-radius: 3px; border: 1px solid #DDE3EB; display: inline-block;
+    }
+    .demo {
+      padding: 8px 12px;
+      border-radius: 4px;
+      font-family: var(--font-mono);
+      font-size: 13px;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 2px 8px;
+      border-radius: 2px;
+      font: 500 12px/1.5 var(--font-mono);
+      letter-spacing: 0.02em;
+    }
+    .badge-pass { background: rgba(31, 158, 92, 0.12); color: #1F9E5C; }
+    .badge-aalg { background: rgba(0, 102, 255, 0.10); color: #0066FF; }
+    .badge-aaa  { background: rgba(10, 37, 64, 0.06); color: #0A2540; }
+    .badge-fail { background: rgba(215, 38, 61, 0.12); color: #D7263D; }
+
+    /* Side-by-side preview boxes for both themes */
+    .themes {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      border: 1px solid #DDE3EB;
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    @media (max-width: 720px) { .themes { grid-template-columns: 1fr; } }
+    .theme-card { padding: 32px; }
+    .theme-card.light { background: #FFFFFF; color: #0A2540; }
+    .theme-card.dark  { background: #07101C; color: #E6EEF8; }
+    .theme-card .label {
+      font-family: var(--font-mono);
+      font-size: 13px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      opacity: 0.7;
+      margin-bottom: 16px;
+    }
+    .theme-card h3 {
+      margin: 0 0 16px;
+      font-size: 26px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+    }
+    .theme-card p {
+      margin: 0 0 16px;
+      font-size: 14px;
+      line-height: 1.6;
+    }
+    .theme-card .accent { color: #0066FF; }
+    .theme-card.dark .accent { color: #58B8FF; }
+    .theme-card .muted { color: #4A5A6E; }
+    .theme-card.dark .muted { color: #94A6BC; }
+
+    footer {
+      margin-top: 96px;
+      padding-top: 32px;
+      border-top: 1px solid #DDE3EB;
+      color: #4A5A6E;
+      font-size: 13px;
+      font-family: var(--font-mono);
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+    footer a { color: #4A5A6E; }
+  </style>
+</head>
+<body>
+  <main class="page">
+
+    <header class="top">
+      <div>
+        <div class="h-eyebrow">design system · color</div>
+        <h1>Color, with the <span class="serif">contrast computed.</span></h1>
+        <p class="lede">
+          Twelve tokens per theme. Every text-on-bg pair below has its WCAG 2.2 contrast ratio
+          computed in the browser — no hand-typed numbers — so a renamed token can never silently break accessibility.
+        </p>
+      </div>
+    </header>
+
+    <!-- Side-by-side -->
+    <section class="section" aria-labelledby="s-themes">
+      <h2 id="s-themes">Themes, side by side <span class="tag">light · dark</span></h2>
+      <div class="themes">
+        <div class="theme-card light">
+          <div class="label">Light · #FFFFFF</div>
+          <h3>Worker started.</h3>
+          <p>Concurrency 100 · queue <span style="font-family:var(--font-mono);">emails</span> · group <span style="font-family:var(--font-mono);">g0</span>.</p>
+          <p class="muted">The accent appears <a class="accent" style="text-decoration: underline;">once per viewport</a>.</p>
+        </div>
+        <div class="theme-card dark">
+          <div class="label">Dark · #07101C</div>
+          <h3>Worker started.</h3>
+          <p>Concurrency 100 · queue <span style="font-family:var(--font-mono);">emails</span> · group <span style="font-family:var(--font-mono);">g0</span>.</p>
+          <p class="muted">The accent appears <a class="accent" style="text-decoration: underline;">once per viewport</a>.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Light tokens -->
+    <section class="section" aria-labelledby="s-light">
+      <h2 id="s-light">Light theme tokens <span class="tag">12 tokens</span></h2>
+      <div class="grid" id="grid-light"></div>
+    </section>
+
+    <!-- Dark tokens -->
+    <section class="section" aria-labelledby="s-dark">
+      <h2 id="s-dark">Dark theme tokens <span class="tag">12 tokens</span></h2>
+      <div class="grid" id="grid-dark"></div>
+    </section>
+
+    <!-- Contrast matrix light -->
+    <section class="section" aria-labelledby="s-cm-light">
+      <h2 id="s-cm-light">Contrast matrix · light <span class="tag">WCAG 2.2 · ratio computed</span></h2>
+      <div class="table-wrap">
+        <table aria-describedby="s-cm-light">
+          <thead>
+            <tr>
+              <th>Foreground</th>
+              <th>Background</th>
+              <th>Sample</th>
+              <th class="num">Ratio</th>
+              <th>Normal text</th>
+              <th>Large text (≥18.66 / 14 bold)</th>
+              <th>UI / non-text</th>
+            </tr>
+          </thead>
+          <tbody id="cm-light"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Contrast matrix dark -->
+    <section class="section" aria-labelledby="s-cm-dark">
+      <h2 id="s-cm-dark">Contrast matrix · dark <span class="tag">WCAG 2.2 · ratio computed</span></h2>
+      <div class="table-wrap">
+        <table aria-describedby="s-cm-dark">
+          <thead>
+            <tr>
+              <th>Foreground</th>
+              <th>Background</th>
+              <th>Sample</th>
+              <th class="num">Ratio</th>
+              <th>Normal text</th>
+              <th>Large text (≥18.66 / 14 bold)</th>
+              <th>UI / non-text</th>
+            </tr>
+          </thead>
+          <tbody id="cm-dark"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <footer>
+      <span>chasquimq · color specimen</span>
+      <span>
+        <a href="./DESIGN.md">DESIGN.md</a> ·
+        <a href="./preview.html">preview</a> ·
+        <a href="./typography.html">typography</a>
+      </span>
+    </footer>
+  </main>
+
+  <script>
+    // ─── Token tables (kept in sync with DESIGN.md §5) ────────────────
+    var LIGHT = {
+      bg:           { hex: '#FFFFFF', role: 'page bg',     desc: 'Page background' },
+      surface:      { hex: '#F7F8FA', role: 'surface',     desc: 'Card, sidebar, callout' },
+      'surface-2':  { hex: '#EEF1F5', role: 'surface-2',   desc: 'Hover, code wrapper, row stripe' },
+      border:       { hex: '#DDE3EB', role: 'border',      desc: 'Hairline 1px borders' },
+      'border-strong': { hex: '#C4CDD9', role: 'border-strong', desc: 'Inputs, focused chrome' },
+      text:         { hex: '#0A2540', role: 'text',        desc: 'Primary navy, not black' },
+      'text-muted': { hex: '#4A5A6E', role: 'text-muted',  desc: 'Captions, meta, table cells' },
+      'text-subtle':{ hex: '#6B7A8F', role: 'text-subtle', desc: 'Placeholders, disabled labels' },
+      accent:       { hex: '#0066FF', role: 'accent',      desc: 'Links, primary CTA, focus ring' },
+      'accent-hover': { hex: '#0052CC', role: 'accent-hover', desc: 'Active CTA, hovered link' },
+      'accent-soft': { hex: '#E6F0FF', role: 'accent-soft', desc: 'Selection bg, accent surface' },
+      'code-bg':    { hex: '#0A2540', role: 'code-bg',     desc: 'Code block (inverted)' }
+    };
+    var DARK = {
+      bg:           { hex: '#07101C', role: 'page bg',     desc: 'Near-black navy' },
+      surface:      { hex: '#0E1B2C', role: 'surface',     desc: 'Card, sidebar' },
+      'surface-2':  { hex: '#16263A', role: 'surface-2',   desc: 'Hover, code wrapper' },
+      border:       { hex: '#1F3247', role: 'border',      desc: 'Hairline borders' },
+      'border-strong': { hex: '#2C435E', role: 'border-strong', desc: 'Form inputs' },
+      text:         { hex: '#E6EEF8', role: 'text',        desc: 'Primary text' },
+      'text-muted': { hex: '#94A6BC', role: 'text-muted',  desc: 'Caption, meta' },
+      'text-subtle':{ hex: '#6E8197', role: 'text-subtle', desc: 'Placeholder, disabled' },
+      accent:       { hex: '#58B8FF', role: 'accent',      desc: 'Links, primary CTA, focus ring' },
+      'accent-hover': { hex: '#86CCFF', role: 'accent-hover', desc: 'Active / hovered' },
+      'accent-soft': { hex: '#102A44', role: 'accent-soft', desc: 'Selection bg, accent surface' },
+      'code-bg':    { hex: '#040A12', role: 'code-bg',     desc: 'Slightly darker than page' }
+    };
+
+    // ─── WCAG contrast math ───────────────────────────────────────────
+    function hexToRgb(hex) {
+      var h = hex.replace('#', '');
+      if (h.length === 3) h = h.split('').map(function (c) { return c + c; }).join('');
+      var n = parseInt(h, 16);
+      return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+    }
+    function relLum(rgb) {
+      var c = rgb.map(function (v) {
+        v /= 255;
+        return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+      });
+      return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    }
+    function ratio(fg, bg) {
+      var l1 = relLum(hexToRgb(fg));
+      var l2 = relLum(hexToRgb(bg));
+      var hi = Math.max(l1, l2), lo = Math.min(l1, l2);
+      return (hi + 0.05) / (lo + 0.05);
+    }
+    function pickTextOn(bgHex) {
+      var rOnDark  = ratio('#E6EEF8', bgHex);
+      var rOnLight = ratio('#0A2540', bgHex);
+      return rOnDark > rOnLight ? '#E6EEF8' : '#0A2540';
+    }
+    function badge(label, ok) {
+      return '<span class="badge ' + (ok ? 'badge-pass' : 'badge-fail') + '">' + label + '</span>';
+    }
+
+    // ─── Render swatches ──────────────────────────────────────────────
+    function renderSwatches(target, tokens) {
+      var host = document.getElementById(target);
+      host.innerHTML = Object.keys(tokens).map(function (k) {
+        var t = tokens[k];
+        var labelColor = pickTextOn(t.hex);
+        return '<div class="swatch">' +
+          '<div class="chip" style="background:' + t.hex + ';">' +
+            '<span class="label" style="color:' + labelColor + ';">' + t.hex + '</span>' +
+          '</div>' +
+          '<div class="meta">' +
+            '<span class="role">--' + k + '</span>' +
+            '<span class="hex">' + t.role + '</span>' +
+            '<span class="desc">' + t.desc + '</span>' +
+          '</div>' +
+        '</div>';
+      }).join('');
+    }
+    renderSwatches('grid-light', LIGHT);
+    renderSwatches('grid-dark', DARK);
+
+    // ─── Render contrast matrix ───────────────────────────────────────
+    // For each theme: text/text-muted/text-subtle/accent/accent-hover on bg/surface/surface-2/code-bg
+    // Plus a few non-text pairs (border on bg, accent on surface).
+    function buildPairs(t) {
+      var fg = ['text', 'text-muted', 'text-subtle', 'accent', 'accent-hover'];
+      var bg = ['bg', 'surface', 'surface-2', 'accent-soft', 'code-bg'];
+      var rows = [];
+      fg.forEach(function (f) {
+        bg.forEach(function (b) {
+          rows.push({ f: f, b: b, kind: 'text' });
+        });
+      });
+      // non-text examples
+      rows.push({ f: 'border-strong', b: 'bg', kind: 'ui' });
+      rows.push({ f: 'accent',        b: 'bg', kind: 'ui' });
+      rows.push({ f: 'border',        b: 'bg', kind: 'ui' });
+      return rows;
+    }
+
+    function renderMatrix(target, tokens, darkBg) {
+      var rows = buildPairs(tokens);
+      var html = rows.map(function (row) {
+        var fg = tokens[row.f].hex;
+        var bg = tokens[row.b].hex;
+        var r = ratio(fg, bg);
+        var rTxt = r.toFixed(2) + ':1';
+
+        var normalAA  = r >= 4.5;
+        var normalAAA = r >= 7;
+        var largeAA   = r >= 3;
+        var largeAAA  = r >= 4.5;
+        var uiAA      = r >= 3;
+
+        var demo = '<div class="demo" style="background:' + bg + '; color:' + fg + ';">'
+                 + (row.kind === 'ui' ? 'border / icon ' + fg : 'Aa &nbsp; ' + fg)
+                 + '</div>';
+
+        var normalCell = row.kind === 'text'
+          ? (normalAAA ? badge('AAA ' + rTxt, true)
+            : normalAA ? badge('AA ' + rTxt, true)
+            : badge('FAIL ' + rTxt, false))
+          : '<span class="badge badge-aaa">n/a</span>';
+
+        var largeCell = row.kind === 'text'
+          ? (largeAAA ? badge('AAA ' + rTxt, true)
+            : largeAA ? badge('AA ' + rTxt, true)
+            : badge('FAIL ' + rTxt, false))
+          : '<span class="badge badge-aaa">n/a</span>';
+
+        var uiCell = uiAA ? badge('AA ' + rTxt, true) : badge('FAIL ' + rTxt, false);
+
+        return '<tr>' +
+          '<td class="pair"><span class="chip-mini" style="background:' + fg + ';"></span>--' + row.f + '</td>' +
+          '<td class="pair"><span class="chip-mini" style="background:' + bg + ';"></span>--' + row.b + '</td>' +
+          '<td>' + demo + '</td>' +
+          '<td class="num">' + rTxt + '</td>' +
+          '<td>' + normalCell + '</td>' +
+          '<td>' + largeCell + '</td>' +
+          '<td>' + uiCell + '</td>' +
+        '</tr>';
+      }).join('');
+      document.getElementById(target).innerHTML = html;
+    }
+
+    renderMatrix('cm-light', LIGHT, false);
+    renderMatrix('cm-dark', DARK, true);
+  </script>
+</body>
+</html>

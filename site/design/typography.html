@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ChasquiMQ — type specimen</title>
+  <meta name="description" content="Type specimen for ChasquiMQ: Geist, Geist Mono, Instrument Serif at the full modular scale." />
+
+  <link rel="preconnect" href="https://fonts.bunny.net" crossorigin />
+  <link rel="stylesheet" href="https://fonts.bunny.net/css?family=geist:400,500,600,700|geist-mono:400,500,600|instrument-serif:400,400i&display=swap" />
+
+  <style>
+    :root {
+      --font-sans: 'Geist', ui-sans-serif, -apple-system, sans-serif;
+      --font-mono: 'Geist Mono', ui-monospace, 'SF Mono', Consolas, monospace;
+      --font-display: 'Instrument Serif', Georgia, serif;
+
+      --bg: #FFFFFF;
+      --surface: #F7F8FA;
+      --surface-2: #EEF1F5;
+      --border: #DDE3EB;
+      --text: #0A2540;
+      --text-muted: #4A5A6E;
+      --text-subtle: #6B7A8F;
+      --accent: #0066FF;
+      --code-bg: #0A2540;
+      --code-text: #E6EEF8;
+    }
+    html { -webkit-text-size-adjust: 100%; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font-sans);
+      font-size: 16px;
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+    .page { max-width: 1100px; margin: 0 auto; padding: 64px 32px 96px; }
+    @media (max-width: 640px) { .page { padding: 32px 16px 64px; } }
+
+    .h-eyebrow { font-family: var(--font-mono); font-size: 13px; color: var(--text-muted); letter-spacing: 0.04em; text-transform: uppercase; }
+    h1 {
+      font-weight: 600;
+      font-size: 48px;
+      letter-spacing: -0.02em;
+      line-height: 1.1;
+      margin: 8px 0 0;
+      max-width: 24ch;
+    }
+    h1 .serif { font-family: var(--font-display); font-style: italic; font-weight: 400; }
+    p.lede { color: var(--text-muted); max-width: 60ch; margin: 24px 0 0; font-size: 18px; line-height: 1.55; }
+
+    .section { margin-top: 96px; }
+    .section h2 {
+      margin: 0 0 32px;
+      font-size: 26px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 16px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--border);
+    }
+    .section h2 .tag { font-family: var(--font-mono); font-size: 13px; color: var(--text-subtle); font-weight: 400; }
+
+    /* Family card */
+    .family { display: grid; grid-template-columns: 280px 1fr; gap: 48px; align-items: start; }
+    @media (max-width: 720px) { .family { grid-template-columns: 1fr; gap: 24px; } }
+    .family .meta { font-family: var(--font-mono); font-size: 13px; color: var(--text-muted); line-height: 1.7; }
+    .family .meta strong { color: var(--text); font-weight: 500; display: block; font-size: 14px; margin-bottom: 8px; }
+    .family .meta .row { display: flex; justify-content: space-between; gap: 12px; }
+    .family .specimen { display: flex; flex-direction: column; gap: 16px; }
+
+    /* Big "type-O-rama" */
+    .alphabet {
+      font-size: 56px;
+      letter-spacing: -0.02em;
+      line-height: 1.1;
+      color: var(--text);
+      word-spacing: 0.05em;
+    }
+    .alphabet.mono { font-family: var(--font-mono); font-size: 40px; letter-spacing: 0; }
+    .alphabet.serif { font-family: var(--font-display); font-style: italic; font-weight: 400; font-size: 64px; letter-spacing: -0.02em; }
+
+    .pangram {
+      font-size: 24px;
+      line-height: 1.4;
+      color: var(--text);
+    }
+    .pangram.mono { font-family: var(--font-mono); font-size: 18px; }
+    .pangram.serif { font-family: var(--font-display); font-style: italic; font-weight: 400; font-size: 32px; }
+
+    .weights { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+    @media (max-width: 720px) { .weights { grid-template-columns: repeat(2, 1fr); } }
+    .weights .w { padding: 16px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; }
+    .weights .w .lab { font-family: var(--font-mono); font-size: 12px; color: var(--text-muted); margin-bottom: 8px; letter-spacing: 0.04em; text-transform: uppercase; }
+    .weights .w .demo { font-size: 21px; line-height: 1.2; letter-spacing: -0.01em; }
+
+    /* Scale */
+    .scale-row {
+      display: grid;
+      grid-template-columns: 100px 110px 1fr;
+      gap: 16px;
+      padding: 12px 0;
+      border-bottom: 1px solid var(--border);
+      align-items: baseline;
+    }
+    .scale-row:last-child { border-bottom: 0; }
+    .scale-row .tok { font-family: var(--font-mono); font-size: 13px; color: var(--text-muted); }
+    .scale-row .px  { font-family: var(--font-mono); font-size: 13px; color: var(--text-subtle); }
+    .scale-row .specimen { color: var(--text); letter-spacing: -0.01em; line-height: 1.15; }
+
+    /* Sample article */
+    .article { max-width: 65ch; }
+    .article h3 { font-size: 26px; font-weight: 600; letter-spacing: -0.01em; margin: 0 0 16px; }
+    .article p { margin: 0 0 16px; font-size: 16px; line-height: 1.6; color: var(--text); }
+    .article p.lede { font-size: 18px; color: var(--text-muted); }
+    .article a { color: var(--text); text-decoration-color: var(--border); text-underline-offset: 3px; }
+    .article a:hover { color: var(--accent); text-decoration-color: var(--accent); }
+    .article code {
+      font-family: var(--font-mono);
+      background: var(--surface-2);
+      color: var(--text);
+      padding: 1px 6px;
+      border-radius: 2px;
+      font-size: 0.92em;
+    }
+
+    /* Code block — flat radius, navy */
+    .codeblock {
+      background: var(--code-bg);
+      color: var(--code-text);
+      font-family: var(--font-mono);
+      font-size: 14px;
+      line-height: 1.65;
+      overflow-x: auto;
+      padding: 18px 20px;
+    }
+    .codeblock .c-comment { color: #7E8A9C; font-style: italic; }
+    .codeblock .c-key     { color: #FF7AB6; }
+    .codeblock .c-str     { color: #7DD897; }
+    .codeblock .c-num     { color: #F2A93B; }
+    .codeblock .c-fn      { color: #58B8FF; }
+    .codeblock .c-type    { color: #C792EA; }
+
+    /* Pairing showcase: hero comp */
+    .hero-comp {
+      padding: 48px 32px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+    }
+    .hero-comp .row1 { font-weight: 600; font-size: 48px; line-height: 1.1; letter-spacing: -0.02em; }
+    .hero-comp .row2 { font-family: var(--font-display); font-style: italic; font-weight: 400; font-size: 64px; line-height: 1.05; letter-spacing: -0.02em; display: block; margin-top: 4px; }
+    .hero-comp .lede { color: var(--text-muted); margin-top: 24px; max-width: 60ch; font-size: 18px; line-height: 1.55; }
+
+    /* Tables for scale */
+    .scale-card {
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 24px 24px 8px;
+      background: var(--bg);
+    }
+
+    footer {
+      margin-top: 96px;
+      padding-top: 32px;
+      border-top: 1px solid var(--border);
+      color: var(--text-muted);
+      font-size: 13px;
+      font-family: var(--font-mono);
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+    footer a { color: var(--text-muted); }
+    footer a:hover { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <main class="page">
+
+    <header>
+      <div class="h-eyebrow">design system · typography</div>
+      <h1>Three families. <span class="serif">One restraint.</span></h1>
+      <p class="lede">
+        Geist for body and UI. Geist Mono for code, telemetry, table numerics, and shortcuts.
+        Instrument Serif lives in exactly one place per page — the hero — to put a human stamp
+        on what is otherwise a precise, monospaced system. Loaded via Bunny Fonts; no external JS.
+      </p>
+    </header>
+
+    <!-- Hero pairing -->
+    <section class="section" aria-labelledby="s-pair">
+      <h2 id="s-pair">The pairing <span class="tag">geist + instrument serif</span></h2>
+      <div class="hero-comp">
+        <div class="row1">The fastest open-source</div>
+        <span class="row2">message broker for Redis.</span>
+        <p class="lede">Rust on tokio. Redis Streams. MessagePack on the wire. 188,775 jobs/s sustained on Apple M3 against Redis 8.6.</p>
+      </div>
+    </section>
+
+    <!-- Geist -->
+    <section class="section" aria-labelledby="s-geist">
+      <h2 id="s-geist">Geist <span class="tag">body / UI · 400 / 500 / 600 / 700</span></h2>
+      <div class="family">
+        <div class="meta">
+          <strong>Geist (Vercel, OFL)</strong>
+          <div class="row"><span>License</span><span>SIL OFL 1.1</span></div>
+          <div class="row"><span>Source</span><span>fonts.bunny.net</span></div>
+          <div class="row"><span>Weights used</span><span>400 / 500 / 600 / 700</span></div>
+          <div class="row"><span>Default tracking</span><span>0</span></div>
+          <div class="row"><span>Default leading</span><span>1.6 prose · 1.15 head</span></div>
+          <div class="row"><span>Features</span><span>tnum, ss01, cv11</span></div>
+          <p style="margin-top: 24px; line-height: 1.6;">Calm, neutral, slightly mechanical. Holds at 13px UI sizes. Reads quietly at 16px body. Doesn't fight Geist Mono — they share metrics.</p>
+        </div>
+        <div class="specimen">
+          <div class="alphabet">Aa Bb Cc Dd Ee Ff Gg Hh Ii Jj Kk Ll Mm Nn Oo Pp</div>
+          <div class="alphabet" style="font-size: 40px;">0123456789 &amp; ! ? : / · → ← ↑ ↓ ⌘ ⌥ ⇧</div>
+          <div class="pangram">Pack my box with five dozen liquor jugs — concurrency=100, p99=2.1ms.</div>
+          <div class="weights">
+            <div class="w"><div class="lab">Regular · 400</div><div class="demo" style="font-weight: 400;">Worker started.</div></div>
+            <div class="w"><div class="lab">Medium · 500</div><div class="demo" style="font-weight: 500;">Worker started.</div></div>
+            <div class="w"><div class="lab">Semibold · 600</div><div class="demo" style="font-weight: 600;">Worker started.</div></div>
+            <div class="w"><div class="lab">Bold · 700</div><div class="demo" style="font-weight: 700;">Worker started.</div></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Geist Mono -->
+    <section class="section" aria-labelledby="s-mono">
+      <h2 id="s-mono">Geist Mono <span class="tag">code / data · 400 / 500 / 600</span></h2>
+      <div class="family">
+        <div class="meta">
+          <strong>Geist Mono (Vercel, OFL)</strong>
+          <div class="row"><span>License</span><span>SIL OFL 1.1</span></div>
+          <div class="row"><span>Source</span><span>fonts.bunny.net</span></div>
+          <div class="row"><span>Weights used</span><span>400 / 500 / 600</span></div>
+          <div class="row"><span>Default leading</span><span>1.55 code · 1.6 inline</span></div>
+          <div class="row"><span>Features</span><span>tnum (default on tables &amp; stats)</span></div>
+          <p style="margin-top: 24px; line-height: 1.6;">Lives in code blocks, telemetry, the data table, kbd shortcuts, queue names, job IDs, latency numbers — everywhere precision matters.</p>
+        </div>
+        <div class="specimen">
+          <div class="alphabet mono">01HXG7F4PQ · queue=emails · g0</div>
+          <div class="pangram mono">$ chasqui tail emails --concurrency 100 --since 5m</div>
+          <div class="codeblock">
+<span class="c-comment">// Pipelined ack — one round trip for the batch.</span>
+<span class="c-key">let</span> ids: <span class="c-type">Vec</span>&lt;<span class="c-type">String</span>&gt; = batch.<span class="c-fn">iter</span>().<span class="c-fn">map</span>(|j| j.id.<span class="c-fn">clone</span>()).<span class="c-fn">collect</span>();
+conn.<span class="c-fn">xack_del</span>(<span class="c-str">"emails"</span>, <span class="c-str">"g0"</span>, &amp;ids).<span class="c-fn">await</span>?;
+<span class="c-comment">//                                       ^^^^ XACKDEL — Redis 8.2 atomic delete-on-ack</span>
+metrics.<span class="c-fn">incr</span>(<span class="c-str">"jobs.acked"</span>, ids.<span class="c-fn">len</span>() <span class="c-key">as</span> <span class="c-type">u64</span>);
+          </div>
+          <div class="weights">
+            <div class="w"><div class="lab">Regular · 400</div><div class="demo" style="font-family: var(--font-mono); font-weight: 400;">XADD · 0.4ms</div></div>
+            <div class="w"><div class="lab">Medium · 500</div><div class="demo" style="font-family: var(--font-mono); font-weight: 500;">XADD · 0.4ms</div></div>
+            <div class="w"><div class="lab">Semibold · 600</div><div class="demo" style="font-family: var(--font-mono); font-weight: 600;">XADD · 0.4ms</div></div>
+            <div class="w"><div class="lab">Tabular · tnum</div><div class="demo" style="font-family: var(--font-mono); font-feature-settings: 'tnum';">188,775 / 60,828</div></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Instrument Serif -->
+    <section class="section" aria-labelledby="s-serif">
+      <h2 id="s-serif">Instrument Serif <span class="tag">display only · 400 + italic</span></h2>
+      <div class="family">
+        <div class="meta">
+          <strong>Instrument Serif (Instrument, OFL)</strong>
+          <div class="row"><span>License</span><span>SIL OFL 1.1</span></div>
+          <div class="row"><span>Source</span><span>fonts.bunny.net</span></div>
+          <div class="row"><span>Weights used</span><span>400 + 400 italic</span></div>
+          <div class="row"><span>Where</span><span>Hero only · capped at 1× per page</span></div>
+          <p style="margin-top: 24px; line-height: 1.6;">The one allowed flourish. Pairs with Geist 600 in the hero stack: sans for the verb, italic serif for the object. Never used in prose, never on subpage titles, never in UI chrome. The serif is the human; rationing it is the design.</p>
+        </div>
+        <div class="specimen">
+          <div class="alphabet serif">Chasqui — the runner.</div>
+          <div class="pangram serif">Move messages, faster — without the per-job round trips.</div>
+          <div style="font-family: var(--font-display); font-size: 21px; color: var(--text-muted); line-height: 1.5; max-width: 50ch;">
+            Used a second time on the same page, the typeface stops being a signal and starts being decoration. The system caps it at one instance.
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Modular scale -->
+    <section class="section" aria-labelledby="s-scale">
+      <h2 id="s-scale">Modular scale <span class="tag">13 / 14 / 16 / 18 / 21 / 26 / 34 / 48 / 64</span></h2>
+      <div class="scale-card">
+        <div class="scale-row"><span class="tok">--text-4xl</span><span class="px">64 / 4 rem</span><span class="specimen" style="font-family: var(--font-display); font-style: italic; font-size: 64px;">Chasqui</span></div>
+        <div class="scale-row"><span class="tok">--text-3xl</span><span class="px">48 / 3 rem</span><span class="specimen" style="font-size: 48px; font-weight: 600;">Move messages, faster.</span></div>
+        <div class="scale-row"><span class="tok">--text-2xl</span><span class="px">34 / 2.125</span><span class="specimen" style="font-size: 34px; font-weight: 600;">Throughput, bulk produce</span></div>
+        <div class="scale-row"><span class="tok">--text-xl</span><span class="px">26 / 1.625</span><span class="specimen" style="font-size: 26px; font-weight: 600;">Active queues</span></div>
+        <div class="scale-row"><span class="tok">--text-lg</span><span class="px">21 / 1.3125</span><span class="specimen" style="font-size: 21px; font-weight: 600;">Worker telemetry</span></div>
+        <div class="scale-row"><span class="tok">--text-md</span><span class="px">18 / 1.125</span><span class="specimen" style="font-size: 18px;">Drop-in Queue / Worker / Job, MessagePack on the wire.</span></div>
+        <div class="scale-row"><span class="tok">--text-base</span><span class="px">16 / 1 rem</span><span class="specimen" style="font-size: 16px;">Body prose default — 60 to 75 characters per line, 1.6 line-height.</span></div>
+        <div class="scale-row"><span class="tok">--text-sm</span><span class="px">14 / 0.875</span><span class="specimen" style="font-size: 14px;">UI chrome, table cells, secondary metadata.</span></div>
+        <div class="scale-row"><span class="tok">--text-xs</span><span class="px">13 / 0.8125</span><span class="specimen" style="font-size: 13px; font-family: var(--font-mono); color: var(--text-muted); letter-spacing: 0.04em; text-transform: uppercase;">tabular · monospace · meta</span></div>
+      </div>
+    </section>
+
+    <!-- Article specimen -->
+    <section class="section" aria-labelledby="s-article">
+      <h2 id="s-article">Prose specimen <span class="tag">geist · 16px · 1.6 leading · 60ch</span></h2>
+      <article class="article">
+        <h3>Pipelined acknowledgement</h3>
+        <p class="lede">Acking one job at a time is the bottleneck most Redis-backed queues never escape. ChasquiMQ batches up to 64 acks per round trip and uses Redis 8.2's <code>XACKDEL</code> to acknowledge and delete in the same call.</p>
+        <p>The engine collects job IDs as workers finish, holds them in a per-consumer ring with a 5ms flush deadline, and ships them in a single pipeline command. On a contended Apple M3 host against <code>redis:8.6.2</code>, this lifts <a href="#">bulk produce</a> to 211,074 jobs/s — 3.47× the Node.js baseline measured on the same hardware.</p>
+        <p>The trade-off is a small worst-case lag between job completion and ack visibility (≤5ms). For at-least-once semantics this is invisible; for at-most-once delivery you want the idempotent producer (<code>XADD ... IDMPAUTO</code>, Redis 8.6) on the enqueue side.</p>
+      </article>
+    </section>
+
+    <footer>
+      <span>chasquimq · typography specimen</span>
+      <span>
+        <a href="./DESIGN.md">DESIGN.md</a> ·
+        <a href="./preview.html">preview</a> ·
+        <a href="./colors.html">colors</a>
+      </span>
+    </footer>
+  </main>
+</body>
+</html>
