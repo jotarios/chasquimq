@@ -43,6 +43,16 @@ cargo install --path chasquimq-cli
 
 ## Usage
 
+### Global: `--redis-url`
+
+`--redis-url <URL>` works on every subcommand. Defaults to `redis://127.0.0.1:6379`. You can also set it once via the `CHASQUI_REDIS_URL` env var:
+
+```bash
+export CHASQUI_REDIS_URL=rediss://prod-redis.example.com:6380
+chasqui inspect emails        # uses the env var
+chasqui --help                # see all flags
+```
+
 ### `inspect`
 
 ```

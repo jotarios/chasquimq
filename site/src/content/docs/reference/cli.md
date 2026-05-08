@@ -38,13 +38,21 @@ The crate is published to [crates.io](https://crates.io/crates/chasquimq-cli) fo
 
 ## Global flags
 
-Every subcommand accepts `--redis-url <url>` (default
-`redis://127.0.0.1:6379`). Subcommands that touch the consumer
-group also accept `--group <name>` (default `default`).
+`--redis-url <URL>` is global — every subcommand accepts it. Defaults to `redis://127.0.0.1:6379`. Use `redis://host:port` for plain TCP, `rediss://` for TLS, or `redis://user:pass@host:port/db` for auth.
 
-Queue names are the base name — without the `{chasqui:...}`
-hash-tag wrapping. The CLI computes the full Redis keys (`{chasqui:emails}:s`,
-`{chasqui:emails}:dlq`, etc.) from the base name.
+You can also set it once via the `CHASQUI_REDIS_URL` environment variable to avoid passing it every command:
+
+```bash
+export CHASQUI_REDIS_URL=rediss://prod-redis.example.com:6380
+chasqui inspect emails        # uses the env var
+chasqui dlq peek emails       # same
+```
+
+The flag overrides the env var when both are set.
+
+`--group <NAME>` is **per-subcommand**, only exposed where it's meaningful (`inspect` and `watch`). Defaults to `default` (matches `ConsumerConfig::group`).
+
+Queue names are the base name — without the `{chasqui:...}` hash-tag wrapping. The CLI computes the full Redis keys (`{chasqui:emails}:s`, `{chasqui:emails}:dlq`, etc.) from the base name.
 
 ## `chasqui inspect`
 

@@ -18,6 +18,18 @@ const DEFAULT_GROUP: &str = "default";
     arg_required_else_help = true
 )]
 struct Cli {
+    /// Redis connection URL. Use `redis://host:port` for plain TCP,
+    /// `rediss://` for TLS, or `redis://user:pass@host:port/db` for auth.
+    #[arg(
+        long,
+        global = true,
+        env = "CHASQUI_REDIS_URL",
+        default_value = DEFAULT_REDIS_URL,
+        value_name = "URL",
+        help_heading = "Connection"
+    )]
+    redis_url: String,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -29,11 +41,9 @@ enum Command {
     Inspect {
         /// Queue name (without the `{chasqui:...}` hash-tag wrapping).
         queue: String,
-        #[arg(long, default_value = DEFAULT_REDIS_URL)]
-        redis_url: String,
         /// Consumer group used to compute pending count. Matches the
         /// engine default `ConsumerConfig::group`.
-        #[arg(long, default_value = DEFAULT_GROUP)]
+        #[arg(long, default_value = DEFAULT_GROUP, value_name = "NAME")]
         group: String,
     },
     /// Inspect or replay dead-letter queue entries.
@@ -49,9 +59,9 @@ enum Command {
         queue: String,
         #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u64).range(1..))]
         interval_ms: u64,
-        #[arg(long, default_value = DEFAULT_REDIS_URL)]
-        redis_url: String,
-        #[arg(long, default_value = DEFAULT_GROUP)]
+        /// Consumer group used to compute pending count. Matches the
+        /// engine default `ConsumerConfig::group`.
+        #[arg(long, default_value = DEFAULT_GROUP, value_name = "NAME")]
         group: String,
     },
     /// Tail the per-queue events stream (`{chasqui:<queue>}:events`). One
@@ -61,8 +71,6 @@ enum Command {
         queue: String,
         #[arg(long, default_value = "$")]
         from: String,
-        #[arg(long, default_value = DEFAULT_REDIS_URL)]
-        redis_url: String,
     },
 }
 
@@ -73,8 +81,6 @@ enum DlqCommand {
         queue: String,
         #[arg(long, default_value_t = 20)]
         limit: u32,
-        #[arg(long, default_value = DEFAULT_REDIS_URL)]
-        redis_url: String,
     },
     /// Atomically replay up to N DLQ entries back into the main stream.
     /// The replayed jobs get a fresh retry budget (attempt counter reset).
@@ -85,8 +91,6 @@ enum DlqCommand {
         /// Skip the interactive confirmation prompt.
         #[arg(long)]
         yes: bool,
-        #[arg(long, default_value = DEFAULT_REDIS_URL)]
-        redis_url: String,
     },
 }
 
@@ -97,58 +101,37 @@ enum RepeatableCommand {
         queue: String,
         #[arg(long, default_value_t = 100)]
         limit: u32,
-        #[arg(long, default_value = DEFAULT_REDIS_URL)]
-        redis_url: String,
     },
     /// Remove a repeatable spec by its resolved key.
     Remove {
         queue: String,
         key: String,
-        #[arg(long, default_value = DEFAULT_REDIS_URL)]
-        redis_url: String,
     },
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let redis_url = &cli.redis_url;
     match cli.command {
-        Command::Inspect {
-            queue,
-            redis_url,
-            group,
-        } => inspect::run(&redis_url, &queue, &group).await,
-        Command::Dlq(DlqCommand::Peek {
-            queue,
-            limit,
-            redis_url,
-        }) => dlq::peek(&redis_url, &queue, limit).await,
-        Command::Dlq(DlqCommand::Replay {
-            queue,
-            limit,
-            yes,
-            redis_url,
-        }) => dlq::replay(&redis_url, &queue, limit, yes).await,
-        Command::Repeatable(RepeatableCommand::List {
-            queue,
-            limit,
-            redis_url,
-        }) => repeatable::list(&redis_url, &queue, limit).await,
-        Command::Repeatable(RepeatableCommand::Remove {
-            queue,
-            key,
-            redis_url,
-        }) => repeatable::remove(&redis_url, &queue, &key).await,
+        Command::Inspect { queue, group } => inspect::run(redis_url, &queue, &group).await,
+        Command::Dlq(DlqCommand::Peek { queue, limit }) => {
+            dlq::peek(redis_url, &queue, limit).await
+        }
+        Command::Dlq(DlqCommand::Replay { queue, limit, yes }) => {
+            dlq::replay(redis_url, &queue, limit, yes).await
+        }
+        Command::Repeatable(RepeatableCommand::List { queue, limit }) => {
+            repeatable::list(redis_url, &queue, limit).await
+        }
+        Command::Repeatable(RepeatableCommand::Remove { queue, key }) => {
+            repeatable::remove(redis_url, &queue, &key).await
+        }
         Command::Watch {
             queue,
             interval_ms,
-            redis_url,
             group,
-        } => watch::run(&redis_url, &queue, &group, interval_ms).await,
-        Command::Events {
-            queue,
-            from,
-            redis_url,
-        } => events::run(&redis_url, &queue, &from).await,
+        } => watch::run(redis_url, &queue, &group, interval_ms).await,
+        Command::Events { queue, from } => events::run(redis_url, &queue, &from).await,
     }
 }
