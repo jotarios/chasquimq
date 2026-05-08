@@ -9,7 +9,7 @@ use chasquimq::Job as EngineJob;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
-#[pyclass(module = "chasquimq._native", name = "Job", frozen)]
+#[pyclass(module = "chasquimq._native", name = "_Job", frozen)]
 pub struct Job {
     id: String,
     name: String,

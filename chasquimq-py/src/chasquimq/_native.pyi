@@ -2,7 +2,7 @@ from typing import Any, Awaitable, Callable, Optional, Sequence
 
 def version() -> str: ...
 
-class Job:
+class _Job:
     @property
     def id(self) -> str: ...
     @property
@@ -89,7 +89,7 @@ class Consumer:
         result_ttl_ms: Optional[int] = None,
     ) -> None: ...
     def run(
-        self, handler: Callable[[Job], Awaitable[Any]]
+        self, handler: Callable[[_Job], Awaitable[Any]]
     ) -> Awaitable[None]: ...
     def shutdown(self) -> None: ...
 

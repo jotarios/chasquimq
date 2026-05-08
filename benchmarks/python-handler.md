@@ -39,9 +39,9 @@ python benchmarks/scripts/python_handler_bench.py \
 ## Method
 
 * **Pre-load via the native producer.** Jobs are XADD'd to the stream
-  via `chasquimq._native.Producer` (the same Rust `Producer<RawBytes>`
-  that `chasquimq-bench` drives) before the consumer starts. Producer
-  noise stays out of the consumer measurement window.
+  via `chasquimq.Producer` (the same Rust `Producer<RawBytes>` that
+  `chasquimq-bench` drives) before the consumer starts. Producer noise
+  stays out of the consumer measurement window.
 * **No-op handler.** The Python coroutine is `async def handler(_job):
   pass` semantics — no I/O, no compute. Anything the handler does is
   throughput tax on top of these numbers.

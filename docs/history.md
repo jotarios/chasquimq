@@ -94,6 +94,10 @@ Eleven PRs landed after the post-Phase-4 polish above; together they close the t
 
 **Same-host 1.0 re-bench (2026-05-07):** today's contended-host (load avg ~1.8–4.3) `queue-add-bulk` reproduces 3.47× BullMQ; `worker-concurrent` reproduces 2.45× under host contention. Quiet-host canonical Phase 2 final stays at 3.22× / 8.78× and is the upper bound the marketing copy points at. Engine ceiling unchanged across the slice; the contended-host floor is what users will see on a busy laptop.
 
+## Post-1.0 polish
+
+- **Public surface aligned across both shims (2026-05-08, partial breaking).** Final shape: `Queue` / `Worker` / `Job` (the ergonomic high-level path) plus `Producer` / `Consumer` / `Scheduler` (engine handles for power users). All six are exported from the package root on both shims. The native PyO3 wire-format pyclass is now `chasquimq._native._Job` — underscore-prefixed, internal-only, not part of any public surface (`Job` → `_Job` rename is the breaking part on the Python side). On the Node side, the `NativeJob` re-export was dropped: there is one user-facing `Job` on each shim. The raw `Consumer.run(handler)` path keeps working for backward compat but is undocumented; users should use `Worker`. Landed across three commits: a `Job` consolidation, a (later-reversed) surface minimization, and the final restoration of top-level engine-handle exports.
+
 ## Deferred follow-ups for 1.x
 
 - **Opt-in result-write bench scenario.** The PR #75 bench guard locked in the no-overhead-when-off claim (`store_results=false` regresses 0%). The opt-in path (`store_results=true` under sustained load) is not yet measured.

@@ -8,8 +8,8 @@ no-op Python coroutine. Exercises the full FFI dispatch path:
     asyncio resolution -> tokio task -> XACKDEL pipeline.
 
 The producer side runs first and to completion: jobs are pre-loaded into
-the stream via the native ``_native.Producer.add_bulk`` (the same Rust
-producer the bench harness uses, just driven from Python). Then a single
+the stream via the native ``Producer.add_bulk`` (the same Rust producer
+the bench harness uses, just driven from Python). Then a single
 ``Worker`` drains the stream while the bench measures handler-side
 throughput. Producer noise stays out of the consumer window.
 
@@ -40,8 +40,7 @@ import uuid
 
 import msgpack
 
-from chasquimq import Worker
-from chasquimq import _native
+from chasquimq import Producer, Worker
 
 
 def parse_args() -> argparse.Namespace:
@@ -99,7 +98,7 @@ async def preload(redis_url: str, queue_name: str, total: int, payload: bytes) -
     chasquimq-bench preload path. Producer pool size 8 to keep the
     XADD pipeline saturated.
     """
-    producer = _native.Producer(
+    producer = Producer(
         redis_url,
         queue_name,
         pool_size=8,

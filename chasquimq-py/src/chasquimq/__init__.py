@@ -1,15 +1,12 @@
 """ChasquiMQ — the fastest open-source message broker for Redis.
 
-The public surface is asyncio-first: import :class:`Queue` to enqueue
-jobs, :class:`Worker` to process them, and :class:`QueueEvents` to
-subscribe to lifecycle transitions. Power users can also reach the
-native engine handles directly — :class:`Producer`, :class:`Consumer`,
-and :class:`Scheduler` are re-exported here from the underlying
-``chasquimq._native`` PyO3 extension. The native ``Job`` value type
-collides with the high-level :class:`Job` dataclass; the high-level
-projection wins the unqualified name on this module. If you need the
-native one, import it explicitly via
-``from chasquimq._native import Job as NativeJob``.
+High-level asyncio surface: :class:`Queue`, :class:`Worker`,
+:class:`Job`, :class:`QueueEvents`. Power-user engine handles re-exported
+from the package root: :class:`Producer`, :class:`Consumer`,
+:class:`Scheduler`. There is exactly one user-facing :class:`Job` (the
+high-level dataclass); the internal wire-format pyclass at
+:class:`chasquimq._native._Job` is intentionally underscore-prefixed
+and not part of any public surface.
 """
 
 import logging as _logging
