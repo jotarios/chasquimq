@@ -148,9 +148,94 @@
 }
 
 /* ---------- Quickstart tabs section ---------- */
-.chasqui-quickstart .starlight-tabs {
-  /* Starlight already styles tabs; nothing to add here beyond rhythm. */
+
+/* Override Starlight's default tab strip with a segmented-control affordance
+ * scoped to the landing's "Pick your language" section. Three tabs in fixed
+ * order: Node.js, Python, Rust. Brand marks are inlined via CSS mask-image so
+ * the icon takes currentColor and stays monochrome under both themes.
+ *
+ * Source SVGs: simple-icons (CC0). Reduced to single-path mask data. */
+.chasqui-quickstart starlight-tabs {
   margin-top: 0.5rem;
+}
+.chasqui-quickstart starlight-tabs .tablist-wrapper {
+  border-bottom: 0;
+  margin-bottom: 1rem;
+  display: flex;
+}
+.chasqui-quickstart starlight-tabs ul[role="tablist"] {
+  display: inline-flex;
+  border: 1px solid var(--sl-color-hairline);
+  border-radius: 6px;
+  background: var(--sl-color-bg-sidebar);
+  padding: 3px;
+  gap: 2px;
+  margin: 0;
+  list-style: none;
+}
+.chasqui-quickstart starlight-tabs li.tab {
+  margin: 0;
+  border-bottom: 0;
+  padding: 0;
+}
+.chasqui-quickstart starlight-tabs a[role="tab"] {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  font-family: var(--sl-font);
+  font-size: 0.875rem;
+  font-weight: 500;
+  line-height: 1.2;
+  color: var(--sl-color-gray-2);
+  border: 0;
+  border-radius: 4px;
+  text-decoration: none;
+  transition: background 100ms ease-out, color 100ms ease-out, box-shadow 100ms ease-out;
+}
+.chasqui-quickstart starlight-tabs a[role="tab"]:hover {
+  color: var(--sl-color-text);
+}
+.chasqui-quickstart starlight-tabs a[role="tab"][aria-selected="true"] {
+  background: var(--sl-color-bg);
+  color: var(--sl-color-text);
+  box-shadow: 0 0 0 1px var(--sl-color-hairline-light), 0 1px 2px rgba(10, 37, 64, 0.06);
+}
+[data-theme="dark"] .chasqui-quickstart starlight-tabs a[role="tab"][aria-selected="true"] {
+  box-shadow: 0 0 0 1px var(--sl-color-hairline-light), 0 1px 2px rgba(0, 0, 0, 0.4);
+}
+.chasqui-quickstart starlight-tabs a[role="tab"]:focus-visible {
+  outline: 2px solid var(--sl-color-accent);
+  outline-offset: 2px;
+}
+
+/* Brand mark via mask-image. currentColor is the icon color. */
+.chasqui-quickstart starlight-tabs a[role="tab"]::before {
+  content: "";
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  flex: none;
+  background-color: currentColor;
+  -webkit-mask-repeat: no-repeat;
+          mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+          mask-position: center;
+  -webkit-mask-size: contain;
+          mask-size: contain;
+}
+/* Brand marks: simple-icons.org SVGs in /public/icons/. CC0-licensed. */
+.chasqui-quickstart starlight-tabs li.tab:nth-child(1) a[role="tab"]::before {
+  -webkit-mask-image: url("/icons/nodejs.svg");
+          mask-image: url("/icons/nodejs.svg");
+}
+.chasqui-quickstart starlight-tabs li.tab:nth-child(2) a[role="tab"]::before {
+  -webkit-mask-image: url("/icons/python.svg");
+          mask-image: url("/icons/python.svg");
+}
+.chasqui-quickstart starlight-tabs li.tab:nth-child(3) a[role="tab"]::before {
+  -webkit-mask-image: url("/icons/rust.svg");
+          mask-image: url("/icons/rust.svg");
 }
 .chasqui-quickstart__hint {
   font-size: 0.875rem;

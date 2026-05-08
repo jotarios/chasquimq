@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ChasquiMQ — quickstart tabs proposals</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.bunny.net">
+<link href="https://fonts.bunny.net/css?family=geist:400,500,600|geist-mono:400,500|instrument-serif:400" rel="stylesheet">
+<style>
+:root {
+  /* Light tokens (from site/design/DESIGN.md) */
+  --bg: #FFFFFF;
+  --surface: #F7F8FA;
+  --surface-2: #EEF1F5;
+  --border: #DDE3EB;
+  --border-strong: #B6C2D1;
+  --text: #0A2540;
+  --text-muted: #4A5A6E;
+  --text-subtle: #6B7A8F;
+  --accent: #0066FF;
+  --accent-hover: #0052CC;
+  --accent-soft: rgba(0, 102, 255, 0.08);
+  --code-bg: #0A2540;
+  --code-text: #E6EEF8;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-none: 0;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --font-sans: "Geist", system-ui, -apple-system, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, "SF Mono", monospace;
+  --font-serif: "Instrument Serif", Georgia, serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #07101C;
+    --surface: #0E1B2C;
+    --surface-2: #16263A;
+    --border: #1F3247;
+    --border-strong: #2E4865;
+    --text: #E6EEF8;
+    --text-muted: #94A6BC;
+    --text-subtle: #6B7A8F;
+    --accent: #58B8FF;
+    --accent-hover: #7CC7FF;
+    --accent-soft: rgba(88, 184, 255, 0.12);
+    --code-bg: #050B14;
+    --code-text: #E6EEF8;
+  }
+}
+* { box-sizing: border-box; }
+html { font-feature-settings: "ss01", "cv11"; }
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: 16px;
+  line-height: 1.55;
+  color: var(--text);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+}
+main { max-width: 920px; margin: 0 auto; padding: 48px 24px 96px; }
+h1 { font-family: var(--font-serif); font-size: 38px; font-weight: 400; margin: 0 0 8px; letter-spacing: -0.01em; }
+h1 + p { color: var(--text-muted); margin: 0 0 32px; }
+h2 { font-size: 13px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-subtle); margin: 48px 0 16px; }
+h3 { font-size: 22px; font-weight: 600; margin: 0 0 4px; letter-spacing: -0.01em; }
+.proposal-meta { color: var(--text-muted); font-size: 14px; margin: 0 0 20px; }
+.proposal-meta b { color: var(--text); font-weight: 500; }
+.demo {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  padding: 24px;
+  margin-bottom: 12px;
+}
+.code-preview {
+  background: var(--code-bg);
+  color: var(--code-text);
+  padding: 16px 20px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  border-radius: var(--radius-md);
+  margin-top: 16px;
+  position: relative;
+}
+.code-preview::before {
+  content: "● ● ●";
+  position: absolute;
+  top: 6px;
+  left: 12px;
+  letter-spacing: 4px;
+  font-size: 8px;
+  color: rgba(230, 238, 248, 0.4);
+}
+.code-preview pre { margin: 12px 0 0; white-space: pre-wrap; }
+.tok-kw { color: #FF7B9C; }
+.tok-fn { color: #58B8FF; }
+.tok-str { color: #95DC9E; }
+.tok-cmt { color: #6B7A8F; }
+.notes {
+  font-size: 14px;
+  color: var(--text-muted);
+  margin: 0;
+  padding: 16px 20px;
+  background: var(--surface-2);
+  border-left: 3px solid var(--border-strong);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+.notes b { color: var(--text); font-weight: 500; }
+
+/* ============================================================
+   Variant 0 — current (for reference)
+   Mimics Starlight's default tab strip
+   ============================================================ */
+.v0-tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border); margin-bottom: 20px; }
+.v0-tab {
+  background: transparent;
+  border: 0;
+  padding: 8px 12px;
+  font-family: var(--font-sans);
+  font-size: 15px;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+.v0-tab[aria-selected="true"] { color: var(--text); font-weight: 600; border-bottom-color: var(--text); }
+
+/* ============================================================
+   Variant A — segmented control
+   Single bar, equal segments, accent fill on active
+   ============================================================ */
+.vA-segctrl {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  padding: 3px;
+  margin-bottom: 0;
+  gap: 2px;
+}
+.vA-seg {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  font-family: var(--font-sans);
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-muted);
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  border-radius: 3px;
+  transition: background 100ms ease-out, color 100ms ease-out;
+}
+.vA-seg:hover { color: var(--text); }
+.vA-seg[aria-selected="true"] {
+  background: var(--bg);
+  color: var(--text);
+  box-shadow: 0 0 0 1px var(--border-strong), 0 1px 2px rgba(10, 37, 64, 0.06);
+}
+.vA-seg svg { width: 14px; height: 14px; flex: none; }
+
+/* ============================================================
+   Variant B — pill row with monochrome icons + accent underline
+   ============================================================ */
+.vB-pills {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0;
+  margin-bottom: 20px;
+}
+.vB-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  font-family: var(--font-sans);
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-muted);
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  position: relative;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+}
+.vB-pill:hover { color: var(--text); background: var(--surface); }
+.vB-pill[aria-selected="true"] {
+  color: var(--text);
+  background: var(--surface);
+}
+.vB-pill[aria-selected="true"]::after {
+  content: "";
+  position: absolute;
+  left: 0; right: 0; bottom: -1px;
+  height: 2px;
+  background: var(--accent);
+}
+.vB-pill svg { width: 16px; height: 16px; flex: none; opacity: 0.85; }
+.vB-pill[aria-selected="true"] svg { opacity: 1; color: var(--accent); }
+
+/* ============================================================
+   Variant C — language cards with brand-mark color
+   Three discrete cards, brand color tinted left edge on active
+   ============================================================ */
+.vC-cards {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-bottom: 20px;
+}
+.vC-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 14px 16px;
+  font-family: var(--font-sans);
+  text-align: left;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: border-color 100ms ease-out, background 100ms ease-out;
+}
+.vC-card:hover { background: var(--surface-2); }
+.vC-card[aria-selected="true"] {
+  background: var(--bg);
+  border-color: var(--border-strong);
+}
+.vC-card[data-lang="node"][aria-selected="true"] { border-left-color: #5FA04E; }
+.vC-card[data-lang="python"][aria-selected="true"] { border-left-color: #3776AB; }
+.vC-card[data-lang="rust"][aria-selected="true"] { border-left-color: #CE422B; }
+.vC-card .vC-icon { width: 18px; height: 18px; }
+.vC-card[data-lang="node"] .vC-icon { color: #5FA04E; }
+.vC-card[data-lang="python"] .vC-icon { color: #3776AB; }
+.vC-card[data-lang="rust"] .vC-icon { color: #CE422B; }
+.vC-card[aria-selected="false"] .vC-icon { color: var(--text-subtle); }
+.vC-name { font-size: 14px; font-weight: 600; color: var(--text); }
+.vC-meta { font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); letter-spacing: 0.02em; }
+
+@media (max-width: 640px) {
+  .vC-cards { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+<main>
+
+<h1>Quickstart tab proposals</h1>
+<p>Three redesigns of the <code>Pick your language</code> tab strip on the ChasquiMQ landing page. Same tokens, same anti-patterns avoided. Each shown above the same code-preview block so you can read the affordance in context.</p>
+
+<!-- ============================================================ -->
+<h2>Current (for comparison)</h2>
+<h3>Plain text strip with bold-active</h3>
+<p class="proposal-meta">What's there today. <b>Reads as a label row.</b> No visual signal that the words are switchable.</p>
+<div class="demo">
+  <div class="v0-tabs" role="tablist">
+    <button class="v0-tab" role="tab">Node.js</button>
+    <button class="v0-tab" role="tab">Python</button>
+    <button class="v0-tab" role="tab" aria-selected="true">Rust</button>
+  </div>
+  <div class="code-preview"><pre><span class="tok-kw">use</span> chasquimq::{Producer, Consumer};
+<span class="tok-cmt">// requires Rust 1.85+</span>
+<span class="tok-kw">let</span> id = producer.<span class="tok-fn">add</span>(EmailJob { to: <span class="tok-str">"ada@example.com"</span>.into() }).<span class="tok-fn">await</span>?;</pre></div>
+</div>
+
+<!-- ============================================================ -->
+<h2>Proposal A — Segmented control <span style="color:var(--accent);font-weight:500">(recommended)</span></h2>
+<h3>Linear / Tailwind / Apple-system feel</h3>
+<p class="proposal-meta">Single bordered bar, three equal segments, the active segment lifts onto the page surface with a subtle shadow. <b>Unmistakably a switcher</b> at a glance, even with no icons. Icons add a tiny brand cue without going full-color.</p>
+<div class="demo">
+  <div class="vA-segctrl" role="tablist">
+    <button class="vA-seg" role="tab">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1.5l5.5 3.18v6.65L8 14.5l-5.5-3.17V4.68L8 1.5z"/><path d="M5.6 6.5h.9c.55 0 1 .45 1 1v.5c0 .55-.45 1-1 1H5.6"/><path d="M9.5 6.5h1c.55 0 1 .45 1 1v.5"/></svg>
+      Node.js
+    </button>
+    <button class="vA-seg" role="tab">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1.5c-2 0-3 .8-3 2v2h3"/><path d="M3 5.5c-1.4 0-2 1-2 2.5s.6 2.5 2 2.5h2"/><path d="M8 14.5c2 0 3-.8 3-2v-2H8"/><path d="M13 10.5c1.4 0 2-1 2-2.5S14.4 5.5 13 5.5h-2"/><circle cx="6.5" cy="3" r=".5" fill="currentColor"/><circle cx="9.5" cy="13" r=".5" fill="currentColor"/></svg>
+      Python
+    </button>
+    <button class="vA-seg" role="tab" aria-selected="true">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M8 2v1.5M8 12.5V14M2 8h1.5M12.5 8H14M3.76 3.76l1.06 1.06M11.18 11.18l1.06 1.06M3.76 12.24l1.06-1.06M11.18 4.82l1.06-1.06"/><circle cx="8" cy="8" r="2"/></svg>
+      Rust
+    </button>
+  </div>
+  <div class="code-preview"><pre><span class="tok-kw">use</span> chasquimq::{Producer, Consumer};
+<span class="tok-cmt">// requires Rust 1.85+</span>
+<span class="tok-kw">let</span> id = producer.<span class="tok-fn">add</span>(EmailJob { to: <span class="tok-str">"ada@example.com"</span>.into() }).<span class="tok-fn">await</span>?;</pre></div>
+</div>
+<div class="notes"><b>Why this one.</b> Strongest "I am a switcher" signal of the three with the least visual noise. The frame around the whole control reads as a control. Sub-millisecond render, AA contrast on both themes, monochrome-friendly, doesn't drag in anyone's brand colors as decoration. Same affordance Linear, Tailwind, Vercel, GitHub use.</div>
+
+<!-- ============================================================ -->
+<h2>Proposal B — Underline tabs with monochrome icons</h2>
+<h3>Closest to current, just legible</h3>
+<p class="proposal-meta">Standard tab pattern: hover gives a surface fill, active gets the accent underline. Adds a small monochrome glyph next to each label. <b>Lowest-risk change</b>, but the affordance still leans on the underline alone.</p>
+<div class="demo">
+  <div class="vB-pills" role="tablist">
+    <button class="vB-pill" role="tab">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1.5l5.5 3.18v6.65L8 14.5l-5.5-3.17V4.68L8 1.5z"/><path d="M5.6 6.5h.9c.55 0 1 .45 1 1v.5c0 .55-.45 1-1 1H5.6"/><path d="M9.5 6.5h1c.55 0 1 .45 1 1v.5"/></svg>
+      Node.js
+    </button>
+    <button class="vB-pill" role="tab">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1.5c-2 0-3 .8-3 2v2h3"/><path d="M3 5.5c-1.4 0-2 1-2 2.5s.6 2.5 2 2.5h2"/><path d="M8 14.5c2 0 3-.8 3-2v-2H8"/><path d="M13 10.5c1.4 0 2-1 2-2.5S14.4 5.5 13 5.5h-2"/></svg>
+      Python
+    </button>
+    <button class="vB-pill" role="tab" aria-selected="true">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M8 2v1.5M8 12.5V14M2 8h1.5M12.5 8H14"/><circle cx="8" cy="8" r="2"/></svg>
+      Rust
+    </button>
+  </div>
+  <div class="code-preview"><pre><span class="tok-kw">use</span> chasquimq::{Producer, Consumer};
+<span class="tok-cmt">// requires Rust 1.85+</span>
+<span class="tok-kw">let</span> id = producer.<span class="tok-fn">add</span>(EmailJob { to: <span class="tok-str">"ada@example.com"</span>.into() }).<span class="tok-fn">await</span>?;</pre></div>
+</div>
+<div class="notes"><b>Use this if</b> you want minimal visual change from current. Cheapest CSS diff, but the icons + accent underline + hover-surface together carry the affordance load. Still less obvious than a frame.</div>
+
+<!-- ============================================================ -->
+<h2>Proposal C — Language cards with brand-tinted edge</h2>
+<h3>Bold, brand-aware, slightly more SaaS</h3>
+<p class="proposal-meta">Three discrete cards, one per language, with the official brand color appearing only on the left edge of the active card. Largest target. <b>Most attention-grabbing</b>; closest to crossing into "marketing landing" territory.</p>
+<div class="demo">
+  <div class="vC-cards" role="tablist">
+    <button class="vC-card" role="tab" data-lang="node">
+      <svg class="vC-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1.5l5.5 3.18v6.65L8 14.5l-5.5-3.17V4.68L8 1.5z"/><path d="M5.6 6.5h.9c.55 0 1 .45 1 1v.5c0 .55-.45 1-1 1H5.6"/><path d="M9.5 6.5h1c.55 0 1 .45 1 1v.5"/></svg>
+      <div class="vC-name">Node.js</div>
+      <div class="vC-meta">requires 18+</div>
+    </button>
+    <button class="vC-card" role="tab" data-lang="python">
+      <svg class="vC-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1.5c-2 0-3 .8-3 2v2h3"/><path d="M3 5.5c-1.4 0-2 1-2 2.5s.6 2.5 2 2.5h2"/><path d="M8 14.5c2 0 3-.8 3-2v-2H8"/><path d="M13 10.5c1.4 0 2-1 2-2.5S14.4 5.5 13 5.5h-2"/></svg>
+      <div class="vC-name">Python</div>
+      <div class="vC-meta">requires 3.9+</div>
+    </button>
+    <button class="vC-card" role="tab" data-lang="rust" aria-selected="true">
+      <svg class="vC-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M8 2v1.5M8 12.5V14M2 8h1.5M12.5 8H14"/><circle cx="8" cy="8" r="2"/></svg>
+      <div class="vC-name">Rust</div>
+      <div class="vC-meta">requires 1.85+</div>
+    </button>
+  </div>
+  <div class="code-preview"><pre><span class="tok-kw">use</span> chasquimq::{Producer, Consumer};
+<span class="tok-cmt">// requires Rust 1.85+</span>
+<span class="tok-kw">let</span> id = producer.<span class="tok-fn">add</span>(EmailJob { to: <span class="tok-str">"ada@example.com"</span>.into() }).<span class="tok-fn">await</span>?;</pre></div>
+</div>
+<div class="notes"><b>Use this if</b> you want the strongest "pick your stack" moment and you're OK letting in three external brand colors as accents. Trades some of the monochrome restraint for instant recognition. Good for first-time visitors; a bit louder than the rest of the page on repeat visits. The brand color is a thin 3px edge only — not a fill — to keep noise down.</div>
+
+<!-- ============================================================ -->
+<h2>Recommendation</h2>
+<div class="notes" style="border-left-color: var(--accent);"><b>Ship A.</b> The frame is the affordance. Adding icons is fine but optional; the segmented control reads as a switcher even without them. Lowest noise, fits the brutalist-restrained / systems-tool direction in DESIGN.md, AA on both themes, and matches what a senior backend engineer expects from a docs site they'd take seriously. C is a fine fallback if you decide later that the landing should feel more "stack-picker" and less "config panel."</div>
+
+</main>
+</body>
+</html>
