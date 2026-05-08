@@ -1,6 +1,6 @@
 {
   "name": "chasquimq",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "The fastest open-source message broker for Redis.",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
