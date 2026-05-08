@@ -11,18 +11,26 @@ You've got jobs flowing. Now learn the operator surface — the CLI you'll reach
 
 The CLI ships as a separate Rust binary so you don't drag operator tooling into your application bindings. Pick whichever path fits your environment:
 
-**Prebuilt binary (recommended).** One-liner installer covers macOS (Apple Silicon + Intel), Linux (x86_64 + aarch64), and Windows:
+**With `cargo binstall` (recommended if you have Rust):**
+
+```bash
+cargo binstall chasquimq-cli
+```
+
+This pulls the prebuilt tarball from [GitHub Releases](https://github.com/jotarios/chasquimq/releases) (no source compile, ~3 seconds) and drops `chasqui` into `~/.cargo/bin`. If you don't have `cargo binstall`, install it once with `cargo install cargo-binstall`.
+
+**Without Rust (one-liner installer):**
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jotarios/chasquimq/releases/latest/download/chasquimq-cli-installer.sh | sh
 ```
 
-Or download a platform-specific tarball from the [Releases page](https://github.com/jotarios/chasquimq/releases) and extract `chasqui` somewhere on your `$PATH`.
+Covers macOS (Apple Silicon + Intel), Linux (x86_64 + aarch64), and Windows. Or download a platform-specific tarball from the [Releases page](https://github.com/jotarios/chasquimq/releases) and extract `chasqui` somewhere on your `$PATH`.
 
-**From source** (you have Rust 1.85+ already):
+**From source** (Rust 1.85+):
 
 ```bash
-cargo install --git https://github.com/jotarios/chasquimq chasquimq-cli
+cargo install chasquimq-cli
 ```
 
 Verify:

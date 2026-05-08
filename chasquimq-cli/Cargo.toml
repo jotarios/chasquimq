@@ -5,17 +5,33 @@ version = "1.1.0"
 authors = ["Jorge Rios <j29.rios@gmail.com>"]
 keywords = ["redis", "queue", "cli", "dashboard", "chasqui"]
 categories = ["command-line-utilities"]
-publish = false  # ships via cargo-dist (GitHub Releases) — `cargo install --git ...` for source builds.
+publish = true  # discoverable on crates.io; binaries ship via cargo-dist on GH Releases — see [package.metadata.binstall] below.
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
-# cargo-dist override: include this crate in the release manifest even
-# though publish = false hides it from crates.io. The CLI binary ships
-# via cargo-dist + GitHub Releases on `git tag v*`.
+# cargo-dist: include this crate in the multi-platform binary release.
+# Binaries are built and uploaded to a GitHub Release on `git tag chasquimq-cli-v*`.
 [package.metadata.dist]
 dist = true
+
+# cargo-binstall: lets users run `cargo binstall chasquimq-cli` and pull the
+# prebuilt cargo-dist tarball from GitHub Releases instead of compiling from
+# source. Layout matches what cargo-dist emits to the v{version} GitHub
+# release today (tag form is bare `v{version}`, not `chasquimq-cli-v{version}`):
+#   pkg-url → {repo}/releases/download/v{version}/chasquimq-cli-{target}.tar.xz (or .zip on Windows)
+#   archive → chasquimq-cli-{target}/chasqui[.exe]
+# We hardcode `.tar.xz` rather than use `{ archive-suffix }` because binstall's
+# `txz` format renders the suffix as `.txz`, but cargo-dist emits `.tar.xz`.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }.tar.xz"
+bin-dir = "{ name }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "txz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }.zip"
+pkg-fmt = "zip"
 
 [[bin]]
 name = "chasqui"
