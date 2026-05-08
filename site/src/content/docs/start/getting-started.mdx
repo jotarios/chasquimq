@@ -91,7 +91,7 @@ const queue = new Queue("emails", { connection });
 const worker = new Worker(
   "emails",
   async (job) => {
-    console.log(`processing ${job.name}: ${JSON.stringify(job.data)}`);
+    console.log(`[worker] sending email to ${job.data.to}`);
     return { delivered: true };
   },
   { connection },
@@ -103,13 +103,16 @@ await queue.add("welcome", { to: "ada@example.com" });
 await new Promise((r) => setTimeout(r, 1000));
 await worker.close();
 await queue.close();
+
+console.log("🎉 your first ChasquiMQ job ran end-to-end");
 ```
 
 Run it:
 
 ```bash
 npx tsx hello.ts
-# processing welcome: {"to":"ada@example.com"}
+# [worker] sending email to ada@example.com
+# 🎉 your first ChasquiMQ job ran end-to-end
 ```
 
 </TabItem>
@@ -121,7 +124,7 @@ import asyncio
 from chasquimq import Queue, Worker
 
 async def handler(job):
-    print(f"processing {job.name}: {job.data}")
+    print(f"[worker] sending email to {job.data['to']}")
     return {"delivered": True}
 
 async def main() -> None:
@@ -135,6 +138,8 @@ async def main() -> None:
     await worker.close()
     await queue.close()
 
+    print("🎉 your first ChasquiMQ job ran end-to-end")
+
 asyncio.run(main())
 ```
 
@@ -142,7 +147,8 @@ Run it:
 
 ```bash
 python hello.py
-# processing welcome: {'to': 'ada@example.com'}
+# [worker] sending email to ada@example.com
+# 🎉 your first ChasquiMQ job ran end-to-end
 ```
 
 </TabItem>
@@ -183,9 +189,11 @@ async fn main() -> anyhow::Result<()> {
     });
 
     consumer.run(|job| async move {
-        println!("processing: {}", job.payload.to);
+        println!("[worker] sending email to {}", job.payload.to);
         Ok(bytes::Bytes::new())
     }, cancel).await?;
+
+    println!("🎉 your first ChasquiMQ job ran end-to-end");
 
     Ok(())
 }
@@ -194,7 +202,7 @@ async fn main() -> anyhow::Result<()> {
 </TabItem>
 </Tabs>
 
-You should see one line of output. That is your first job round-tripping through Redis Streams.
+Two lines of output: the worker handling the job, then the celebration. That is your first job round-tripping through Redis Streams.
 
 ## What just happened
 
