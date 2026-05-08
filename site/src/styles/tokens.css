@@ -1,0 +1,111 @@
+/* ChasquiMQ design tokens.
+ *
+ * Visual direction: monochrome-first, high-contrast, systems-tool feel.
+ * Primary navy is logo-derived. Accent is electric cyan, used sparingly for
+ * CTAs and links. No purple gradients, no bubbly radius, no centered-everything.
+ */
+
+/* ---------- Fonts (Bunny Fonts; privacy-respecting Google Fonts mirror) ---------- */
+@import url("https://fonts.bunny.net/css?family=geist:400,500,600,700|geist-mono:400,500,600|instrument-serif:400");
+
+:root {
+  --sl-font:
+    "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen,
+    Ubuntu, Cantarell, "Helvetica Neue", sans-serif;
+  --sl-font-mono:
+    "Geist Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+
+  /* Display face for hero/landing only — not body. */
+  --chasqui-font-display: "Instrument Serif", Georgia, "Times New Roman", serif;
+
+  /* Slightly tighter radius than Starlight default; systems-tool feel. */
+  --sl-content-pad-x: 1.5rem;
+}
+
+/* ---------- Dark theme (default) ---------- */
+:root[data-theme="dark"] {
+  /* Accent: electric cyan */
+  --sl-color-accent-low: #053842;
+  --sl-color-accent: #00b8d4;
+  --sl-color-accent-high: #7feaf6;
+
+  /* Surfaces: near-black, navy-tinted */
+  --sl-color-white: #f5f7fa;
+  --sl-color-gray-1: #e2e6ec;
+  --sl-color-gray-2: #b9c1cb;
+  --sl-color-gray-3: #7d8794;
+  --sl-color-gray-4: #4a5562;
+  --sl-color-gray-5: #2a313b;
+  --sl-color-gray-6: #1a1f27;
+  --sl-color-black: #0c1117;
+
+  --sl-color-bg: #0c1117;
+  --sl-color-bg-nav: #0a2540; /* logo navy */
+  --sl-color-bg-sidebar: #0e1822;
+  --sl-color-bg-inline-code: #1a1f27;
+
+  --sl-color-text: #e2e6ec;
+  --sl-color-text-accent: var(--sl-color-accent-high);
+  --sl-color-hairline: #1f2731;
+  --sl-color-hairline-light: #2a313b;
+  --sl-color-hairline-shade: #161b22;
+}
+
+/* ---------- Light theme ---------- */
+:root[data-theme="light"] {
+  --sl-color-accent-low: #d6f5fb;
+  --sl-color-accent: #00838f; /* darker cyan for contrast on white */
+  --sl-color-accent-high: #006770;
+
+  --sl-color-white: #0c1117;
+  --sl-color-gray-1: #1a1f27;
+  --sl-color-gray-2: #4a5562;
+  --sl-color-gray-3: #7d8794;
+  --sl-color-gray-4: #b9c1cb;
+  --sl-color-gray-5: #e2e6ec;
+  --sl-color-gray-6: #f0f3f7;
+  --sl-color-gray-7: #f7f9fb;
+  --sl-color-black: #ffffff;
+
+  --sl-color-bg: #ffffff;
+  --sl-color-bg-nav: #0a2540; /* navy header in light mode too — brand consistency */
+  --sl-color-bg-sidebar: #f7f9fb;
+  --sl-color-bg-inline-code: #f0f3f7;
+
+  --sl-color-text: #1a1f27;
+  --sl-color-text-accent: var(--sl-color-accent);
+  --sl-color-hairline: #e2e6ec;
+  --sl-color-hairline-light: #d6dbe2;
+  --sl-color-hairline-shade: #f0f3f7;
+}
+
+/* ---------- Header treatment: keep navy in both themes for brand consistency ---------- */
+header.header {
+  background-color: var(--sl-color-bg-nav);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+header.header a,
+header.header .site-title {
+  color: #f5f7fa;
+}
+
+/* Make the search box readable on the navy header. */
+header.header site-search button {
+  background-color: rgba(255, 255, 255, 0.06);
+  color: #b9c1cb;
+}
+
+/* ---------- Code blocks: tighter, monospace-forward ---------- */
+.expressive-code {
+  --ec-frm-edBg: var(--sl-color-bg-inline-code);
+  --ec-brdRad: 4px;
+}
+
+/* ---------- Display utility (use on hero only) ---------- */
+.chasqui-display {
+  font-family: var(--chasqui-font-display);
+  font-weight: 400;
+  letter-spacing: -0.01em;
+}
