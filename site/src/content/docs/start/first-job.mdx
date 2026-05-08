@@ -1,0 +1,160 @@
+---
+title: Your first job with retries
+description: Produce a typed job, simulate a failure, watch the retry, and short-circuit to the DLQ.
+sidebar:
+  order: 2
+---
+
+You've got a job round-tripping. Now make it fail, watch ChasquiMQ retry it, and learn how to short-circuit retries when the job is unsalvageable.
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+## What you'll build
+
+A queue that processes `welcome` emails. The handler fails on the first two attempts and succeeds on the third. Then a poison-pill payload triggers `UnrecoverableError` and goes straight to the DLQ.
+
+## 1. Set up retries on the worker
+
+Pass `attempts` and `backoff` either at queue level (default for every add) or per-job. We'll use per-job overrides here so the example is self-contained.
+
+<Tabs syncKey="binding">
+<TabItem label="Node">
+
+```ts
+import { Queue, Worker, UnrecoverableError } from "chasquimq";
+
+const connection = { host: "127.0.0.1", port: 6379 };
+const queue = new Queue("welcome", { connection });
+
+let calls = 0;
+
+const worker = new Worker(
+  "welcome",
+  async (job) => {
+    calls += 1;
+    console.log(`call #${calls} for job ${job.id} (attempt ${job.attemptsMade})`);
+
+    if (job.data.to === "poison@example.com") {
+      throw new UnrecoverableError("blocked address");
+    }
+    if (calls < 3) {
+      throw new Error("transient SMTP failure");
+    }
+    return { delivered: true };
+  },
+  { connection },
+);
+
+await queue.add(
+  "welcome",
+  { to: "ada@example.com" },
+  { attempts: 5, backoff: { type: "exponential", delay: 100 } },
+);
+
+await queue.add(
+  "welcome",
+  { to: "poison@example.com" },
+  { attempts: 5 },
+);
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+import asyncio
+from chasquimq import Queue, Worker, BackoffSpec, UnrecoverableError
+
+calls = 0
+
+async def handler(job):
+    global calls
+    calls += 1
+    print(f"call #{calls} for job {job.id} (attempt {job.attempt})")
+
+    if job.data["to"] == "poison@example.com":
+        raise UnrecoverableError("blocked address")
+    if calls < 3:
+        raise RuntimeError("transient SMTP failure")
+    return {"delivered": True}
+
+async def main():
+    queue = Queue("welcome")
+    worker = Worker("welcome", handler)
+    asyncio.create_task(worker.run())
+
+    await queue.add(
+        "welcome",
+        {"to": "ada@example.com"},
+        attempts=5,
+        backoff=BackoffSpec.exponential(initial_ms=100),
+    )
+    await queue.add(
+        "welcome",
+        {"to": "poison@example.com"},
+        attempts=5,
+    )
+
+    await asyncio.sleep(2.0)
+    await worker.close()
+    await queue.close()
+
+asyncio.run(main())
+```
+
+</TabItem>
+</Tabs>
+
+## 2. Run it
+
+You should see something like:
+
+```text
+call #1 for job 01HV... (attempt 1)
+call #2 for job 01HV... (attempt 2)
+call #3 for job 01HV... (attempt 3)
+call #4 for job 01HW... (attempt 1)
+```
+
+Three calls for the first job — two failures and a success. One call for the poison job — the `UnrecoverableError` skipped retries entirely. Job IDs are ULIDs (timestamp-prefixed, sortable).
+
+## 3. What ChasquiMQ did
+
+When your handler returned `Err` / threw / rejected:
+
+1. The worker re-encoded the job with `attempt += 1`.
+2. A single Lua script atomically `XACKDEL`'d the original stream entry and `ZADD`'d the new copy onto the delayed sorted set with a fire-time computed from the backoff.
+3. The promoter (embedded in the consumer) moved the entry back into the stream when its delay was up.
+4. Your handler ran again with `job.attemptsMade` (Node) / `job.attempt` (Python) incremented.
+
+When the poison job threw `UnrecoverableError`:
+
+- The engine bypassed the retry budget and routed the entry directly to the DLQ stream (`{chasqui:welcome}:dlq`) with `DlqReason::Unrecoverable`.
+
+## 4. Inspect the DLQ
+
+```bash
+chasqui dlq peek welcome
+```
+
+You'll see the poison job with its `reason: unrecoverable` and the original payload. To put the bug-fixed job back into the main stream:
+
+```bash
+chasqui dlq replay welcome --limit 50
+```
+
+Replayed jobs get a fresh retry budget — `attempt` resets to zero before the re-`XADD`.
+
+## Things to know
+
+- **Attempt count is 1-indexed.** The first delivery is attempt 1.
+- **`UnrecoverableError` is a name match.** Any error whose `name === "UnrecoverableError"` (Node) or whose class name is `UnrecoverableError` (Python) maps to `HandlerError::unrecoverable(...)` on the Rust side. Subclassing works.
+- **Panics also go to DLQ.** A handler that throws an uncaught exception does not retry — it routes to DLQ with `DlqReason::Panic`. Treat panics as code bugs, not transient failures.
+- **CLAIM is the safety net.** If a worker crashes mid-handler before the retry path runs, the engine's idle-pending claim path re-delivers the entry on the next read. You don't need to handle that case yourself.
+
+## Next steps
+
+- [Delayed and repeatable jobs](/start/delayed-and-repeatable/) — `addIn`, cron specs, `MissedFiresPolicy`.
+- [Configure retries](/guides/configure-retries/) — backoff types, jitter, queue-wide vs per-job.
+- [Route to DLQ](/guides/route-to-dlq/) — every `DlqReason` and when each fires.
+- For the underlying mechanics: [Retry and backoff](/concepts/retry-and-backoff/).

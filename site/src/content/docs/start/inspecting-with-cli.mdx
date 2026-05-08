@@ -1,0 +1,150 @@
+---
+title: Inspecting with the CLI
+description: Install the chasqui binary and use it to inspect, watch, peek the DLQ, and tail events.
+sidebar:
+  order: 4
+---
+
+You've got jobs flowing. Now learn the operator surface — the CLI you'll reach for when something looks off.
+
+## 1. Install `chasqui`
+
+The CLI ships as a separate Rust crate so you don't drag operator tooling into your application bindings.
+
+```bash
+cargo install chasquimq-cli
+```
+
+That puts a `chasqui` binary on your `$PATH`. If you don't have Rust, prebuilt binaries land on the [GitHub Releases page](https://github.com/jotarios/chasquimq/releases) under `chasquimq-cli-v*`.
+
+Verify:
+
+```bash
+chasqui --version
+```
+
+## 2. Inspect a queue
+
+`chasqui inspect` is a one-shot snapshot of every health metric for a queue. One Redis pipeline; six numbers out.
+
+```bash
+chasqui inspect emails
+```
+
+```text
+queue: emails
+stream depth     │       128
+pending          │         3
+dlq depth        │         0
+delayed depth    │        17
+oldest delayed   │   1.4s
+repeatable count │         2
+```
+
+Each row is one Redis call:
+
+| Field | Redis call |
+|---|---|
+| stream depth | `XLEN {chasqui:emails}` |
+| pending | `XPENDING {chasqui:emails} <group>` |
+| dlq depth | `XLEN {chasqui:emails}:dlq` |
+| delayed depth | `ZCARD {chasqui:emails}:delayed` |
+| oldest delayed | `ZRANGE {chasqui:emails}:delayed 0 0 WITHSCORES` |
+| repeatable count | `ZCARD {chasqui:emails}:repeat` |
+
+If the consumer group name isn't the engine default, pass `--group <name>`.
+
+## 3. Watch live
+
+`chasqui watch` re-runs the inspect snapshot every interval (default 1s) and renders a delta column for stream + DLQ depth.
+
+```bash
+chasqui watch emails --interval-ms 500
+```
+
+Press Ctrl+C to exit. The watch view does not use raw mode or an alternate screen — when you exit, the final snapshot stays in your scrollback.
+
+## 4. Peek the DLQ
+
+When a job exhausts its retry budget, panics, or throws `UnrecoverableError`, the engine relocates it to the DLQ stream (`{chasqui:emails}:dlq`).
+
+```bash
+chasqui dlq peek emails
+```
+
+```text
+queue: emails
+
+reason histogram
+  retries_exhausted        12
+  unrecoverable             2
+  decode_fail               0
+  malformed                 0
+  oversize                  0
+
+most recent
+  source_id            reason               name        attempt
+  1731072123-0         retries_exhausted    welcome     5
+  1731072098-0         unrecoverable        welcome     1
+  ...
+```
+
+Each entry includes the original payload so you can decode it and figure out what went wrong.
+
+## 5. Replay the DLQ
+
+Once you've fixed the bug:
+
+```bash
+chasqui dlq replay emails --limit 50
+```
+
+`replay_dlq` is atomic: each entry is removed from the DLQ stream and re-`XADD`'d to the main stream in one Lua script. The `attempt` counter resets to zero so the replayed job gets a full retry budget.
+
+See [Replay the DLQ](/guides/replay-the-dlq/) for idempotency caveats.
+
+## 6. Tail events
+
+The engine emits transition events (`waiting`, `active`, `completed`, `failed`, `retry-scheduled`, `delayed`, `dlq`, `drained`) onto a per-queue events stream. `chasqui events` tails it live.
+
+```bash
+chasqui events emails
+```
+
+```text
+2026-05-08T13:42:01Z  e=active        id=01HV...  n=welcome  attempt=1
+2026-05-08T13:42:01Z  e=completed     id=01HV...  n=welcome  duration_us=1842
+2026-05-08T13:42:02Z  e=active        id=01HW...  n=daily-rollup  attempt=1
+2026-05-08T13:42:02Z  e=failed        id=01HW...  n=daily-rollup  attempt=1
+2026-05-08T13:42:02Z  e=retry-scheduled  id=01HW...  n=daily-rollup  attempt=1  backoff_ms=200
+```
+
+Default `--from $` reads only new events. Pass `--from 0` to replay history.
+
+## 7. List repeatable specs
+
+```bash
+chasqui repeatable list emails
+```
+
+```text
+key                                       job-name        next-fire (UTC)
+welcome::cron:0 9 * * *:UTC               welcome         2026-05-09T09:00:00Z
+daily-rollup::cron:0 3 * * *:UTC          daily-rollup    2026-05-09T03:00:00Z
+```
+
+Remove a spec:
+
+```bash
+chasqui repeatable remove emails 'daily-rollup::cron:0 3 * * *:UTC'
+```
+
+## You've now got production-grade ops surface
+
+That's every CLI command. With `chasqui inspect`, `chasqui watch`, `chasqui dlq peek/replay`, `chasqui events`, and `chasqui repeatable list/remove` you have the same surface a Sidekiq Pro or Bull Board user has — one binary, no web server, talks straight to Redis.
+
+## Next steps
+
+- [Replay the DLQ](/guides/replay-the-dlq/) — when to replay versus drop.
+- [Observe the engine](/guides/observe-the-engine/) — `MetricsSink`, Prometheus, OTel.
+- For the architecture: [DLQ and recovery](/concepts/dlq-and-recovery/).

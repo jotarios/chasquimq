@@ -1,0 +1,197 @@
+---
+title: Getting started
+description: Install ChasquiMQ and run your first job in five minutes.
+sidebar:
+  order: 1
+---
+
+This is a five-minute walkthrough. By the end, you will have Redis running, a queue producing one job, and a worker consuming it.
+
+The path here uses the **Node** binding because it has the widest reach. Python and Rust quickstarts are inline below — pick whichever you ship in production.
+
+## Prerequisites
+
+- Docker, or Redis 8.6+ already on your machine.
+- One of: Node.js 18+, Python 3.9+, or Rust 1.85+ (2024 edition).
+
+## 1. Run Redis
+
+ChasquiMQ targets Redis 8.6+ for the modern Streams feature set (`XACKDEL`, idempotent `XADD`, idle-pending reads). Older Redis is not supported.
+
+```bash
+docker run -d --name chasquimq-redis -p 6379:6379 redis:8.6
+```
+
+Verify it answers:
+
+```bash
+docker exec chasquimq-redis redis-cli PING
+# PONG
+```
+
+## 2. Install one binding
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+<Tabs syncKey="binding">
+<TabItem label="Node">
+
+```bash
+npm install chasquimq
+```
+
+Prebuilt binaries ship for darwin / linux / win32 on arm64 + x64. There is no install-time compilation.
+
+</TabItem>
+<TabItem label="Python">
+
+```bash
+pip install chasquimq
+```
+
+`abi3` wheels ship for Python 3.9+ on Linux (x86_64 + aarch64), macOS (x86_64 + aarch64), and Windows (x86_64).
+
+</TabItem>
+<TabItem label="Rust">
+
+```bash
+cargo add chasquimq tokio --features tokio/macros,tokio/rt-multi-thread
+cargo add tokio-util bytes serde --features serde/derive
+```
+
+</TabItem>
+</Tabs>
+
+## 3. Produce one job, consume one job
+
+Save this as `hello.{js,py,rs}` and run it.
+
+<Tabs syncKey="binding">
+<TabItem label="Node">
+
+```ts
+// hello.ts
+import { Queue, Worker } from "chasquimq";
+
+const connection = { host: "127.0.0.1", port: 6379 };
+
+const queue = new Queue("emails", { connection });
+
+const worker = new Worker(
+  "emails",
+  async (job) => {
+    console.log(`processing ${job.name}: ${JSON.stringify(job.data)}`);
+    return { delivered: true };
+  },
+  { connection },
+);
+
+await queue.add("welcome", { to: "ada@example.com" });
+
+// Give the worker a second to drain, then close.
+await new Promise((r) => setTimeout(r, 1000));
+await worker.close();
+await queue.close();
+```
+
+Run it:
+
+```bash
+node --experimental-strip-types hello.ts
+# processing welcome: {"to":"ada@example.com"}
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+# hello.py
+import asyncio
+from chasquimq import Queue, Worker
+
+async def handler(job):
+    print(f"processing {job.name}: {job.data}")
+    return {"delivered": True}
+
+async def main() -> None:
+    queue = Queue("emails")
+    worker = Worker("emails", handler)
+
+    asyncio.create_task(worker.run())
+    await queue.add("welcome", {"to": "ada@example.com"})
+
+    await asyncio.sleep(1.0)
+    await worker.close()
+    await queue.close()
+
+asyncio.run(main())
+```
+
+Run it:
+
+```bash
+python hello.py
+# processing welcome: {'to': 'ada@example.com'}
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+// hello.rs
+use chasquimq::{Consumer, ConsumerConfig, Producer, ProducerConfig};
+use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
+
+#[derive(Serialize, Deserialize)]
+struct EmailJob {
+    to: String,
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let producer = Producer::<EmailJob>::connect(
+        "redis://127.0.0.1:6379",
+        ProducerConfig { queue_name: "emails".into(), ..Default::default() },
+    ).await?;
+
+    producer.add(EmailJob { to: "ada@example.com".into() }).await?;
+
+    let consumer = Consumer::<EmailJob>::new(
+        "redis://127.0.0.1:6379",
+        ConsumerConfig { queue_name: "emails".into(), concurrency: 8, ..Default::default() },
+    );
+
+    let cancel = CancellationToken::new();
+    let cancel_clone = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        cancel_clone.cancel();
+    });
+
+    consumer.run(|job| async move {
+        println!("processing: {}", job.payload.to);
+        Ok(bytes::Bytes::new())
+    }, cancel).await?;
+
+    Ok(())
+}
+```
+
+</TabItem>
+</Tabs>
+
+You should see one line of output. That is your first job round-tripping through Redis Streams.
+
+## What just happened
+
+- `Queue.add(name, data)` `XADD`s a MessagePack-encoded entry onto a Redis Stream named `{chasqui:emails}`.
+- The `Worker` reads the entry with `XREADGROUP`, deserializes the payload, runs your handler, and acks via `XACKDEL` (atomic ack-and-delete in one round trip).
+- No JSON. No `LPUSH`/`BRPOP`. No per-job round trips when you batch.
+
+## Next steps
+
+- [Your first job with retries](/start/first-job/) — handler errors, the retry path, and `UnrecoverableError`.
+- [Delayed and repeatable jobs](/start/delayed-and-repeatable/) — schedule a job for later or on a cron.
+- [Inspecting with the CLI](/start/inspecting-with-cli/) — `chasqui inspect`, `chasqui watch`, and the DLQ tools.
+- For mental model: [Thinking in ChasquiMQ](/concepts/thinking-in-chasquimq/).
