@@ -1,9 +1,9 @@
 """Integration tests for the native ``Consumer`` against a live Redis 8.6.
 
-These tests target the low-level ``Consumer.run(handler)`` API, which is an
-internal/undocumented path — end users should use the high-level ``Worker``.
-The wire-format job value-type is imported from ``chasquimq._native``
-explicitly to signal the intentional reach into internals.
+End users should reach for the high-level ``Worker``; ``Consumer.run`` is
+the raw FFI path these tests exercise. ``_Job`` is intentionally pulled
+from ``chasquimq._native`` because the wire-format type is not part of
+the public surface.
 
 Each test:
 1. Pushes a job onto the queue's stream by hand-encoding the engine's `Job<T>`
@@ -26,8 +26,7 @@ import msgpack
 import pytest
 import redis.asyncio as aioredis
 
-from chasquimq import UnrecoverableError
-from chasquimq import Consumer
+from chasquimq import Consumer, UnrecoverableError
 from chasquimq._native import _Job as _NativeJob
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")

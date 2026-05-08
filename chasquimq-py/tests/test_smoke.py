@@ -12,10 +12,6 @@ def test_version_is_non_empty_string() -> None:
 
 
 def test_minimal_public_surface() -> None:
-    """The top-level package exposes the engine handles and the
-    high-level surface, but the wire-format ``_Job`` pyclass stays
-    underscore-prefixed in ``chasquimq._native``.
-    """
     from chasquimq import _native
 
     assert "Producer" in chasquimq.__all__
@@ -25,10 +21,6 @@ def test_minimal_public_surface() -> None:
 
 
 def test_native_classes_reexported_from_top_level() -> None:
-    """``Producer`` / ``Consumer`` / ``Scheduler`` at the package root
-    are the same objects as their ``chasquimq._native`` counterparts —
-    the top-level names are re-exports, not re-implementations.
-    """
     from chasquimq import _native
 
     assert Producer is _native.Producer
@@ -37,11 +29,6 @@ def test_native_classes_reexported_from_top_level() -> None:
 
 
 def test_high_level_job_wins_unqualified_name() -> None:
-    """``chasquimq.Job`` is the high-level dataclass, not the wire-format type.
-
-    The internal ``_native._Job`` pyclass remains a separate object — pinning
-    that invariant here keeps the public-surface guarantee defensible.
-    """
     from chasquimq import _native
 
     assert Job is not _native._Job

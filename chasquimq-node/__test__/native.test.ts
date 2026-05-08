@@ -1,18 +1,10 @@
 import { describe, it, expect } from 'vitest'
 import { encode, decode } from '@msgpack/msgpack'
 
-// Native bindings are re-exported from the package root alongside the
-// high-level shim — one namespace, no subpath. The native `Job` value
-// type is internal-only and not re-exported from the package root
-// (mirrors the Python shim, where it lives in `chasquimq._native`);
-// these tests reach into the underlying napi binding directly. The
-// leading underscore signals the internal-test-only import. `Promoter`
-// is also not re-exported (symmetry with the Python shim, which has
-// no `Promoter` pyclass), so import it from the same place.
-import {
-  Producer,
-  Consumer,
-} from '../dist/index.js'
+// `Producer` / `Consumer` come from the public surface; the native `Job`
+// type and `Promoter` are not re-exported (see src-ts/index.ts) so these
+// tests reach into the underlying napi binding directly.
+import { Producer, Consumer } from '../dist/index.js'
 import { Promoter, type Job as _NativeJob } from '../index.js'
 
 const REDIS_URL = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379'

@@ -1,28 +1,12 @@
 """ChasquiMQ — the fastest open-source message broker for Redis.
 
-The ergonomic high-level path is asyncio-first: import :class:`Queue`
-to enqueue jobs, :class:`Worker` to process them, and :class:`Job` for
-the frozen dataclass returned by :meth:`Queue.add` and passed to your
-handler. :class:`QueueEvents` subscribes to lifecycle transitions.
-
-The engine-handle public surface is for power users who want raw FFI
-access without reaching into a private module: :class:`Producer`,
-:class:`Consumer`, and :class:`Scheduler` are re-exported from the
-package root (they also live at :mod:`chasquimq._native`).
-
-There is exactly one user-facing :class:`Job` — the high-level
-dataclass. The internal PyO3 wire-format pyclass is intentionally
-underscore-prefixed (:class:`chasquimq._native._Job`) and not part of
-any public surface.
-
-Errors: :class:`UnrecoverableError` (raise from a handler to bypass
-retries and route directly to DLQ) and :class:`NotSupportedError`.
-
-Builders: :class:`BackoffSpec`, :class:`MissedFiresPolicy`,
-:class:`RepeatPattern`, :class:`RepeatableMeta`, plus the
-:data:`Handler` type alias.
-
-Plus :func:`version` for introspection.
+High-level asyncio surface: :class:`Queue`, :class:`Worker`,
+:class:`Job`, :class:`QueueEvents`. Power-user engine handles re-exported
+from the package root: :class:`Producer`, :class:`Consumer`,
+:class:`Scheduler`. There is exactly one user-facing :class:`Job` (the
+high-level dataclass); the internal wire-format pyclass at
+:class:`chasquimq._native._Job` is intentionally underscore-prefixed
+and not part of any public surface.
 """
 
 import logging as _logging

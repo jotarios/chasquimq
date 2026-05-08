@@ -9,8 +9,6 @@ use chasquimq::Job as EngineJob;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
-/// Wire-format job value-type used internally by the high-level Worker. Not
-/// part of the public API.
 #[pyclass(module = "chasquimq._native", name = "_Job", frozen)]
 pub struct Job {
     id: String,
