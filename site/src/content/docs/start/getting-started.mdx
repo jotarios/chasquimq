@@ -94,13 +94,12 @@ const worker = new Worker(
     console.log(`[worker] sending email to ${job.data.to}`);
     return { delivered: true };
   },
-  { connection },
+  { connection, storeResults: true },
 );
 
-await queue.add("welcome", { to: "ada@example.com" });
+const job = await queue.add("welcome", { to: "ada@example.com" });
+await job.waitForResult({ timeoutMs: 30_000 });
 
-// Give the worker a second to drain, then close.
-await new Promise((r) => setTimeout(r, 1000));
 await worker.close();
 await queue.close();
 
@@ -129,12 +128,12 @@ async def handler(job):
 
 async def main() -> None:
     queue = Queue("emails")
-    worker = Worker("emails", handler)
-
+    worker = Worker("emails", handler, store_results=True)
     asyncio.create_task(worker.run())
-    await queue.add("welcome", {"to": "ada@example.com"})
 
-    await asyncio.sleep(1.0)
+    job = await queue.add("welcome", {"to": "ada@example.com"})
+    await job.wait_for_result(timeout=30.0)
+
     await worker.close()
     await queue.close()
 
@@ -202,7 +201,7 @@ async fn main() -> anyhow::Result<()> {
 </TabItem>
 </Tabs>
 
-Two lines of output: the worker handling the job, then the celebration. That is your first job round-tripping through Redis Streams.
+That is your first job round-tripping through Redis Streams.
 
 ## What just happened
 

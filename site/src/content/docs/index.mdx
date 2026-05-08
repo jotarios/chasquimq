@@ -146,17 +146,21 @@ async fn main() -> anyhow::Result<()> {
         ConsumerConfig { queue_name: "emails".into(), ..Default::default() },
     );
 
-    consumer.run(|job| async move {
-        println!("[worker] sending email to {}", job.payload.to);
-        println!("🎉 your first ChasquiMQ job ran end-to-end");
-        Ok(bytes::Bytes::new())
-    }, CancellationToken::new()).await?;
+    let cancel = CancellationToken::new();
+    let cancel_after_first = cancel.clone();
+    consumer.run(move |job| {
+        let cancel = cancel_after_first.clone();
+        async move {
+            println!("[worker] sending email to {}", job.payload.to);
+            cancel.cancel();
+            Ok(bytes::Bytes::new())
+        }
+    }, cancel).await?;
 
+    println!("🎉 your first ChasquiMQ job ran end-to-end");
     Ok(())
 }
 ```
-
-The consumer keeps running after the first job — Ctrl+C to stop it.
 
   </TabItem>
 </Tabs>
@@ -186,7 +190,7 @@ The consumer keeps running after the first job — Ctrl+C to stop it.
 {/* ---------- Diátaxis index ---------- */}
 <section class="chasqui-section" aria-labelledby="docs-title">
   <h2 id="docs-title" class="chasqui-section__opener">The docs, by intent</h2>
-  <p class="chasqui-section__lede">Four kinds of documentation, four jobs they do. Pick the one that matches what you came for &mdash; the <a href="https://diataxis.fr/">Diátaxis framework</a> in four cards.</p>
+  <p class="chasqui-section__lede">Four kinds of documentation, four jobs they do.</p>
   <DiataxisGrid />
 </section>
 
