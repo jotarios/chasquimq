@@ -90,11 +90,39 @@ hours of DNS propagation.
    apex and provisions a Universal SSL cert. Live within ~5 minutes of
    the zone going Active.
 
-5. **Add `www.chasquimq.io` as a redirect** (optional but recommended).
-   Same flow: *Custom domains* → *Set up* → `www.chasquimq.io`. Then in
-   *Rules* → *Redirect Rules* → add a 301 from
-   `(http.host eq "www.chasquimq.io")` to `https://chasquimq.io/$1`.
-   Keeps the canonical URL singular.
+5. **Add `www.chasquimq.io` as a 301 redirect to apex** (cosmetic but
+   recommended for clean SEO; the canonical `<link>` tag covers the
+   duplicate-content problem on its own, but a hard redirect is
+   cleaner).
+
+   First, attach the subdomain so CF provisions a cert:
+   - CF dashboard → *Workers & Pages* → `chasquimq` → *Custom domains*
+     → *Set up a custom domain* → `www.chasquimq.io`.
+   - Wait until SSL shows *Active* on that row (usually <2 minutes).
+
+   Then add the redirect rule. Open the **zone** for `chasquimq.io`
+   (CF dashboard left sidebar → *Domains* → `chasquimq.io` — note this
+   is the zone, NOT the Pages project):
+   - *Rules* → *Overview* → *Redirect Rules* → *Create rule*.
+   - Name it `www → apex`.
+   - **When incoming requests match**: select *Custom filter expression*.
+     - Field: `Hostname`, Operator: `equals`, Value: `www.chasquimq.io`.
+     - The expression box should read: `(http.host eq "www.chasquimq.io")`.
+   - **Then**: *Static URL redirect*.
+     - Type: *Static*.
+     - URL: `https://chasquimq.io${http.request.uri.path}` — keeps the
+       path on redirect (e.g., `www.../start/getting-started/` →
+       `chasquimq.io/start/getting-started/`).
+     - Wait — Static doesn't support dynamic substitution. Use
+       *Dynamic* instead, with expression
+       `concat("https://chasquimq.io", http.request.uri.path)`.
+     - Status code: `301`.
+     - Preserve query string: yes.
+   - *Deploy*.
+
+   Verify with `curl -sI https://www.chasquimq.io/start/getting-started/`
+   — should return `301` with
+   `location: https://chasquimq.io/start/getting-started/`.
 
 6. **Update the Astro site config** to use the production URL. After the
    domain is live, change `astro.config.mjs` `site:` from
