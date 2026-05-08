@@ -81,11 +81,7 @@ The native engine handles ship from the same top-level package:
 from chasquimq import Producer, Consumer, Scheduler
 ```
 
-The high-level `Job` dataclass owns the unqualified `Job` name; if you need the native value-type, import it explicitly:
-
-```python
-from chasquimq._native import Job as NativeJob
-```
+There is one user-facing `Job` — the high-level dataclass returned by `Queue.add` and passed to your `Worker` handler. The low-level `Consumer.run(handler)` path used to expose a separate value-type; it is no longer documented — use `Worker` instead.
 
 ## Build from source
 

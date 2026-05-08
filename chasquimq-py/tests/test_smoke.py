@@ -28,11 +28,14 @@ def test_native_classes_reexported_from_top_level() -> None:
 
 
 def test_high_level_job_wins_unqualified_name() -> None:
-    """Native ``Job`` does NOT shadow the high-level ``Job`` dataclass."""
+    """``chasquimq.Job`` is the high-level dataclass, not the wire-format type.
+
+    The internal ``_native.Job`` pyclass remains a separate object — pinning
+    that invariant here keeps the public-surface guarantee defensible.
+    """
     from chasquimq import _native
 
     assert Job is not _native.Job
-    # ``chasquimq.Job`` is the high-level frozen dataclass.
     instance = Job(id="abc", name="t", data=None, attempt=1, created_at_ms=0)
     assert instance.id == "abc"
 

@@ -94,6 +94,10 @@ Eleven PRs landed after the post-Phase-4 polish above; together they close the t
 
 **Same-host 1.0 re-bench (2026-05-07):** today's contended-host (load avg ~1.8–4.3) `queue-add-bulk` reproduces 3.47× BullMQ; `worker-concurrent` reproduces 2.45× under host contention. Quiet-host canonical Phase 2 final stays at 3.22× / 8.78× and is the upper bound the marketing copy points at. Engine ceiling unchanged across the slice; the contended-host floor is what users will see on a busy laptop.
 
+## Post-1.0 polish
+
+- **Python public surface: a single user-facing `Job` (2026-05-08).** A single user-facing `Job` (the high-level dataclass). The native PyO3 wire-format pyclass is now internal-only — no longer re-exported from the package, no longer documented. The raw `Consumer.run(handler)` path keeps working for backward compat but is undocumented; users should use `Worker`.
+
 ## Deferred follow-ups for 1.x
 
 - **Opt-in result-write bench scenario.** The PR #75 bench guard locked in the no-overhead-when-off claim (`store_results=false` regresses 0%). The opt-in path (`store_results=true` under sustained load) is not yet measured.
