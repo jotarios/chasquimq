@@ -103,10 +103,7 @@ enum RepeatableCommand {
         limit: u32,
     },
     /// Remove a repeatable spec by its resolved key.
-    Remove {
-        queue: String,
-        key: String,
-    },
+    Remove { queue: String, key: String },
 }
 
 #[tokio::main]
