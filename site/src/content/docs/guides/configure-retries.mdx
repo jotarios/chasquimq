@@ -1,0 +1,151 @@
+---
+title: Configure retries
+description: Set per-queue and per-job attempts and backoff, with fixed or exponential strategies.
+sidebar:
+  order: 1
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+ChasquiMQ retries any handler that returns an error or throws. You control the budget (`attempts`) and the spacing (`backoff`).
+
+Two layers:
+
+- **Queue-wide** — set on the consumer (`Worker`). Applies to every job in the queue unless overridden.
+- **Per-job** — set on `Queue.add(...)`. Wins over the queue-wide default for that one job.
+
+## Queue-wide defaults
+
+<Tabs syncKey="binding">
+<TabItem label="Node">
+
+```ts
+import { Queue, Worker } from "chasquimq";
+
+const connection = { host: "127.0.0.1", port: 6379 };
+
+const worker = new Worker(
+  "emails",
+  async (job) => {
+    // ...
+  },
+  {
+    connection,
+    maxStalledCount: 5, // → ConsumerOpts.maxAttempts; total attempt budget
+  },
+);
+```
+
+The Node shim maps `maxStalledCount` to the engine's `max_attempts`. The default is 3.
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+from chasquimq import Worker
+
+worker = Worker(
+    "emails",
+    handler,
+    max_attempts=5,
+)
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+use chasquimq::{ConsumerConfig, RetryConfig};
+
+let cfg = ConsumerConfig {
+    queue_name: "emails".into(),
+    max_attempts: 5,
+    retry: RetryConfig {
+        initial_backoff_ms: 100,
+        max_backoff_ms: 30_000,
+        multiplier: 2.0,
+        jitter_ms: 100,
+    },
+    ..Default::default()
+};
+```
+
+</TabItem>
+</Tabs>
+
+The default `RetryConfig` is `initial=100ms`, `multiplier=2`, `max=30s`, `jitter=±100ms`. Backoff math:
+
+```text
+delay(attempt) = min(initial * multiplier^(attempt-1), max) + uniform(-jitter, +jitter)
+```
+
+So attempt 1 → ~100ms, attempt 2 → ~200ms, attempt 3 → ~400ms, capped at `max_backoff_ms`.
+
+## Per-job overrides
+
+Pass `attempts` and `backoff` on `Queue.add` to override for one job.
+
+<Tabs syncKey="binding">
+<TabItem label="Node">
+
+```ts
+await queue.add(
+  "send",
+  { to: "ada@example.com" },
+  {
+    attempts: 10,
+    backoff: { type: "exponential", delay: 250, maxDelay: 60_000 },
+  },
+);
+
+// Fixed-delay shorthand: a plain number means fixed-ms.
+await queue.add("send", data, { attempts: 5, backoff: 500 });
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+from chasquimq import BackoffSpec
+
+await queue.add(
+    "send",
+    {"to": "ada@example.com"},
+    attempts=10,
+    backoff=BackoffSpec.exponential(initial_ms=250, max_ms=60_000),
+)
+
+# Or fixed:
+await queue.add(
+    "send",
+    {"to": "alice@example.com"},
+    attempts=5,
+    backoff=BackoffSpec.fixed(500),
+)
+```
+
+</TabItem>
+</Tabs>
+
+## Backoff types
+
+| Type | Delay formula | When to use |
+|---|---|---|
+| `fixed` | `delay_ms` (constant) | Polling external systems with strict rate limits |
+| `exponential` | `delay_ms * multiplier^(attempt-1)` capped at `max_delay_ms` | Most production cases — backs off quickly under sustained failure |
+
+Both honor `jitter_ms` if set. Jitter is symmetric: `+/- jitter_ms` uniform.
+
+## Where the override is encoded
+
+Per-job overrides ride on the encoded `Job<T>` envelope as two optional fields (`max_attempts`, `backoff`). The engine's worker hot path checks per-job first and falls back to the consumer's `RetryConfig`. The retry-relocator preserves both fields when re-encoding for the next attempt — overrides survive every retry.
+
+## Gotchas
+
+- **`attempts` is the total budget.** `attempts: 5` means at most 5 invocations: the first delivery plus 4 retries.
+- **The first attempt has no backoff.** Backoff only spaces *retries*, not the initial delivery.
+- **Exhausted jobs go to DLQ.** `attempts` exhausted → `DlqReason::RetriesExhausted`. See [Route to the DLQ](/guides/route-to-dlq/).
+- **`UnrecoverableError` skips the budget.** Throwing `UnrecoverableError` from a handler short-circuits retries entirely — straight to DLQ regardless of `attempts`.
+- **Repeatable specs do not thread per-fire overrides yet.** `attempts` and `backoff` on the upsert call are accepted for symmetry but ignored at the wire layer (the engine's repeatable path mints fresh ULIDs and uses queue-wide defaults). Tracked as a 1.x follow-up.
+
+For the underlying mechanics, see [Retry and backoff](/concepts/retry-and-backoff/).

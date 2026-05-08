@@ -1,0 +1,106 @@
+---
+title: Migrate from BullMQ
+description: Map BullMQ APIs to ChasquiMQ shim APIs. What's compat, what's intentionally different.
+sidebar:
+  order: 9
+---
+
+The Node shim is intentionally compat-shaped: `Queue` / `Worker` / `Job` / `QueueEvents` mirror BullMQ's public types. For the common path, swapping `import { Queue, Worker } from "bullmq"` to `import { Queue, Worker } from "chasquimq"` works.
+
+This guide is the honest map: what's compat, what's intentionally different, what's not supported.
+
+## Drop-in path (CORE)
+
+For 95% of BullMQ apps, the migration is a one-line import swap. These work the same:
+
+```ts
+import { Queue, Worker, QueueEvents, Job, UnrecoverableError } from "chasquimq";
+```
+
+| BullMQ API | ChasquiMQ shim | Notes |
+|---|---|---|
+| `new Queue(name, opts)` | `new Queue(name, opts)` | `connection: { host, port, password, username, db }` accepted |
+| `queue.add(name, data, opts)` | `queue.add(name, data, opts)` | Same shape |
+| `queue.addBulk(jobs)` | `queue.addBulk(jobs)` | Pipelines when no per-job overrides |
+| `new Worker(name, processor, opts)` | `new Worker(name, processor, opts)` | Inline async processor only |
+| `worker.on('completed' \| 'failed' \| 'active' \| 'error' \| 'ready' \| 'closing' \| 'closed', cb)` | Same | EventEmitter |
+| `new QueueEvents(name, opts)` | `new QueueEvents(name, opts)` | Backed by the engine's events stream |
+| `JobsOptions.delay` | Same | Milliseconds |
+| `JobsOptions.attempts` | Same | Per-job override |
+| `JobsOptions.backoff: { type, delay }` | Same | `'fixed'` or `'exponential'` |
+| `JobsOptions.jobId` | Same | Routes through idempotent path |
+| `JobsOptions.removeOnComplete` | Accepted (no-op) | `XACKDEL` already removes on ack |
+| `JobsOptions.removeOnFail` | Accepted (no-op) | DLQ relocate handles this |
+| `repeat: { pattern: cron }` / `{ every: ms }` | Same | DST-aware via IANA tz |
+| `UnrecoverableError` thrown from processor | Same | Routes to DLQ with `DlqReason::Unrecoverable` |
+| `Job.attemptsMade` / `Job.id` / `Job.name` / `Job.data` | Same | Read-only on the worker side |
+
+## Intentionally different
+
+These are different on purpose. The differences are documented in BullMQ's defaults vs. the engine's design.
+
+### Default concurrency
+
+- **BullMQ**: `concurrency: 1`.
+- **ChasquiMQ shim**: `concurrency: 100`.
+
+The shim follows the engine's default because the engine ships fast. Pass `concurrency: 1` explicitly if you want serial processing.
+
+### `removeOnComplete: false`
+
+- **BullMQ**: keeps completed entries in Redis as a job hash.
+- **ChasquiMQ**: `XACKDEL` always removes the stream entry on success. There is no per-job hash to keep around.
+
+If you relied on querying completed jobs, see [Result backends](/concepts/result-backends/) — store opt-in results with `storeResults: true` and read with `Queue.getJobResult(id)` instead.
+
+### `priority`
+
+- **BullMQ**: maintains a parallel priority sorted set; jobs pop highest-priority first.
+- **ChasquiMQ shim**: accepts `priority` for compat but **ignores** it with a one-time console warning. Streams are FIFO by construction.
+
+If priority is critical to your workload, you should stay on BullMQ for now.
+
+### `lifo`
+
+- **BullMQ**: pop from the head or tail of the queue.
+- **ChasquiMQ shim**: accepts for compat but **ignores** with a one-time warning. Streams are FIFO; LIFO would require a parallel data structure.
+
+### `keyPrefix`
+
+- **BullMQ**: `keyPrefix: "myapp:"` adjusts every Redis key.
+- **ChasquiMQ**: throws on construction. The engine uses `{chasqui:<queue>}` Redis Cluster hash tags — a user-supplied prefix would either break cluster routing or require a parallel key layout. Not negotiable in v1.
+
+### `connection` accepts an `ioredis` instance
+
+- **BullMQ**: pass an existing `ioredis` instance.
+- **ChasquiMQ shim**: throws (`NotSupportedError`). Pass a plain `RedisOptions` object instead. The engine uses its own pool.
+
+### Per-job custom backoff functions
+
+- **BullMQ**: `backoff: { type: 'custom', strategy: fn }`.
+- **ChasquiMQ shim**: throws (`NotSupportedError`). Per-job custom functions don't cross the FFI boundary cleanly. Use `'fixed'` or `'exponential'`.
+
+## Not supported
+
+These will throw `NotSupportedError` at runtime with a link to a tracking issue. The intent is to fail loudly rather than silently run broken code.
+
+- `FlowProducer` and `Queue.addFlow()` — DAG semantics are a fundamental rewrite, not a slice. Not on the roadmap.
+- `JobsOptions.parent` / `JobsOptions.dependencies` — children-of-flow APIs, meaningless without `FlowProducer`.
+- Sandboxed processors — `new Worker(name, '/path/to/processor.js')`. Pass an inline function.
+- Advanced repeat options — `repeat.limit`, `repeat.startDate`, `repeat.endDate`, `repeat.tz` are accepted; `repeat.immediately` is no-op.
+- BullMQ-style deduplication beyond `jobId` (`deduplication: { id, ttl }`). Use `jobId` (which routes through idempotent paths).
+- `Queue.pause()` / `Queue.resume()` / `Worker.pause()` / `Worker.resume()` — not implemented in v1. Close and re-create the worker instead.
+- `Queue.getJob` / `Queue.getJobs` / `Queue.getJobCounts` — the engine doesn't persist per-job state in a hash. Use `chasqui inspect` for queue-level stats and `QueueEvents` for per-job lifecycle.
+- `Job.update(data)` / `Job.retry()` / `Job.discard()` — Streams are append-only.
+- `Job.progress` persistence across processes — the in-process Worker tracks the last set value; cross-process reads return `0`.
+
+## Practical migration steps
+
+1. **Swap the import**.
+2. **Run your test suite**. Anything that throws `NotSupportedError` is a feature gap — decide whether to keep BullMQ for that surface or refactor.
+3. **Audit `priority` usage**. If you set it, check whether order actually matters to your handlers; FIFO is what you'll get.
+4. **Audit `keyPrefix` usage**. If you set it, you need to migrate to running multiple ChasquiMQ queues with distinct names instead.
+5. **Migrate completion-detection** if you read `Job.returnvalue` after enqueue — switch to `WorkerOptions.storeResults: true` plus `job.waitForResult({ timeoutMs })`.
+6. **Run `chasqui inspect <queue>`** to verify the queue is producing/consuming as expected.
+
+For the full API surface: see [Reference](/reference/).

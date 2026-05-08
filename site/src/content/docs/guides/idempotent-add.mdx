@@ -1,0 +1,119 @@
+---
+title: Idempotent add
+description: Use addUnique with a stable jobId to make producer retries safe.
+sidebar:
+  order: 6
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+The producer side is the easy place for an at-least-once system to fail. Network blips, retries, double-publish — and now your queue has two welcome emails for the same user.
+
+`addUnique(name, data, { jobId })` makes that case safe.
+
+## The shape
+
+<Tabs syncKey="binding">
+<TabItem label="Node">
+
+```ts
+await queue.addUnique(
+  "welcome",
+  { user: 42 },
+  { jobId: "welcome:user:42" },
+);
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+await queue.add_unique(
+    "welcome",
+    {"user": 42},
+    job_id="welcome:user:42",
+)
+```
+
+</TabItem>
+</Tabs>
+
+The contract: `addUnique` with the same `jobId` is a **no-op** when the engine has already accepted that id. The second call returns the same id; no second job is enqueued.
+
+## Two paths, two guarantees
+
+The strength of the dedup depends on whether the job is delayed.
+
+### Delayed path — strict, cross-process
+
+When `delay > 0`, the engine writes a Lua-gated `SET NX EX` dedup marker (`{chasqui:<queue>}:dlid:<job_id>`) before the `ZADD` to the delayed sorted set. The marker TTL is `delay + 1h grace`, so a producer-retry after a delayed promotion can't double-fire.
+
+Two different `Queue` instances calling `addUnique` with the same id will only schedule once. This is the strong guarantee.
+
+### Immediate path — strict per producer instance
+
+When `delay` is unset, the engine emits `XADD ... IDMP <producer_id> <job_id>` (Redis 8.6 idempotent producer). The IDMP scope is the producer id, which is fresh per `Queue` construction.
+
+What this gives you:
+
+- **Within one producer instance, immediate-path adds with the same `jobId` are deduped.** A retry after a network blip on the same `Queue` is safe.
+- **Across producer instances, no dedup.** A second process calling `addUnique("X", ...)` with the same id will publish a second entry.
+
+For cross-process, cross-restart strict dedup on the immediate path, give all callers the same `jobId` *and* use a small `delay` so the delayed-path SET-NX-EX guard kicks in.
+
+## When the immediate-path guarantee is enough
+
+For most producer-side retries — same caller, same instance, network failed mid-`add` — the immediate-path IDMP guarantee is exactly what you want. It handles the most common failure mode (network blip → retry from the same client) without paying the delayed-path cost.
+
+For safer-on-paper at the cost of `delay` ms of latency:
+
+<Tabs syncKey="binding">
+<TabItem label="Node">
+
+```ts
+await queue.addUnique("welcome", data, {
+  jobId: "welcome:user:42",
+  delay: 50, // 50ms — enables strict cross-process dedup
+});
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+await queue.add_unique(
+    "welcome",
+    data,
+    job_id="welcome:user:42",
+    delay_ms=50,  # 50ms — enables strict cross-process dedup
+)
+```
+
+</TabItem>
+</Tabs>
+
+50ms is below human perception. If your application can tolerate it, this is the safest pattern.
+
+## Choosing a `jobId`
+
+Make it deterministic from the dedup key.
+
+| Use case | `jobId` |
+|---|---|
+| One welcome email per user | `welcome:user:42` |
+| One nightly rollup per region | `rollup:eu-west:2026-05-08` |
+| One webhook delivery attempt per source event | `webhook:<source-event-id>` |
+
+Avoid:
+
+- ULIDs / UUIDs as `jobId`. Those are *unique by construction* — every call is a new id, dedup never fires.
+- Random strings. Same problem.
+
+## Gotchas
+
+- **`addUnique` requires `jobId`.** Calling without it throws synchronously. `add` (non-unique) accepts an optional `jobId` but doesn't enforce it.
+- **Whitespace-only `jobId` is rejected.** Empty or whitespace strings throw — surfacing the bug rather than silently aliasing every caller.
+- **Stream IDMP-MAXSIZE LRU.** Redis 8.6 `XADD IDMP` keeps an internal LRU of recent ids. High-cardinality `jobId` workloads may silently lose dedup for the oldest entries. The default cap is large enough that this rarely matters in practice; on hot paths, prefer the delayed-path guarantee.
+- **`Producer` mints a new UUID per construction.** Restarting the process resets the immediate-path IDMP scope. For cross-restart strict dedup, use a delay.
+
+For the underlying mechanics: [Delivery semantics](/concepts/delivery-semantics/).

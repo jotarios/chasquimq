@@ -1,0 +1,198 @@
+---
+title: Delayed and repeatable jobs
+description: Schedule a job for later, then turn it into a recurring cron spec.
+sidebar:
+  order: 3
+---
+
+You've got immediate jobs and retries working. Now schedule a job to run in the future, then upgrade it to a cron spec that fires every day at 09:00.
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+## 1. Add a delayed job
+
+Pass `delay` (milliseconds) on `Queue.add` and the job lands in a Redis sorted set instead of the stream. The promoter (embedded in your worker process) moves it into the stream when its run-at time arrives.
+
+<Tabs syncKey="binding">
+<TabItem label="Node">
+
+```ts
+import { Queue, Worker } from "chasquimq";
+
+const connection = { host: "127.0.0.1", port: 6379 };
+const queue = new Queue("reminders", { connection });
+
+new Worker("reminders", async (job) => {
+  console.log(`firing ${job.name} at ${new Date().toISOString()}`);
+}, { connection });
+
+// Fire 5 seconds from now.
+await queue.add("ping", { user: 42 }, { delay: 5_000 });
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+import asyncio
+from datetime import timedelta
+from chasquimq import Queue, Worker
+
+async def handler(job):
+    print(f"firing {job.name}: {job.data}")
+
+async def main():
+    queue = Queue("reminders")
+    worker = Worker("reminders", handler)
+    asyncio.create_task(worker.run())
+
+    # Either delay_ms (BullMQ-style ms int) or delay (timedelta).
+    await queue.add("ping", {"user": 42}, delay=timedelta(seconds=5))
+
+    await asyncio.sleep(7.0)
+    await worker.close()
+    await queue.close()
+
+asyncio.run(main())
+```
+
+</TabItem>
+</Tabs>
+
+Five seconds in: one log line. The job sat in `{chasqui:reminders}:delayed` until the promoter swept it into the stream.
+
+### How delayed scheduling works
+
+- `Queue.add(name, data, { delay: ms })` writes to `{chasqui:reminders}:delayed` (a sorted set scored by run-at-ms).
+- A promoter task — by default embedded in every worker, with `SET NX EX` leader election so only one fires per tick — runs `ZRANGEBYSCORE` for due entries and atomically promotes them into the main stream.
+- The first available worker reads the entry and runs your handler.
+
+`max_delay_secs` on the producer caps how far in the future a job may be scheduled (default 30 days). Set it to `0` to disable the cap.
+
+## 2. Turn it into a cron spec
+
+Repeatable jobs upsert a *spec* — the engine then mints a fresh ULID for each fire.
+
+<Tabs syncKey="binding">
+<TabItem label="Node">
+
+```ts
+await queue.add(
+  "daily-rollup",
+  { region: "eu-west" },
+  {
+    repeat: {
+      pattern: "0 9 * * *",
+      tz: "Europe/Madrid",
+    },
+  },
+);
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+from chasquimq import RepeatPattern
+
+await queue.upsert_repeatable_job(
+    "daily-rollup",
+    {"region": "eu-west"},
+    repeat=RepeatPattern.cron("0 9 * * *", tz="Europe/Madrid"),
+)
+```
+
+</TabItem>
+</Tabs>
+
+Cron timezones accept IANA names (`Europe/Madrid`, `America/New_York`) and are DST-aware: `0 2 * * *` fires at the local 02:00 wall-clock on both sides of spring-forward / fall-back.
+
+For fixed intervals instead of cron, use `every`:
+
+<Tabs syncKey="binding">
+<TabItem label="Node">
+
+```ts
+await queue.add("ping", { user: 42 }, { repeat: { every: 60_000 } });
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+await queue.upsert_repeatable_job(
+    "ping", {"user": 42}, repeat=RepeatPattern.every(60_000)
+)
+```
+
+</TabItem>
+</Tabs>
+
+First fire lands one interval after upsert. There is no immediate fire on `every`.
+
+## 3. List and remove specs
+
+```bash
+chasqui repeatable list reminders
+```
+
+Renders a table with each spec's resolved key, dispatch name, pattern, and next fire time.
+
+To remove:
+
+<Tabs syncKey="binding">
+<TabItem label="Node">
+
+```ts
+const specs = await queue.getRepeatableJobs();
+for (const s of specs) {
+  if (s.jobName === "daily-rollup") {
+    await queue.removeRepeatableByKey(s.key);
+  }
+}
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+specs = await queue.get_repeatable_jobs()
+for s in specs:
+    if s.job_name == "daily-rollup":
+        await queue.remove_repeatable_by_key(s.key)
+```
+
+</TabItem>
+</Tabs>
+
+Or from the CLI:
+
+```bash
+chasqui repeatable remove reminders 'daily-rollup::cron:0 9 * * *:Europe/Madrid'
+```
+
+## What if the scheduler was offline?
+
+If your worker process restarted and missed one or more cron fires, the engine's `MissedFiresPolicy` decides what to do:
+
+- **`skip`** (default) — drop missed windows. No thundering herd after a deploy.
+- **`fire-once`** — emit a single job to represent the missed window, then advance.
+- **`fire-all { maxCatchup }`** — replay each missed window, capped at `maxCatchup`.
+
+```ts
+await queue.add("daily-rollup", data, {
+  repeat: {
+    pattern: "0 9 * * *",
+    tz: "Europe/Madrid",
+    missedFires: { kind: "fire-once" },
+  },
+});
+```
+
+See [Schedule repeatable jobs](/guides/schedule-repeatable-jobs/) for the trade-offs.
+
+## Next steps
+
+- [Inspecting with the CLI](/start/inspecting-with-cli/) — watch the queue live.
+- [Schedule repeatable jobs](/guides/schedule-repeatable-jobs/) — every `RepeatPattern` and policy in one place.
+- For the why: [The scheduler](/concepts/the-scheduler/).

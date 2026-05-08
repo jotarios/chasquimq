@@ -1,0 +1,194 @@
+---
+title: Schedule repeatable jobs
+description: Cron, fixed intervals, and what to do when the scheduler missed a window.
+sidebar:
+  order: 5
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+Repeatable specs upsert a *recipe* — `(name, payload, pattern)` — and the engine fires fresh jobs from it on each window. The spec lives in `{chasqui:<queue>}:repeat` (sorted set keyed by next fire time) plus `{chasqui:<queue>}:repeat:specs` (hash).
+
+## Cron pattern
+
+<Tabs syncKey="binding">
+<TabItem label="Node">
+
+```ts
+await queue.add(
+  "daily-rollup",
+  { region: "eu-west" },
+  {
+    repeat: {
+      pattern: "0 9 * * *",
+      tz: "Europe/Madrid",
+    },
+  },
+);
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+from chasquimq import RepeatPattern
+
+await queue.upsert_repeatable_job(
+    "daily-rollup",
+    {"region": "eu-west"},
+    repeat=RepeatPattern.cron("0 9 * * *", tz="Europe/Madrid"),
+)
+```
+
+</TabItem>
+</Tabs>
+
+Cron parsing accepts both 5-field (`m h dom mon dow`) and 6-field (with seconds) syntax. Timezones can be `"UTC"` / `"Z"`, fixed offsets (`"+05:30"`), or any IANA name (`"America/New_York"`). IANA names are DST-aware: `0 2 * * *` in `America/New_York` fires at the local 02:00 wall-clock on both sides of spring-forward and fall-back.
+
+## Fixed interval
+
+<Tabs syncKey="binding">
+<TabItem label="Node">
+
+```ts
+await queue.add("ping", { user: 42 }, { repeat: { every: 60_000 } });
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+await queue.upsert_repeatable_job(
+    "ping", {"user": 42}, repeat=RepeatPattern.every(60_000)
+)
+```
+
+</TabItem>
+</Tabs>
+
+The first fire lands one interval after upsert. There is no immediate fire on `every`.
+
+## Catch-up policy when the scheduler was offline
+
+If your worker process restarted and missed one or more cron fires, the engine's `MissedFiresPolicy` decides what happens.
+
+| Policy | Behavior |
+|---|---|
+| `skip` (default) | Drop missed windows. Resume on the first future fire. No thundering herd after a deploy. |
+| `fire-once` | Emit a single job to represent the missed windows, then advance to the next future fire. |
+| `fire-all { maxCatchup }` | Replay each missed window up to `maxCatchup` fires, then advance. |
+
+<Tabs syncKey="binding">
+<TabItem label="Node">
+
+```ts
+await queue.add("daily-rollup", data, {
+  repeat: {
+    pattern: "0 9 * * *",
+    tz: "Europe/Madrid",
+    missedFires: { kind: "fire-once" },
+  },
+});
+
+await queue.add("hourly-tick", data, {
+  repeat: {
+    pattern: "0 * * * *",
+    missedFires: { kind: "fire-all", maxCatchup: 24 },
+  },
+});
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+from chasquimq import MissedFiresPolicy, RepeatPattern
+
+await queue.upsert_repeatable_job(
+    "daily-rollup",
+    data,
+    repeat=RepeatPattern.cron("0 9 * * *", tz="Europe/Madrid"),
+    missed_fires=MissedFiresPolicy.fire_once(),
+)
+
+await queue.upsert_repeatable_job(
+    "hourly-tick",
+    data,
+    repeat=RepeatPattern.cron("0 * * * *"),
+    missed_fires=MissedFiresPolicy.fire_all(24),
+)
+```
+
+</TabItem>
+</Tabs>
+
+`fire-all` requires `maxCatchup >= 1`. Zero is rejected at the shim and at the FFI boundary because `maxCatchup=0` would be wire-distinct but semantically equivalent to `skip` — almost certainly a caller mistake.
+
+## Listing and removing specs
+
+```bash
+chasqui repeatable list emails
+chasqui repeatable remove emails 'daily-rollup::cron:0 9 * * *:Europe/Madrid'
+```
+
+In code:
+
+<Tabs syncKey="binding">
+<TabItem label="Node">
+
+```ts
+const specs = await queue.getRepeatableJobs();
+for (const s of specs) {
+  console.log(s.key, s.jobName, s.nextFireMs);
+}
+
+await queue.removeRepeatableByKey("daily-rollup::cron:0 9 * * *:Europe/Madrid");
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+specs = await queue.get_repeatable_jobs()
+for s in specs:
+    print(s.key, s.job_name, s.next_fire_ms)
+
+await queue.remove_repeatable_by_key(
+    "daily-rollup::cron:0 9 * * *:Europe/Madrid"
+)
+```
+
+</TabItem>
+</Tabs>
+
+The `key` is what the engine derived (`<jobName>::<patternSignature>`) unless you passed `repeatJobKey` on upsert. That key is also what `Queue.add` returns as `job.id` for repeatable upserts — it's the stable handle.
+
+## Where the scheduler runs
+
+By default, every `Worker` auto-spawns an embedded `Scheduler` task. Multiple workers cooperate via `SET NX EX` leader election on `{chasqui:<queue>}:scheduler:lock` — only one fires per tick. To opt out (for example, when you run a separate scheduler process):
+
+<Tabs syncKey="binding">
+<TabItem label="Node">
+
+```ts
+new Worker("emails", handler, { connection, runScheduler: false });
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+Worker("emails", handler, run_scheduler=False)
+```
+
+</TabItem>
+</Tabs>
+
+## Gotchas
+
+- **`startDate` and `endDate` are honored.** Pass via `repeat.startDate` / `repeat.endDate` (Node) or `start_after_ms` / `end_before_ms` (Python) for absolute bounds.
+- **`limit` caps total fires.** Once the spec has fired `limit` times, the engine removes it. Useful for "fire 10 times then stop" without a manual remove.
+- **Per-fire retry overrides are not threaded yet.** `attempts` / `backoff` on the upsert call are accepted for symmetry with `Queue.add` but ignored at the wire layer. The fired job uses queue-wide defaults. Tracked as a 1.x follow-up.
+- **`repeat.immediately` is accepted but no-op.** First fire always lands one interval after upsert.
+
+For the underlying mechanics: [The scheduler](/concepts/the-scheduler/).

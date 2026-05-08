@@ -1,0 +1,21 @@
+# Cloudflare Pages headers
+# https://developers.cloudflare.com/pages/configuration/headers/
+
+/*
+  X-Frame-Options: DENY
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()
+  Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
+
+# Long-lived caching for Astro's hashed asset bundles.
+/_astro/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# Static assets: cache, but allow revalidation.
+/fonts/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# Pagefind search index — content changes per deploy, so don't cache aggressively.
+/pagefind/*
+  Cache-Control: public, max-age=300, must-revalidate

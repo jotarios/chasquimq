@@ -1,0 +1,18 @@
+---
+// Feature card used three-up under "Why ChasquiMQ".
+// No icon-in-circle, no decorative chrome. Title + body + a single read-more link.
+interface Props {
+  title: string;
+  href: string;
+  linkLabel?: string;
+}
+const { title, href, linkLabel = "Read more" } = Astro.props as Props;
+---
+
+<article class="chasqui-feature">
+  <h3 class="chasqui-feature__title">{title}</h3>
+  <p class="chasqui-feature__body"><slot /></p>
+  <a class="chasqui-feature__link" href={href}
+    >{linkLabel} <span aria-hidden="true">&rarr;</span></a
+  >
+</article>

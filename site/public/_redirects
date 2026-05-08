@@ -1,0 +1,6 @@
+# Cloudflare Pages redirects
+# https://developers.cloudflare.com/pages/configuration/redirects/
+#
+# Format: <source> <destination> <status>
+# Add entries below as URL slugs change. Example:
+#   /old-path /new-path 301

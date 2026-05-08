@@ -1,0 +1,219 @@
+---
+title: ChasquiMQ
+description: The fastest open-source message broker for Redis. Rust-native engine, native Node.js + Python bindings, built on Redis Streams.
+template: splash
+hero:
+  title: ""
+  tagline: ""
+pagefind: false
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+import StatRow from "../../components/StatRow.astro";
+import FeatureCard from "../../components/FeatureCard.astro";
+import DiataxisGrid from "../../components/DiataxisGrid.astro";
+
+<div class="chasqui-splash">
+
+{/* ---------- Hero ---------- */}
+<section class="chasqui-hero" aria-labelledby="hero-title">
+  <p class="chasqui-hero__eyebrow">ChasquiMQ &middot; Redis 8.6 &middot; Rust + Node + Python</p>
+  <h1 id="hero-title" class="chasqui-hero__title"><span class="chasqui-hero__title-sans">The fastest open-source</span><span class="chasqui-hero__title-serif">message broker for Redis.</span></h1>
+  <p class="chasqui-hero__sub">Rust-native engine. Native Node.js and Python bindings. Built on Redis Streams with MessagePack on the wire and pipelined acks &mdash; the things naive queues leave on the table.</p>
+  <div class="chasqui-hero__ctas"><a class="chasqui-btn chasqui-btn--primary" href="/start/getting-started/">Get started</a><a class="chasqui-btn chasqui-btn--secondary" href="https://github.com/jotarios/chasquimq">View on GitHub</a></div>
+</section>
+
+{/* ---------- Quickstarts ---------- */}
+<section class="chasqui-section chasqui-quickstart" aria-labelledby="quickstart-title">
+  <h2 id="quickstart-title" class="chasqui-section__opener">Pick your language</h2>
+  <p class="chasqui-section__lede">The engine is the same Rust binary in every package. Install, enqueue a job, run a worker.</p>
+
+<p class="chasqui-quickstart__prereq">All three quickstarts assume Redis 8.6 running on <code>127.0.0.1:6379</code>:</p>
+
+```bash
+docker run -d --name chasquimq-redis -p 6379:6379 redis:8.6
+```
+
+<Tabs syncKey="lang">
+  <TabItem label="Node.js">
+
+**Requires Node.js 18+.** In a fresh directory, save the snippet as <code>worker.ts</code>, then:
+
+```bash
+npm init -y && npm pkg set type=module
+npm install chasquimq tsx
+npx tsx worker.ts
+```
+
+```ts
+// worker.ts
+import { Queue, Worker } from "chasquimq"
+
+const connection = { host: "127.0.0.1", port: 6379 }
+const queue = new Queue("emails", { connection })
+
+const worker = new Worker(
+  "emails",
+  async (job) => {
+    console.log(`[worker] sending email to ${job.data.to}`)
+    return { delivered: true }
+  },
+  { connection, storeResults: true },
+)
+
+const job = await queue.add("welcome", { to: "ada@example.com" })
+console.log(`[producer] enqueued job ${job.id}`)
+
+await job.waitForResult({ timeoutMs: 30_000 })
+console.log("🎉 your first ChasquiMQ job ran end-to-end")
+
+await worker.close()
+await queue.close()
+```
+
+  </TabItem>
+  <TabItem label="Python">
+
+**Requires Python 3.9+.** In a fresh directory, save the snippet as <code>worker.py</code>, then:
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install chasquimq
+python worker.py
+```
+
+```python
+# worker.py
+import asyncio
+from chasquimq import Queue, Worker, Job
+
+async def send_email(job: Job) -> dict:
+    print(f"[worker] sending email to {job.data['to']}")
+    return {"delivered": True}
+
+async def main() -> None:
+    queue = Queue("emails")
+    worker = Worker("emails", send_email, store_results=True)
+    asyncio.create_task(worker.run())
+
+    job = await queue.add("welcome", {"to": "ada@example.com"})
+    print(f"[producer] enqueued job {job.id}")
+
+    await job.wait_for_result(timeout=30.0)
+    print("🎉 your first ChasquiMQ job ran end-to-end")
+
+    await worker.close()
+    await queue.close()
+
+asyncio.run(main())
+```
+
+  </TabItem>
+  <TabItem label="Rust">
+
+**Requires Rust 1.85+ (edition 2024).** Spin up a project, paste the snippet into `src/main.rs`, then:
+
+```bash
+cargo new chasquimq-hello && cd chasquimq-hello
+cargo add chasquimq anyhow bytes
+cargo add tokio --features macros,rt-multi-thread
+cargo add tokio-util --features rt
+cargo add serde --features derive
+cargo run            # Ctrl+C to stop the consumer loop
+```
+
+```rust
+// src/main.rs
+use chasquimq::{Producer, Consumer, ProducerConfig, ConsumerConfig};
+use serde::{Serialize, Deserialize};
+use tokio_util::sync::CancellationToken;
+
+#[derive(Clone, Serialize, Deserialize)]
+struct EmailJob { to: String }
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let producer = Producer::<EmailJob>::connect(
+        "redis://127.0.0.1:6379",
+        ProducerConfig { queue_name: "emails".into(), ..Default::default() },
+    ).await?;
+
+    let id = producer.add(EmailJob { to: "ada@example.com".into() }).await?;
+    println!("[producer] enqueued job {id}");
+
+    let consumer = Consumer::<EmailJob>::new(
+        "redis://127.0.0.1:6379",
+        ConsumerConfig { queue_name: "emails".into(), ..Default::default() },
+    );
+
+    let cancel = CancellationToken::new();
+    let cancel_after_first = cancel.clone();
+    consumer.run(move |job| {
+        let cancel = cancel_after_first.clone();
+        async move {
+            println!("[worker] sending email to {}", job.payload.to);
+            cancel.cancel();
+            Ok(bytes::Bytes::new())
+        }
+    }, cancel).await?;
+
+    println!("🎉 your first ChasquiMQ job ran end-to-end");
+    Ok(())
+}
+```
+
+  </TabItem>
+</Tabs>
+
+  <p class="chasqui-quickstart__hint">Need a CLI? <code>cargo install chasquimq-cli</code> gets you <code>chasqui inspect</code>, <code>chasqui watch</code>, and <code>chasqui dlq replay</code>.</p>
+</section>
+
+{/* ---------- Why ChasquiMQ ---------- */}
+<section class="chasqui-section" aria-labelledby="why-title">
+  <h2 id="why-title" class="chasqui-section__opener">Why ChasquiMQ</h2>
+  <p class="chasqui-section__lede">Three things justify a new queue. Performance, operability, and the option to write your handler in the language your team already ships.</p>
+  <div class="chasqui-features">
+    <FeatureCard title="Rust-native throughput" href="/benchmarks/" linkLabel="See the numbers"><span class="mono">188,775 jobs/s</span> sustained on a single M3 host. MessagePack on the wire. No Lua scripts. No JSON on the hot path. Pipelined <span class="mono">XACK</span> and <span class="mono">XACKDEL</span> close the round-trip tax that breaks naive Streams consumers.</FeatureCard>
+    <FeatureCard title="Operator-grade reliability" href="/concepts/thinking-in-chasquimq/" linkLabel="Job lifecycle">Per-job retry budgets. Exponential backoff with jitter. DLQ replay tooling baked in. Repeatable jobs with cron and <span class="mono">every</span> patterns &mdash; DST-aware, with a <span class="mono">MissedFiresPolicy</span> for clock skips.</FeatureCard>
+    <FeatureCard title="Multi-language at zero cost" href="/reference/" linkLabel="API reference">Native bindings via <span class="mono">napi-rs</span> (Node) and <span class="mono">PyO3</span> (Python). The engine is the same Rust binary in every package &mdash; no protocol bridge, no sidecar process. Pick your language; pay no performance tax for it.<br /><span class="chasqui-feature__meta">Requires <span class="mono">Node 18+</span>, <span class="mono">Python 3.9+</span>, or <span class="mono">Rust 1.85+</span>.</span></FeatureCard>
+  </div>
+</section>
+
+{/* ---------- Performance ---------- */}
+<section class="chasqui-section chasqui-perf" aria-labelledby="perf-title">
+  <h2 id="perf-title" class="chasqui-section__opener">Performance, measured</h2>
+  <p class="chasqui-section__lede">188,775 jobs/s sustained on a single M3 host with Redis 8.6 &mdash; measured against the leading Node.js Redis queue on identical hardware. Quiet-host runs reproduce 419k jobs/s on the consumer hot path.</p>
+  <StatRow stats={[{ label: "Sustained throughput", value: "188,775", suffix: "jobs/s" }, { label: "Native languages", value: "3", suffix: "Rust + Node + Python" }, { label: "Producer ratio (1.0)", value: "3.47", suffix: "× sustained" }]} />
+  <p class="chasqui-perf__caption">Apple M3 &middot; Redis 8.6.2 (loopback) &middot; <code>queue-add-bulk</code>, 50 jobs &middot; <a href="/benchmarks/">methodology &amp; reproduction &rarr;</a></p>
+</section>
+
+{/* ---------- Diátaxis index ---------- */}
+<section class="chasqui-section" aria-labelledby="docs-title">
+  <h2 id="docs-title" class="chasqui-section__opener">The docs, by intent</h2>
+  <p class="chasqui-section__lede">Four kinds of documentation, four jobs they do.</p>
+  <DiataxisGrid />
+</section>
+
+{/* ---------- Architecture ---------- */}
+<section class="chasqui-section" aria-labelledby="arch-title">
+  <h2 id="arch-title" class="chasqui-section__opener">Architecture at a glance</h2>
+  <p class="chasqui-section__lede">Producers <span class="mono">XADD</span> onto a Redis Stream. Delayed jobs sit in a sorted set until a promoter moves them. Consumers <span class="mono">XREADGROUP</span>, dispatch to your handler, then <span class="mono">XACKDEL</span> in a single batched round trip. Failures retry with backoff; exhausted ones land in the DLQ.</p>
+  <pre class="chasqui-arch" aria-label="ChasquiMQ data flow"><code>{`Producer ── XADD ─────────────▶ stream:emails  ──▶ XREADGROUP ──▶ Consumer
+   │                                                              │
+   └─ delayed: ZADD ──▶ zset:emails:z ──▶ promoter ──▶ XADD       │
+                                                                  ▼
+                                                              handler(job)
+                                                                  │
+                                                       success ◀──┴──▶ failure
+                                                          │              │
+                                                       XACKDEL       retry / DLQ`}</code></pre>
+</section>
+
+{/* ---------- Final CTA ---------- */}
+<section class="chasqui-section chasqui-final" aria-labelledby="final-title">
+  <h2 id="final-title" class="chasqui-final__title">Ready?</h2>
+  <p class="chasqui-final__sub">Read the five-minute getting-started. Hello-world job in your terminal, running through Redis, before your coffee cools.</p>
+  <a class="chasqui-btn chasqui-btn--primary" href="/start/getting-started/">Get started &rarr;</a>
+</section>
+
+</div>
