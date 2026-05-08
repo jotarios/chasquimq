@@ -1,0 +1,143 @@
+---
+title: Tune for throughput
+description: When to raise concurrency, when raising it hurts, and the autopipelining lesson.
+sidebar:
+  order: 8
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+ChasquiMQ ships fast by default. The defaults that matter:
+
+- `concurrency: 100` (Worker)
+- Batched, pipelined `XACK` (always on)
+- MessagePack on the wire (no JSON path)
+- `XACKDEL` for atomic ack-and-delete (Redis 8.2 — always on)
+- `XADD ... IDMP` for idempotent producers (Redis 8.6 — always on for `addUnique`)
+
+Most workloads will not benefit from tuning. If you've measured a bottleneck, this guide covers the knobs that can move the number — and the ones that can't.
+
+## When to raise `concurrency`
+
+`concurrency` is the maximum in-flight handler invocations the worker holds. The engine reads batches with `XREADGROUP`, fans them to up to `concurrency` async tasks, and batches the resulting acks.
+
+Raise it when:
+
+- Handler I/O is the bottleneck (network, S3, downstream API). More in-flight work fills the wait time.
+- You see `chasqui inspect` reporting growing `pending` and your handler `duration_us` is high relative to your read interval.
+
+Don't raise it when:
+
+- Handlers are CPU-bound. More concurrency just thrashes the event loop / GIL. Use a worker process pool instead.
+- Redis is the bottleneck. `chasqui inspect` reports stable `stream depth` near zero — you're already keeping up.
+
+A reasonable progression: 100 (default) → 250 → 500. Above 500, the per-handler scheduling overhead starts to dominate and host CPU is usually saturated.
+
+## When raising `concurrency` hurts
+
+The `worker-concurrent` benchmark hits **111,968 jobs/s on a contended host** at concurrency=100 — and the same engine hits **419,004 jobs/s on a quiet host** at the same concurrency (see [benchmarks](/benchmarks/the-1-0-numbers/)). The number is host-load-bound, not concurrency-bound. Raising past 100 when the host is busy gets you no win and adds context-switch overhead.
+
+A real-world pattern: `concurrency=250` on a 4-core box with other services running will typically **reduce** throughput vs. `concurrency=50`. Measure before tuning.
+
+## The `enableAutoPipelining` lesson
+
+ioredis (and similar JS Redis clients) ship with auto-pipelining — batch every command behind a microtask. The BullMQ baseline showed it helps producers (+1.1% to +3.6%) and **hurts workers by 38%** on `worker-concurrent`.
+
+ChasquiMQ does not use ioredis. The engine uses `redis-rs` for the producer/consumer hot paths, with manual control over pipelining. Acks batch by default (`ack_batch=256` jobs or `ack_idle_ms=5ms`, whichever first); reads do not.
+
+The lesson generalizes: **pipelining is not free**. Every "batch X" knob trades latency for throughput. Prove it on your scenario before turning it on.
+
+## Batched `XACK`
+
+Acks accumulate in a bounded async channel and flush as a single pipelined batch when either:
+
+- `ack_batch` jobs accumulate (default 256), or
+- `ack_idle_ms` ms elapse with no new acks (default 5ms).
+
+Tighter than 256 means more, smaller round trips. Looser means higher ack latency. For most workloads, the defaults are right.
+
+In Rust:
+
+```rust
+use chasquimq::ConsumerConfig;
+
+let cfg = ConsumerConfig {
+    queue_name: "emails".into(),
+    ack_batch: 512,
+    ack_idle_ms: 10,
+    ..Default::default()
+};
+```
+
+In the shims, these are not exposed in v1. Reach for the native `Consumer` if you need them.
+
+## Payload size
+
+Smaller payloads → more throughput, fewer Redis bytes, faster decode. ChasquiMQ encodes with MessagePack via `rmp-serde`, which is binary and ~30–50% smaller than equivalent JSON for typed payloads.
+
+Anti-pattern: shoving large blobs (rendered images, PDFs, full document bodies) onto the queue. The queue should carry **a pointer**, not the artifact:
+
+<Tabs syncKey="binding">
+<TabItem label="Node">
+
+```ts
+// Bad — multi-MB payload through the stream.
+await queue.add("process", { pdfBytes: largeBuffer });
+
+// Good — a pointer to S3.
+await queue.add("process", { s3Key: "uploads/abc123.pdf" });
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+# Bad — multi-MB payload through the stream.
+await queue.add("process", {"pdf_bytes": large_bytes})
+
+# Good — a pointer to S3.
+await queue.add("process", {"s3_key": "uploads/abc123.pdf"})
+```
+
+</TabItem>
+</Tabs>
+
+`max_payload_bytes` on `ConsumerConfig` (default unset) caps it; oversize entries route to DLQ with `DlqReason::Oversize`.
+
+## Producer-side bulk add
+
+For high-volume producers, `addBulk` pipelines the entire batch as one Redis pipeline:
+
+<Tabs syncKey="binding">
+<TabItem label="Node">
+
+```ts
+const jobs = users.map((u) => ({
+  name: "welcome",
+  data: { user: u.id },
+}));
+await queue.addBulk(jobs);
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+jobs = [{"name": "welcome", "data": {"user": u.id}} for u in users]
+await queue.add_bulk(jobs)
+```
+
+</TabItem>
+</Tabs>
+
+`addBulk` is the path that hits **188,775 jobs/s on a contended host** in benchmarks. If you are publishing one-at-a-time in a tight loop, you're leaving 3× on the table.
+
+The shim degrades to per-entry `add` when any entry has per-job options (`delay`, `jobId`, `attempts`, `backoff`, `repeat`). Keep bulk batches simple to keep the pipelining win.
+
+## Don't overthink it
+
+- Default `concurrency=100`. Default `ack_batch=256`. These are right for most workloads.
+- Profile before tuning. `chasqui inspect` and `chasqui watch` tell you whether the queue is the bottleneck.
+- Reduce payload size before raising concurrency.
+
+For the underlying mechanics: [Performance trade-offs](/concepts/performance-trade-offs/).

@@ -1,0 +1,137 @@
+---
+title: Migrate from Sidekiq or Celery
+description: Conceptual mapping for Ruby and Python shops moving to ChasquiMQ.
+sidebar:
+  order: 10
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+ChasquiMQ is API-compatible with the Node BullMQ shape, not with Sidekiq, Celery, RQ, or Dramatiq. There is no drop-in import-swap migration. This guide is the conceptual map: the patterns translate cleanly even though the syntax differs.
+
+## The big idea
+
+| In | You declare | Workers do |
+|---|---|---|
+| **Sidekiq / Celery / Dramatiq** | A function with a decorator (`@app.task`, `MyJob.perform_async`) | Look up the function by name, deserialize args, call it |
+| **ChasquiMQ** | A queue and a `Worker(handler)` callback | The handler dispatches by `job.name` to your code |
+
+Function-reference enqueue (i.e., importing a function and calling `.delay(...)` on it) is **not** a v1 feature. ChasquiMQ uses string-named enqueue (`Queue.add(name, payload)`), the arq / SAQ idiom. The reasons:
+
+- Function-pointer marshalling across language boundaries is a serialization rabbit hole. Pickle / cloudpickle aren't safe across versions, and the shop maintaining the worker pool isn't always the one writing the producer.
+- Streams + msgpack as the lingua franca makes Python and Node producers trivially interchangeable. Function references would tie the wire format to one runtime.
+
+If you have many tasks, dispatch on `job.name`:
+
+<Tabs syncKey="binding">
+<TabItem label="Python">
+
+```python
+from chasquimq import Queue, Worker
+
+HANDLERS = {
+    "send_email": send_email,
+    "process_image": process_image,
+    "rebuild_search_index": rebuild_search_index,
+}
+
+async def dispatch(job):
+    handler = HANDLERS.get(job.name)
+    if handler is None:
+        raise UnrecoverableError(f"unknown job name: {job.name}")
+    return await handler(job.data)
+
+worker = Worker("default", dispatch, concurrency=100)
+```
+
+</TabItem>
+<TabItem label="Node">
+
+```ts
+import { Queue, Worker, UnrecoverableError } from "chasquimq";
+
+const HANDLERS: Record<string, (data: any) => Promise<any>> = {
+  "send-email": sendEmail,
+  "process-image": processImage,
+  "rebuild-search-index": rebuildSearchIndex,
+};
+
+const worker = new Worker(
+  "default",
+  async (job) => {
+    const handler = HANDLERS[job.name];
+    if (!handler) throw new UnrecoverableError(`unknown job name: ${job.name}`);
+    return await handler(job.data);
+  },
+  { connection, concurrency: 100 },
+);
+```
+
+</TabItem>
+</Tabs>
+
+## Sidekiq → ChasquiMQ
+
+| Sidekiq | ChasquiMQ |
+|---|---|
+| `MyJob.perform_async(arg1, arg2)` | `await queue.add("MyJob", { arg1, arg2 })` |
+| `MyJob.perform_in(5.minutes, ...)` | `await queue.add("MyJob", data, { delay: 300_000 })` (Node) / `delay=timedelta(minutes=5)` (Python) |
+| `class MyJob; sidekiq_options retry: 5, backoff: 30; end` | `attempts: 5, backoff: { type: 'fixed', delay: 30_000 }` per-job, or queue-wide on the `Worker` |
+| `raise Sidekiq::JobRetry::Skip` | `throw new UnrecoverableError(...)` (Node) / `raise UnrecoverableError(...)` (Python) |
+| `Sidekiq::DeadSet.new` | `chasqui dlq peek <queue>` / `Queue.peekDlq` |
+| Sidekiq Web UI / Sidekiq Pro Dashboard | `chasqui inspect`, `chasqui watch`, `chasqui events`. No web UI in v1. |
+| `Sidekiq::Throttled` (rate limit) | Not in v1. Tracked as a future. |
+| `sidekiq -q high -q default` (priority queues) | Multiple `Queue` / `Worker` instances per queue name. |
+| `sidekiq-cron` | `repeat: { pattern: '0 9 * * *', tz: 'Europe/Madrid' }` |
+
+## Celery → ChasquiMQ
+
+| Celery | ChasquiMQ |
+|---|---|
+| `@app.task(name="my.task")` | `await queue.add("my.task", data)` (no decorator; just a name) |
+| `my_task.delay(...)` / `my_task.apply_async(args=...)` | `await queue.add("my.task", {"args": [...]})` |
+| `apply_async(countdown=300)` | `delay_ms=300_000` (Python) / `delay: 300_000` (Node) |
+| `apply_async(eta=datetime)` | `delay=an_aware_datetime` (Python) |
+| `@app.task(bind=True, max_retries=5, default_retry_delay=10)` | `attempts=5, backoff=BackoffSpec.fixed(10_000)` per-job |
+| `raise self.retry(exc=e)` | Just raise the exception; the engine retries automatically |
+| Celery beat (`@periodic_task`) | `repeat=RepeatPattern.cron("0 9 * * *", tz="Europe/Madrid")` |
+| Result backend (`AsyncResult.get(timeout=...)`) | `Worker(store_results=True)` + `job.wait_for_result(timeout=...)` |
+| Flower dashboard | `chasqui watch`, `chasqui events`. No web UI in v1. |
+| `@task(rate_limit='100/m')` | Not in v1. |
+| Routing via exchanges | Multiple queues per concern. ChasquiMQ has no exchange concept. |
+
+## RQ / Dramatiq
+
+The mapping is similar in spirit. RQ's `job.delay(...)` and Dramatiq's `actor.send(...)` map to `await queue.add(name, payload)` plus per-job options. Decorators map to a name-based dispatch table on the worker side.
+
+## What's actually different from all three
+
+These are real semantic differences, not just syntax:
+
+- **No retry decorator.** Retry policy is data on the producer side (`attempts`, `backoff`) or queue-wide on the consumer side, not metadata on the function. This is intentional: a producer can override the queue-wide policy per job without touching worker code.
+- **No `success_callback` / `link` / `chain`.** Parent/child workflows are not in v1. Compose by enqueueing a follow-up from inside the handler.
+- **No exchanges, no routing keys.** One queue per concern. Multiple queues live in the same Redis. Workers subscribe per queue.
+- **No web dashboard.** CLI only (`chasqui inspect`, `chasqui watch`, `chasqui events`). The PRD explicitly out-of-scopes "complex UI dashboards."
+- **No rate limiter, no pause/resume in v1.** Tracked as future v1.x work.
+
+## What's strictly better
+
+- **Throughput.** Same Redis, multiple times the jobs/s — see [benchmarks](/benchmarks/the-1-0-numbers/).
+- **Cross-language wire format.** Python producer + Node worker drains the same stream. Sidekiq and Celery can't talk to each other.
+- **Idempotent producers built-in.** Redis 8.6 `XADD ... IDMP` makes producer-side retries safe without app-level dedup tables.
+- **Atomic ack-and-delete.** `XACKDEL` is one round trip; the ack-then-delete dance is gone.
+- **Native binary payloads.** MessagePack is smaller and faster than JSON, and round-trips `bytes` / `Date` / `bigint` cleanly.
+
+## When NOT to migrate
+
+- You need rate limiting, pause/resume, or priority as a queue feature today. Stay where you are; revisit when v1.x lands.
+- You depend on parent/child workflows / DAGs. Stay where you are.
+- Your team owns a battle-tested Sidekiq Pro / Celery deployment with custom monitoring, and the throughput is fine. The migration costs more than the win.
+
+## When to migrate
+
+- You're CPU-bottlenecked on the worker side and Redis itself has spare capacity.
+- You're on a polyglot team and want one queue across Python + Node.
+- You're building new infrastructure and want a single fast Rust core under your bindings.
+
+For the architecture: [Thinking in ChasquiMQ](/concepts/thinking-in-chasquimq/).

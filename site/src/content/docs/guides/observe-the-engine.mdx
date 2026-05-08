@@ -1,0 +1,139 @@
+---
+title: Observe the engine
+description: Wire a MetricsSink, emit Prometheus, and tail the events stream.
+sidebar:
+  order: 7
+---
+
+ChasquiMQ ships first-class observability hooks. The engine emits structured events on every load-bearing path (promote, read, dispatch, retry, DLQ) through a single `MetricsSink` trait. The default is a zero-cost no-op; you opt in.
+
+Three layers, pick what you need:
+
+1. **`MetricsSink` trait (Rust)** — implement it directly; raw events.
+2. **Prometheus / OTel adapter (`chasquimq-metrics` crate)** — bridge to `metrics-rs` or hand-rolled `prometheus`.
+3. **Events stream** — tail it from any process, no Rust required.
+
+## 1. Implement `MetricsSink` directly (Rust)
+
+```rust
+use chasquimq::{
+    ConsumerConfig, MetricsSink, JobOutcome, JobOutcomeKind,
+    PromoterTick, ReaderBatch, RetryScheduled, DlqRouted, LockOutcome,
+};
+use std::sync::Arc;
+
+struct LoggingSink;
+
+impl MetricsSink for LoggingSink {
+    fn job_outcome(&self, e: JobOutcome) {
+        match e.kind {
+            JobOutcomeKind::Ok => tracing::info!(?e, "job ok"),
+            JobOutcomeKind::Err => tracing::warn!(?e, "job err"),
+            JobOutcomeKind::Panic => tracing::error!(?e, "job panic"),
+        }
+    }
+    fn dlq_routed(&self, e: DlqRouted) {
+        tracing::warn!(?e, "dlq route");
+    }
+    // Other methods get default no-op implementations.
+}
+
+let cfg = ConsumerConfig {
+    queue_name: "emails".into(),
+    metrics: Arc::new(LoggingSink),
+    ..Default::default()
+};
+```
+
+Events you can react to:
+
+| Event | When | Carries |
+|---|---|---|
+| `PromoterTick` | Per promoter tick | `promoted`, `depth`, `oldest_pending_lag_ms` |
+| `LockOutcome` | Promoter lock state changes | `Acquired` / `Held` |
+| `ReaderBatch` | Per non-empty `XREADGROUP` | `size`, `reclaimed` (CLAIM-recovery count) |
+| `JobOutcome` | Per handler invocation | `kind`, 1-indexed `attempt`, `handler_duration_us` |
+| `RetryScheduled` | When a retry is actually rescheduled | `attempt`, `backoff_ms` |
+| `DlqRouted` | When a relocate to DLQ succeeds | `reason: DlqReason`, `attempt` |
+
+`chasquimq_jobs_completed_total + chasquimq_jobs_failed_total` equals total handler invocations. Reader-side DLQ (decode-fail / malformed / oversize / retries-exhausted-on-arrival) carries `attempt: 0` because the handler never ran.
+
+## 2. Use the Prometheus adapter
+
+The `chasquimq-metrics` crate bridges the engine's events into the [`metrics`](https://docs.rs/metrics) facade. Install any `metrics_exporter_*` recorder and you have Prometheus / OTel / StatsD for free.
+
+```rust
+use chasquimq_metrics::{MetricsFacadeSink, QueueLabeled};
+use metrics_exporter_prometheus::PrometheusBuilder;
+use std::sync::Arc;
+
+PrometheusBuilder::new()
+    .with_http_listener(([0, 0, 0, 0], 9090))
+    .install()?;
+
+let sink = Arc::new(QueueLabeled::new(MetricsFacadeSink, "emails"));
+
+let cfg = ConsumerConfig {
+    queue_name: "emails".into(),
+    metrics: sink,
+    ..Default::default()
+};
+```
+
+`QueueLabeled<S>` adds a `queue` label. It composes — stack wrappers for `tenant`, `region`, …. Each wrapper uses `Arc<str>.clone()` (atomic refcount, no per-event String allocation).
+
+Adapter metric names follow Prometheus base-unit convention:
+
+- `chasquimq_handler_duration_seconds` (histogram)
+- `chasquimq_retry_backoff_seconds` (histogram)
+- `chasquimq_jobs_completed_total` / `chasquimq_jobs_failed_total` (counters)
+- `chasquimq_dlq_routed_total{reason="..."}` (counter)
+- `chasquimq_promoter_depth` / `chasquimq_promoter_oldest_lag_seconds` (gauges)
+
+Working examples in the repo:
+
+- [`chasquimq-metrics/examples/facade_sink.rs`](https://github.com/jotarios/chasquimq/blob/main/chasquimq-metrics/examples/facade_sink.rs) — `metrics-exporter-prometheus`
+- [`chasquimq-metrics/examples/prometheus_sink.rs`](https://github.com/jotarios/chasquimq/blob/main/chasquimq-metrics/examples/prometheus_sink.rs) — hand-rolled `prometheus`-crate sink
+
+## 3. Tail events from any process
+
+Don't want to wire metrics into your Rust binary? Tail the events stream from a sidecar.
+
+```bash
+chasqui events emails
+```
+
+Or programmatically:
+
+```ts
+import { QueueEvents } from "chasquimq";
+
+const events = new QueueEvents("emails", { connection });
+events.on("completed", (ev) => console.log("done", ev.jobId, ev.duration_us));
+events.on("failed", (ev) => console.log("fail", ev.jobId, ev.failedReason));
+events.on("dlq", (ev) => console.log("dlq", ev.jobId, ev.reason));
+```
+
+Same in Python:
+
+```python
+from chasquimq import QueueEvents
+
+events = QueueEvents("emails")
+async for ev in events:
+    print(ev.name, ev.job_id, ev.fields)
+```
+
+Events fan out — every subscriber sees every event. Subscribers track their own `last-id` cursor.
+
+## Why metrics aren't in Python or Node
+
+`MetricsSink` is intentionally not exposed to JS or Python in v1. Calling user code on every job hot-path event (per-tick, per-batch, per-handler) has too much FFI overhead to justify. The metrics path is for `metrics-rs` exporters in Rust; cross-language consumers wire metrics by tailing the events stream instead.
+
+## Gotchas
+
+- **`MetricsSink` is dispatched on every event.** A misbehaving sink (slow, blocking, allocating heavily) is in the engine's hot path. Keep it lock-free.
+- **The default `NoopSink` is zero-cost.** Don't worry about overhead when you haven't installed a sink.
+- **Reader-side DLQ events carry `attempt: 0`.** The handler never ran for those. Filter on `reason` to disambiguate from `RetriesExhausted`.
+
+For the architecture: [Performance trade-offs](/concepts/performance-trade-offs/).
