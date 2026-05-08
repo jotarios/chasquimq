@@ -97,6 +97,7 @@ Eleven PRs landed after the post-Phase-4 polish above; together they close the t
 ## Post-1.0 polish
 
 - **Python public surface: a single user-facing `Job` (2026-05-08).** A single user-facing `Job` (the high-level dataclass). The native PyO3 wire-format pyclass is now internal-only — no longer re-exported from the package, no longer documented. The raw `Consumer.run(handler)` path keeps working for backward compat but is undocumented; users should use `Worker`.
+- **Python public surface minimized to `Queue`/`Worker`/`Job`/`QueueEvents` (2026-05-08, breaking).** `Producer`, `Consumer`, and `Scheduler` removed from the top-level `chasquimq` package — they live in `chasquimq._native` for power users who need raw FFI access. The native wire-format pyclass renamed `Job` → `_Job` so its internal status is visible at every Python repr/traceback (`<chasquimq._native._Job ...>`). Tests, README, and `python_handler_bench.py` updated to import the moved names from `chasquimq._native`.
 
 ## Deferred follow-ups for 1.x
 

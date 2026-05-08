@@ -1,20 +1,30 @@
 """ChasquiMQ — the fastest open-source message broker for Redis.
 
-The public surface is asyncio-first: import :class:`Queue` to enqueue
-jobs, :class:`Worker` to process them, and :class:`QueueEvents` to
-subscribe to lifecycle transitions. There is a single user-facing
-:class:`Job` — the high-level frozen dataclass returned by
-:meth:`Queue.add` and passed to your :class:`Worker` handler. Power
-users can also reach the native engine handles directly —
-:class:`Producer`, :class:`Consumer`, and :class:`Scheduler` are
-re-exported here.
+The public surface is asyncio-first and intentionally small: import
+:class:`Queue` to enqueue jobs, :class:`Worker` to process them,
+:class:`Job` for the frozen dataclass returned by :meth:`Queue.add` and
+passed to your handler, and :class:`QueueEvents` to subscribe to
+lifecycle transitions.
+
+Errors: :class:`UnrecoverableError` (raise from a handler to bypass
+retries and route directly to DLQ) and :class:`NotSupportedError`.
+
+Builders: :class:`BackoffSpec`, :class:`MissedFiresPolicy`,
+:class:`RepeatPattern`, :class:`RepeatableMeta`, plus the
+:data:`Handler` type alias.
+
+Plus :func:`version` for introspection.
+
+The low-level engine handles (``Producer``, ``Consumer``,
+``Scheduler``) live in :mod:`chasquimq._native` for power users who
+need raw FFI access.
 """
 
 import logging as _logging
 
 _logging.getLogger("chasquimq").addHandler(_logging.NullHandler())
 
-from ._native import Consumer, Producer, Scheduler, version
+from ._native import version
 from .errors import NotSupportedError, UnrecoverableError
 from .job import Job
 from .queue import Queue
@@ -25,18 +35,15 @@ from .worker import Handler, Worker
 
 __all__ = [
     "BackoffSpec",
-    "Consumer",
     "Handler",
     "Job",
     "MissedFiresPolicy",
     "NotSupportedError",
-    "Producer",
     "Queue",
     "QueueEvent",
     "QueueEvents",
     "RepeatPattern",
     "RepeatableMeta",
-    "Scheduler",
     "UnrecoverableError",
     "Worker",
     "version",

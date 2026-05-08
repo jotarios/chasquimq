@@ -1,12 +1,6 @@
 import chasquimq
-from chasquimq import (
-    Consumer,
-    Job,
-    Producer,
-    Queue,
-    Scheduler,
-    Worker,
-)
+from chasquimq import Job, Queue, Worker
+from chasquimq._native import Consumer, Producer, Scheduler
 
 
 REDIS_URL = "redis://127.0.0.1:6379"
@@ -18,29 +12,38 @@ def test_version_is_non_empty_string() -> None:
     assert value
 
 
-def test_native_classes_reexported_from_top_level() -> None:
-    """The flat import shape: native classes available on `chasquimq`."""
+def test_minimal_public_surface() -> None:
+    """The top-level package exposes only the documented user surface.
+
+    Native engine handles (``Producer`` / ``Consumer`` / ``Scheduler``) and
+    the wire-format ``_Job`` pyclass live in ``chasquimq._native`` —
+    they are not re-exported.
+    """
     from chasquimq import _native
 
-    assert Producer is _native.Producer
-    assert Consumer is _native.Consumer
-    assert Scheduler is _native.Scheduler
+    assert "Producer" not in chasquimq.__all__
+    assert "Consumer" not in chasquimq.__all__
+    assert "Scheduler" not in chasquimq.__all__
+    assert not hasattr(chasquimq, "Producer")
+    assert not hasattr(chasquimq, "Consumer")
+    assert not hasattr(chasquimq, "Scheduler")
+    assert _native._Job.__name__ == "_Job"
 
 
 def test_high_level_job_wins_unqualified_name() -> None:
     """``chasquimq.Job`` is the high-level dataclass, not the wire-format type.
 
-    The internal ``_native.Job`` pyclass remains a separate object — pinning
+    The internal ``_native._Job`` pyclass remains a separate object — pinning
     that invariant here keeps the public-surface guarantee defensible.
     """
     from chasquimq import _native
 
-    assert Job is not _native.Job
+    assert Job is not _native._Job
     instance = Job(id="abc", name="t", data=None, attempt=1, created_at_ms=0)
     assert instance.id == "abc"
 
 
-def test_native_producer_constructs_from_top_level() -> None:
+def test_native_producer_constructs_from_native_module() -> None:
     """Producer constructs cleanly against a live Redis (``__new__`` connects)."""
     producer = Producer(REDIS_URL, "py-smoke-flat")
     assert producer.stream_key() == "{chasqui:py-smoke-flat}:stream"
@@ -49,13 +52,13 @@ def test_native_producer_constructs_from_top_level() -> None:
     assert isinstance(producer.producer_id(), str) and producer.producer_id()
 
 
-def test_native_consumer_constructs_from_top_level() -> None:
+def test_native_consumer_constructs_from_native_module() -> None:
     consumer = Consumer(REDIS_URL, "py-smoke-flat", concurrency=4)
     # Calling shutdown() before run() is a no-op; just proves the binding wired up.
     consumer.shutdown()
 
 
-def test_native_scheduler_constructs_from_top_level() -> None:
+def test_native_scheduler_constructs_from_native_module() -> None:
     scheduler = Scheduler(REDIS_URL, "py-smoke-flat")
     scheduler.shutdown()
 

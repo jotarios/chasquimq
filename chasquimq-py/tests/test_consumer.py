@@ -26,8 +26,9 @@ import msgpack
 import pytest
 import redis.asyncio as aioredis
 
-from chasquimq import Consumer, UnrecoverableError
-from chasquimq._native import Job as _NativeJob
+from chasquimq import UnrecoverableError
+from chasquimq._native import Consumer
+from chasquimq._native import _Job as _NativeJob
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
 

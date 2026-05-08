@@ -40,7 +40,8 @@ import uuid
 
 import msgpack
 
-from chasquimq import Producer, Worker
+from chasquimq import Worker
+from chasquimq._native import Producer
 
 
 def parse_args() -> argparse.Namespace:

@@ -8,7 +8,8 @@ import os
 import msgpack
 import pytest
 
-from chasquimq import Consumer, Job, Producer, Queue, Worker
+from chasquimq import Job, Queue, Worker
+from chasquimq._native import Consumer, Producer
 
 
 REDIS_URL = os.environ.get("CHASQUIMQ_TEST_REDIS_URL", "redis://127.0.0.1:6379")
