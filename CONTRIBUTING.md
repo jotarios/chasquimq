@@ -209,19 +209,24 @@ Two release models live in the same repo. The Node and Python publishes are comm
 
 ## Releasing chasquimq-cli
 
-The `chasqui` CLI ships as a prebuilt tarball per platform (Linux x86_64 + aarch64, macOS x86_64 + aarch64, Windows x86_64) plus shell and PowerShell installers, all attached to a [GitHub Release](https://github.com/jotarios/chasquimq/releases). The pipeline is driven by [`cargo dist`](https://opensource.axo.dev/cargo-dist/) and triggered by **git tags**, not by commit messages — this is intentional, and the standard cargo-dist release model.
+The `chasqui` CLI ships **two ways** for the same release: as a prebuilt tarball per platform (Linux x86_64 + aarch64, macOS x86_64 + aarch64, Windows x86_64) plus shell and PowerShell installers attached to a [GitHub Release](https://github.com/jotarios/chasquimq/releases), AND as a published crate on [crates.io](https://crates.io/crates/chasquimq-cli). The binary path is built by [`cargo dist`](https://opensource.axo.dev/cargo-dist/) on git tag push; the crates.io path is a manual `cargo publish` so users can `cargo binstall chasquimq-cli` (which discovers our `[package.metadata.binstall]` config and downloads the cargo-dist tarball — no source compile).
 
 To cut a release:
 
 1. Bump `version` in [`chasquimq-cli/Cargo.toml`](chasquimq-cli/Cargo.toml) and commit on `main` (`chore(cli): bump to 0.2.0`).
-2. Tag the commit with `chasquimq-cli-v<version>` and push the tag:
+2. Tag the commit with `v<version>` (bare, no crate-name prefix) and push:
    ```bash
-   git tag chasquimq-cli-v0.2.0
-   git push origin chasquimq-cli-v0.2.0
+   git tag v0.2.0
+   git push origin v0.2.0
    ```
 3. The [`CLI Release`](.github/workflows/release.yml) workflow runs on the tag push, builds all five platform tarballs (plus the shell/powershell installers and a source tarball), and creates a GitHub Release with the artifacts attached.
+4. Publish to crates.io so `cargo install` and `cargo binstall` can find it:
+   ```bash
+   cargo publish -p chasquimq-cli
+   ```
+   This is a manual step (one prompt, requires `cargo login` once with your crates.io token). Wait for the GitHub Release in step 3 to finish first — the `[package.metadata.binstall]` `pkg-url` template points at the tarball produced there, so users who run `cargo binstall chasquimq-cli` between steps 3 and 4 will fall back to a source build.
 
-Tag form: cargo-dist parses `<package-name>-v<version>` as a singular-package release. `chasquimq-cli-v1.0.0` releases only the CLI. (A bare `v1.0.0` tag would also work today since the CLI is the only `dist`-able crate in the workspace, but pinning to the namespaced form keeps the release scope unambiguous if more bin crates land later.)
+Tag form: a bare `v<version>` tag works today because the CLI is the only `dist`-able crate in the workspace. If more bin crates land later, switch to the namespaced `chasquimq-cli-v<version>` form to scope releases unambiguously, and update the `pkg-url` template in `chasquimq-cli/Cargo.toml` to match.
 
 Local validation before tagging:
 

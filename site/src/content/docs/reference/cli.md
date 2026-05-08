@@ -12,7 +12,15 @@ acts on a queue name and a Redis URL.
 
 ## Install
 
-Prebuilt binary (recommended; covers macOS / Linux / Windows):
+With `cargo binstall` (recommended if you have Rust):
+
+```bash
+cargo binstall chasquimq-cli
+```
+
+Pulls the prebuilt tarball from GitHub Releases (no source compile). Install `cargo-binstall` itself with `cargo install cargo-binstall` if you don't have it.
+
+Without Rust (one-liner installer; macOS / Linux / Windows):
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jotarios/chasquimq/releases/latest/download/chasquimq-cli-installer.sh | sh
@@ -23,10 +31,10 @@ Or download a platform-specific tarball from the [Releases page](https://github.
 From source (Rust 1.85+):
 
 ```bash
-cargo install --git https://github.com/jotarios/chasquimq chasquimq-cli
+cargo install chasquimq-cli
 ```
 
-The crate is intentionally not published to crates.io — releases ship as binaries via [cargo-dist](https://opensource.axo.dev/cargo-dist/) on GitHub Releases.
+The crate is published to [crates.io](https://crates.io/crates/chasquimq-cli) for discoverability and `cargo install` / `cargo binstall` lookup. Binary releases ship via [cargo-dist](https://opensource.axo.dev/cargo-dist/) on GitHub Releases.
 
 ## Global flags
 
