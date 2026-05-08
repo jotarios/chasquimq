@@ -1,0 +1,51 @@
+---
+// Diátaxis four-quadrant index. Renders a 2x2 grid on desktop, single
+// column on mobile. Each quadrant carries the canonical Diátaxis label
+// alongside the local docs label so the page doubles as teaching.
+interface Quadrant {
+  kind: string; // "Tutorials", "How-To", "Reference", "Explanation"
+  title: string; // Local label: "Start here", "Guides", "Reference", "Concepts"
+  blurb: string;
+  href: string;
+}
+const quadrants: Quadrant[] = [
+  {
+    kind: "Tutorials",
+    title: "Start here",
+    blurb: "If you've never used ChasquiMQ.",
+    href: "/start/getting-started/",
+  },
+  {
+    kind: "How-To",
+    title: "Guides",
+    blurb: "Solve a specific operational problem.",
+    href: "/guides/",
+  },
+  {
+    kind: "Reference",
+    title: "Reference",
+    blurb: "Look up a class, method, or error code.",
+    href: "/reference/",
+  },
+  {
+    kind: "Explanation",
+    title: "Concepts",
+    blurb: "Understand how the engine thinks.",
+    href: "/concepts/",
+  },
+];
+---
+
+<ul class="chasqui-diataxis" role="list">
+  {
+    quadrants.map((q) => (
+      <li class="chasqui-diataxis__cell">
+        <a class="chasqui-diataxis__link" href={q.href}>
+          <span class="chasqui-diataxis__kind">{q.kind}</span>
+          <span class="chasqui-diataxis__title">{q.title}</span>
+          <span class="chasqui-diataxis__blurb">{q.blurb}</span>
+        </a>
+      </li>
+    ))
+  }
+</ul>

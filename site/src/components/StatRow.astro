@@ -1,0 +1,30 @@
+---
+// Three-up monospace stat row used on the landing page.
+// Props are arrays of {value, label, suffix?} so the consumer
+// passes a single shape instead of three repeated triples.
+interface Stat {
+  value: string;
+  label: string;
+  suffix?: string;
+}
+interface Props {
+  stats: Stat[];
+}
+const { stats } = Astro.props as Props;
+---
+
+<dl class="chasqui-stat-row" role="list">
+  {
+    stats.map((stat) => (
+      <div class="chasqui-stat" role="listitem">
+        <dt class="chasqui-stat__label">{stat.label}</dt>
+        <dd class="chasqui-stat__value">
+          <span class="chasqui-stat__num">{stat.value}</span>
+          {stat.suffix && (
+            <span class="chasqui-stat__suffix">{stat.suffix}</span>
+          )}
+        </dd>
+      </div>
+    ))
+  }
+</dl>

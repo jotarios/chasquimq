@@ -1,0 +1,440 @@
+/* ChasquiMQ landing page styles.
+ *
+ * Scoped to classes used only on the splash homepage. Builds on the
+ * Starlight token bridge in tokens.css. No purple gradients, no bubble
+ * radii, no centered-everything. Hairline borders, monospace stats,
+ * one accent moment above the fold (the primary CTA).
+ *
+ * Token map (DESIGN.md → Starlight bridge):
+ *   --accent          -> --sl-color-text-accent
+ *   --bg              -> --sl-color-bg
+ *   --surface         -> --sl-color-bg-sidebar / --sl-color-gray-6
+ *   --text            -> --sl-color-text
+ *   --text-muted      -> --sl-color-gray-2 / --sl-color-gray-3
+ *   --border          -> --sl-color-hairline
+ *   --border-strong   -> --sl-color-hairline-light
+ */
+
+/* ---------- Section rhythm ---------- */
+.chasqui-section {
+  max-width: 1100px;
+  margin-inline: auto;
+  padding-inline: 1.5rem;
+  padding-block: 4rem;
+}
+.chasqui-section--tight {
+  padding-block: 3rem;
+}
+.chasqui-section + .chasqui-section {
+  border-top: 1px solid var(--sl-color-hairline);
+}
+.chasqui-section__opener {
+  font-size: 2rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.15;
+  margin: 0 0 1.5rem;
+  color: var(--sl-color-text);
+}
+.chasqui-section__lede {
+  font-size: 1.125rem;
+  line-height: 1.6;
+  color: var(--sl-color-gray-2);
+  max-width: 60ch;
+  margin: 0 0 2rem;
+}
+
+/* ---------- Hero ---------- */
+.chasqui-hero {
+  max-width: 1100px;
+  margin-inline: auto;
+  padding-inline: 1.5rem;
+  padding-block: 5rem 4rem;
+}
+.chasqui-hero__eyebrow {
+  font-family: var(--sl-font-mono);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--sl-color-gray-3);
+  margin: 0 0 1.5rem;
+}
+.chasqui-hero__title {
+  margin: 0;
+  line-height: 1.05;
+  letter-spacing: -0.01em;
+  /* Two stacked lines: sans 600 + serif italic 400. The one allowed
+     flourish per DESIGN.md §4.4. */
+}
+.chasqui-hero__title-sans {
+  display: block;
+  font-family: var(--sl-font);
+  font-weight: 600;
+  font-size: clamp(1.75rem, 4vw, 3rem);
+  color: var(--sl-color-text);
+}
+.chasqui-hero__title-serif {
+  display: block;
+  font-family: var(--chasqui-font-display);
+  font-weight: 400;
+  font-style: italic;
+  font-size: clamp(2.25rem, 6vw, 4rem);
+  letter-spacing: -0.02em;
+  color: var(--sl-color-text);
+  margin-top: 0.25rem;
+}
+.chasqui-hero__sub {
+  font-size: 1.125rem;
+  line-height: 1.6;
+  color: var(--sl-color-gray-2);
+  max-width: 60ch;
+  margin: 1.75rem 0 0;
+}
+.chasqui-hero__sub code {
+  font-family: var(--sl-font-mono);
+  font-size: 0.95em;
+  background: var(--sl-color-bg-inline-code);
+  padding: 1px 6px;
+  border-radius: 2px;
+}
+.chasqui-hero__ctas {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 2rem;
+}
+
+/* ---------- Buttons ---------- */
+.chasqui-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 44px;
+  padding: 0 1.25rem;
+  font-family: var(--sl-font);
+  font-weight: 500;
+  font-size: 0.9375rem;
+  border-radius: 4px;
+  text-decoration: none;
+  border: 1px solid transparent;
+  transition: background-color 150ms cubic-bezier(0.2, 0, 0, 1);
+  white-space: nowrap;
+}
+.chasqui-btn--primary {
+  background: var(--sl-color-accent);
+  color: var(--sl-color-black); /* inverts to white in dark, dark in light via token swap */
+  color: #ffffff;
+  border-color: var(--sl-color-accent);
+}
+.chasqui-btn--primary:hover,
+.chasqui-btn--primary:focus-visible {
+  background: var(--sl-color-accent-high);
+  border-color: var(--sl-color-accent-high);
+  color: #ffffff;
+}
+.chasqui-btn--secondary {
+  background: transparent;
+  color: var(--sl-color-text);
+  border-color: var(--sl-color-hairline-light);
+}
+.chasqui-btn--secondary:hover,
+.chasqui-btn--secondary:focus-visible {
+  background: var(--sl-color-bg-inline-code);
+}
+.chasqui-btn:focus-visible {
+  outline: 2px solid var(--sl-color-accent);
+  outline-offset: 2px;
+}
+
+/* ---------- Quickstart tabs section ---------- */
+.chasqui-quickstart .starlight-tabs {
+  /* Starlight already styles tabs; nothing to add here beyond rhythm. */
+  margin-top: 0.5rem;
+}
+.chasqui-quickstart__hint {
+  font-size: 0.875rem;
+  color: var(--sl-color-gray-3);
+  margin: 1rem 0 0;
+}
+.chasqui-quickstart__hint code {
+  font-family: var(--sl-font-mono);
+}
+
+/* ---------- Feature cards ---------- */
+.chasqui-features {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1.5rem;
+  margin-top: 2rem;
+}
+.chasqui-feature {
+  border: 1px solid var(--sl-color-hairline);
+  border-radius: 6px;
+  padding: 1.5rem;
+  background: var(--sl-color-bg);
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.chasqui-feature__title {
+  font-size: 1.0625rem;
+  font-weight: 600;
+  margin: 0;
+  color: var(--sl-color-text);
+  letter-spacing: -0.01em;
+}
+.chasqui-feature__body {
+  margin: 0;
+  font-size: 0.9375rem;
+  line-height: 1.55;
+  color: var(--sl-color-gray-2);
+  flex: 1;
+}
+.chasqui-feature__body code,
+.chasqui-feature__body .mono {
+  font-family: var(--sl-font-mono);
+  font-size: 0.9em;
+  color: var(--sl-color-text);
+}
+.chasqui-feature__link {
+  font-family: var(--sl-font);
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--sl-color-text);
+  text-decoration: none;
+  border-bottom: 1px solid var(--sl-color-hairline-light);
+  align-self: flex-start;
+  padding-bottom: 1px;
+  transition: border-color 150ms cubic-bezier(0.2, 0, 0, 1);
+}
+.chasqui-feature__link:hover,
+.chasqui-feature__link:focus-visible {
+  border-bottom-color: var(--sl-color-text);
+}
+.chasqui-feature__link span {
+  margin-left: 0.25rem;
+}
+
+/* ---------- Stat row ---------- */
+.chasqui-stat-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0;
+  margin: 2rem 0 0;
+  padding: 0;
+  border: 1px solid var(--sl-color-hairline);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.chasqui-stat {
+  padding: 1.5rem 1.75rem;
+  border-right: 1px solid var(--sl-color-hairline);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.chasqui-stat:last-child {
+  border-right: none;
+}
+.chasqui-stat__label {
+  font-family: var(--sl-font-mono);
+  font-size: 0.75rem;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--sl-color-gray-3);
+  margin: 0;
+}
+.chasqui-stat__value {
+  font-family: var(--sl-font-mono);
+  font-size: 1.75rem;
+  font-weight: 500;
+  color: var(--sl-color-text);
+  margin: 0;
+  line-height: 1.1;
+  font-feature-settings: "tnum";
+}
+.chasqui-stat__suffix {
+  font-size: 0.875rem;
+  color: var(--sl-color-gray-3);
+  margin-left: 0.25rem;
+}
+.chasqui-perf__caption {
+  font-size: 0.8125rem;
+  color: var(--sl-color-gray-3);
+  margin-top: 1rem;
+  font-family: var(--sl-font-mono);
+}
+.chasqui-perf__caption a {
+  color: inherit;
+  border-bottom: 1px solid var(--sl-color-hairline-light);
+  text-decoration: none;
+}
+
+/* ---------- Diátaxis grid ---------- */
+.chasqui-diataxis {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 0;
+  margin: 2rem 0 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--sl-color-hairline);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.chasqui-diataxis__cell {
+  border-right: 1px solid var(--sl-color-hairline);
+  border-bottom: 1px solid var(--sl-color-hairline);
+}
+.chasqui-diataxis__cell:nth-child(2n) {
+  border-right: none;
+}
+.chasqui-diataxis__cell:nth-child(n + 3) {
+  border-bottom: none;
+}
+.chasqui-diataxis__link {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 1.5rem 1.75rem;
+  text-decoration: none;
+  color: var(--sl-color-text);
+  transition: background-color 150ms cubic-bezier(0.2, 0, 0, 1);
+  height: 100%;
+}
+.chasqui-diataxis__link:hover,
+.chasqui-diataxis__link:focus-visible {
+  background: var(--sl-color-bg-inline-code);
+}
+.chasqui-diataxis__kind {
+  font-family: var(--sl-font-mono);
+  font-size: 0.75rem;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--sl-color-gray-3);
+}
+.chasqui-diataxis__title {
+  font-size: 1.125rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.chasqui-diataxis__blurb {
+  font-size: 0.9375rem;
+  color: var(--sl-color-gray-2);
+  line-height: 1.5;
+}
+
+/* ---------- Architecture diagram ---------- */
+.chasqui-arch {
+  font-family: var(--sl-font-mono);
+  font-size: 0.875rem;
+  line-height: 1.6;
+  background: var(--sl-color-bg-inline-code);
+  border: 1px solid var(--sl-color-hairline);
+  border-radius: 0; /* terminals have square corners */
+  padding: 1.25rem 1.5rem;
+  margin: 2rem 0 0;
+  overflow-x: auto;
+  color: var(--sl-color-text);
+  white-space: pre;
+}
+
+/* ---------- Final CTA ---------- */
+.chasqui-final {
+  text-align: left;
+  padding-block: 5rem;
+}
+.chasqui-final__title {
+  font-size: 1.75rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin: 0 0 0.75rem;
+  color: var(--sl-color-text);
+}
+.chasqui-final__sub {
+  font-size: 1rem;
+  color: var(--sl-color-gray-2);
+  margin: 0 0 1.75rem;
+  max-width: 60ch;
+}
+
+/* ---------- Hide Starlight's default splash hero block ----------
+ * We pass an empty hero.title in frontmatter; this collapses the
+ * empty hero container so our custom .chasqui-hero owns the fold. */
+.chasqui-splash {
+  /* Pull our custom hero up over the empty Starlight splash hero. */
+  margin-top: -2rem;
+}
+/* Hide the Starlight splash hero entirely on the index page. The splash
+ * template emits a .hero block as the first child of the content panel
+ * containing only an empty <h1 data-page-title>. We target that specifically
+ * so other splash pages (none today) aren't affected. */
+.sl-markdown-content:has(.chasqui-splash) {
+  /* Container has no own styling; nothing to override here. */
+}
+.content-panel:has(.chasqui-splash) > .sl-container > .hero {
+  display: none;
+}
+/* Splash content panels add a top divider — drop it so the hero is flush. */
+.content-panel:has(.chasqui-splash) {
+  padding-top: 0;
+  border-top: none;
+}
+
+/* ---------- Responsive ---------- */
+@media (max-width: 900px) {
+  .chasqui-features {
+    grid-template-columns: 1fr;
+  }
+  .chasqui-stat-row {
+    grid-template-columns: 1fr;
+  }
+  .chasqui-stat {
+    border-right: none;
+    border-bottom: 1px solid var(--sl-color-hairline);
+  }
+  .chasqui-stat:last-child {
+    border-bottom: none;
+  }
+  .chasqui-diataxis {
+    grid-template-columns: 1fr;
+  }
+  .chasqui-diataxis__cell {
+    border-right: none;
+    border-bottom: 1px solid var(--sl-color-hairline);
+  }
+  .chasqui-diataxis__cell:nth-child(2n) {
+    border-right: none;
+  }
+  .chasqui-diataxis__cell:last-child {
+    border-bottom: none;
+  }
+}
+
+@media (max-width: 640px) {
+  .chasqui-hero {
+    padding-block: 3rem 2.5rem;
+  }
+  .chasqui-section {
+    padding-block: 3rem;
+  }
+  .chasqui-hero__ctas {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .chasqui-btn {
+    width: 100%;
+  }
+}
+
+/* ---------- Reduced motion ---------- */
+@media (prefers-reduced-motion: reduce) {
+  .chasqui-btn,
+  .chasqui-feature__link,
+  .chasqui-diataxis__link {
+    transition-duration: 0ms;
+  }
+}

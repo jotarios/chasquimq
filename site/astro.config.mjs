@@ -25,7 +25,7 @@ export default defineConfig({
         baseUrl:
           "https://github.com/jotarios/chasquimq/edit/main/site/",
       },
-      customCss: ["./src/styles/tokens.css"],
+      customCss: ["./src/styles/tokens.css", "./src/styles/landing.css"],
       sidebar: [
         {
           label: "Start here",
