@@ -25,6 +25,8 @@ export interface ConnectionOptions {
   password?: string
   username?: string
   db?: number
+  tls?: boolean
+  url?: string
   // Other connection-shaped fields are accepted and silently ignored;
   // chasquimq's native producer manages its own pool.
   [key: string]: unknown

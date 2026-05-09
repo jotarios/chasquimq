@@ -130,6 +130,34 @@ BULLMQ_BENCH_REDIS_HOST=127.0.0.1 bun src/index.ts
 
 Note: `bullmq-bench`'s `package.json` says `"bullmq": "latest"` but the lockfile pinned an older 4.x. Run `bun add bullmq@latest` after cloning if you re-baseline.
 
+## Doc surfaces — keep in sync
+
+When you ship a user-observable feature (new flag, config field, public method, behaviour change, breaking change, new dependency, performance characteristic), update **every** surface below that the change touches. Missing one is a real defect — past PRs in this repo shipped engine features that never reached the Starlight site, leaving users on docs.chasquimq.dev unaware they exist. Treat this as a checklist before opening any feature PR.
+
+| Surface | When to update | What goes here |
+|---|---|---|
+| `README.md` (root) | New user-visible capability or tagline-worthy claim | Headline pitch, feature comparison table, three quickstarts. Do not duplicate engine internals. |
+| `docs/engine.md` | New engine surface, config field, operational gotcha, or behaviour under a Redis policy | Operational notes (terse, one bullet per item). Internals: retry, delayed jobs, DLQ, results, observability. |
+| `docs/history.md` | **Every** feature PR or slice that lands | Slice-by-slice engineering changelog. Authoritative log; future sessions read this for context. |
+| `chasquimq-node/README.md` | Anything that shows up in the Node API surface | "What's in the box" table + quickstart + topical sections (TLS, retries, etc.). Mirror Python's structure. |
+| `chasquimq-py/README.md` | Anything that shows up in the Python API surface | Same shape as the Node README. Mirror the Node structure deliberately. |
+| `site/src/content/docs/start/*` | New "first 30 minutes" feature a user would hit immediately | Getting-started tutorials. Diátaxis: tutorial. |
+| `site/src/content/docs/concepts/*` | New mental model, semantic guarantee, or design decision worth understanding | Diátaxis: explanation. Cross-link to engine.md, don't duplicate. |
+| `site/src/content/docs/guides/*` | New deployment/ops/migration recipe | Diátaxis: how-to. One MDX per task. |
+| `site/src/content/docs/reference/*` | New flag, env var, error code, public API, wire-format change | Diátaxis: reference. `node-api.md`, `python-api.md`, `rust-api.md`, `cli.md`, `options.md`, `wire-format.md`, `error-codes.md` — pick the right one(s). |
+| `site/astro.config.mjs` | New file in `site/src/content/docs/` | Sidebar is hand-curated; an unlinked page renders but is invisible in nav. |
+| `CLAUDE.md` (this file) | Phase boundary, deferred-followup status change, new load-bearing doc surface, new agent rule | Orientation only — link to the canonical source, don't duplicate. |
+
+**Common slip-ups to actively guard against:**
+
+- Adding an MDX file under `site/src/content/docs/...` but forgetting to register it in `site/astro.config.mjs`'s sidebar.
+- Updating only `docs/engine.md` and one shim README. The Starlight site's `concepts/` or `reference/` page covering the same surface goes stale silently.
+- Asymmetric Node/Python shim READMEs. If you add a section to one, mirror it in the other (same headings, same shape, different language).
+- Skipping `docs/history.md`. It is the changelog; not adding to it means "what shipped, when, and why" is lost between sessions.
+- Adding a new connection knob, config field, or env var without surfacing it in `site/src/content/docs/reference/options.md`.
+
+**When you see a stale claim in any of these surfaces while doing other work, fix it inline rather than open a separate doc PR.** Cheaper than queueing the fix.
+
 ## Design System
 
 **Always read [`site/design/DESIGN.md`](site/design/DESIGN.md) before making any UI/visual decisions for the docs site.** All tokens (color, type, spacing, radius, motion), the type ramp, the component primitives, the accessibility floor, and the explicit anti-patterns are defined there. **Do not deviate without explicit user approval.**
