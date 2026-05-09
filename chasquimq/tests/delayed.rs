@@ -127,6 +127,7 @@ fn producer_cfg_with_max_delay(queue: &str, max_delay_secs: u64) -> ProducerConf
         pool_size: 2,
         max_stream_len: 100_000,
         max_delay_secs,
+        ..Default::default()
     }
 }
 

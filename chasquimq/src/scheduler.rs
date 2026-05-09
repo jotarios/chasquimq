@@ -105,7 +105,7 @@ where
     }
 
     pub async fn run(self, shutdown: CancellationToken) -> Result<()> {
-        let client = connect(&self.redis_url).await?;
+        let client = connect(&self.redis_url, &self.cfg.connection).await?;
         let mut schedule_sha = load_script(&client, SCHEDULE_REPEATABLE_SCRIPT).await?;
         let mut lock_sha = load_script(&client, ACQUIRE_LOCK_SCRIPT).await?;
         let outcome = self

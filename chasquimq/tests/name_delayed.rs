@@ -103,6 +103,7 @@ fn producer_cfg(queue: &str) -> ProducerConfig {
         pool_size: 2,
         max_stream_len: 100_000,
         max_delay_secs: 0, // unlimited
+        ..Default::default()
     }
 }
 

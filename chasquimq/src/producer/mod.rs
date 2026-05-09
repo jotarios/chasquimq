@@ -161,7 +161,7 @@ impl<T> Clone for Producer<T> {
 
 impl<T: Serialize> Producer<T> {
     pub async fn connect(redis_url: &str, config: ProducerConfig) -> Result<Self> {
-        let pool = connect_pool(redis_url, config.pool_size).await?;
+        let pool = connect_pool(redis_url, config.pool_size, &config.connection).await?;
         let producer_id: Arc<str> = Arc::from(uuid::Uuid::new_v4().to_string());
         let queue_name: Arc<str> = Arc::from(config.queue_name.as_str());
         let stream_key: Arc<str> = Arc::from(stream_key(&config.queue_name));
