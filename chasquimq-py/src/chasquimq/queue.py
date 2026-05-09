@@ -419,15 +419,9 @@ class Queue:
         return await producer.remove_repeatable_by_key(key)
 
     async def close(self) -> None:
-        """Drop the cached native producer.
-
-        The native pool tears itself down when all references are
-        released; calling :meth:`close` simply discards the handle so
-        a future call lazily reconnects with the same options. Safe to
-        call multiple times; the :attr:`is_closed` flag flips to
-        ``True`` on the first call.
-        """
-        self._producer = None
+        if self._producer is not None:
+            await self._producer.shutdown()
+            self._producer = None
         self._closed = True
 
     async def __aenter__(self) -> "Queue":

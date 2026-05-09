@@ -454,10 +454,11 @@ export class Queue<
   }
 
   async close(): Promise<void> {
-    // The native producer manages its own pool lifetime; nothing to
-    // explicitly close yet. Drop the cached promise so a future call
-    // would lazily re-connect.
-    this.producerPromise = undefined;
+    if (this.producerPromise) {
+      const producer = await this.producerPromise;
+      await producer.shutdown();
+      this.producerPromise = undefined;
+    }
     this.closed = true;
   }
 
