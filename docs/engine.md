@@ -85,7 +85,7 @@ Adapter metric names follow Prometheus base-unit convention: durations are expos
 - **`cancel_delayed` only works for jobs scheduled via the `_with_id` API surface.** Cancel looks up the exact ZSET member through a side-index (`{chasqui:<queue>}:didx:<job_id>`) that is written only by the idempotent schedule script. Plain `add_in` / `add_at` / `add_in_bulk` calls don't populate the index, so cancel by id is a no-op (returns `false`) for those.
 - **Key format uses Redis Cluster hash tags.** Every chasqui key looks like `{chasqui:<queue>}:<suffix>` so the queue's keyspace co-locates on a single Redis Cluster slot.
 - **Result-backend `None` is ambiguous.** `Producer::get_result` returns `None` for "not yet completed", "expired", and "never written" alike. For deterministic completion-detection, subscribe to the events stream via `QueueEvents`.
-- **TLS via `rediss://`.** Pass `rediss://host:port` and the engine negotiates TLS via fred's `enable-rustls` feature (aws-lc-rs crypto backend); trust roots come from the system store (keychain on macOS, CA bundle on Linux, schannel on Windows). For private CAs, point `SSL_CERT_FILE` at a PEM bundle. Plain `redis://` is unaffected — the TLS connector is only constructed when the URL scheme demands it.
+- **TLS via `rediss://`.** Pass `rediss://host:port` and the engine negotiates TLS via fred's `enable-rustls-ring` feature; trust roots come from the system store (keychain on macOS, CA bundle on Linux, schannel on Windows). For private CAs, point `SSL_CERT_FILE` at a PEM bundle. Plain `redis://` is unaffected — the TLS connector is only constructed when the URL scheme demands it.
 
 ## Why the design choices
 
