@@ -16,6 +16,7 @@ from typing import Any, Optional, Sequence, Union
 
 from . import _native
 from ._encoding import decode_payload, encode_payload
+from ._url import apply_tls
 from .errors import NotSupportedError
 from .job import Job
 from .repeat import BackoffSpec, MissedFiresPolicy, RepeatableMeta, RepeatPattern
@@ -72,11 +73,7 @@ class Queue:
         max_delay_secs: Optional[int] = None,
     ) -> None:
         self._name = name
-        self._redis_url = (
-            redis_url.replace("redis://", "rediss://", 1)
-            if tls and redis_url.startswith("redis://")
-            else redis_url
-        )
+        self._redis_url = apply_tls(redis_url, tls)
         self._max_stream_len = max_stream_len
         self._max_delay_secs = max_delay_secs
         self._producer: Optional[_native.Producer] = None

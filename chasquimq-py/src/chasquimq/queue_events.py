@@ -21,6 +21,8 @@ from typing import Any, AsyncIterator, Optional
 
 import redis.asyncio as aioredis
 
+from ._url import apply_tls
+
 
 @dataclass(frozen=True)
 class QueueEvent:
@@ -76,12 +78,7 @@ class QueueEvents:
     ) -> None:
         self._queue_name = queue_name
         self._stream_key = f"{{chasqui:{queue_name}}}:events"
-        url = (
-            redis_url.replace("redis://", "rediss://", 1)
-            if tls and redis_url.startswith("redis://")
-            else redis_url
-        )
-        self._client = aioredis.from_url(url, decode_responses=False)
+        self._client = aioredis.from_url(apply_tls(redis_url, tls), decode_responses=False)
         self._last_id = last_event_id
         self._block_ms = block_ms
         self._count = count

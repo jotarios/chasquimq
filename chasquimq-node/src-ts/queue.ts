@@ -472,7 +472,7 @@ export class Queue<
 }
 
 function buildRedisUrl(c: ConnectionOptions): string {
-  if (c.url) return c.url;
+  if (c.url) return applyTls(c.url, c.tls === true);
   const host = c.host ?? "127.0.0.1";
   const port = c.port ?? 6379;
   const auth = c.password
@@ -481,6 +481,14 @@ function buildRedisUrl(c: ConnectionOptions): string {
   const db = c.db != null ? `/${c.db}` : "";
   const scheme = c.tls ? "rediss" : "redis";
   return `${scheme}://${auth}${host}:${port}${db}`;
+}
+
+function applyTls(url: string, tls: boolean): string {
+  if (!tls) return url;
+  const lower = url.toLowerCase();
+  if (lower.startsWith("rediss://")) return url;
+  if (lower.startsWith("redis://")) return "rediss://" + url.slice("redis://".length);
+  return "rediss://" + url;
 }
 
 /**

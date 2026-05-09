@@ -16,6 +16,7 @@ from typing import Any, Awaitable, Callable, Optional
 
 from . import _native
 from ._encoding import decode_payload, encode_payload
+from ._url import apply_tls
 from .job import Job
 
 
@@ -60,11 +61,7 @@ class Worker:
     ) -> None:
         self._queue_name = queue_name
         self._handler = handler
-        self._redis_url = (
-            redis_url.replace("redis://", "rediss://", 1)
-            if tls and redis_url.startswith("redis://")
-            else redis_url
-        )
+        self._redis_url = apply_tls(redis_url, tls)
         self._run_scheduler = run_scheduler
 
         consumer_kwargs: dict[str, Any] = {
