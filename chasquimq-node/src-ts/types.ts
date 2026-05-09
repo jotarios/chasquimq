@@ -25,13 +25,7 @@ export interface ConnectionOptions {
   password?: string
   username?: string
   db?: number
-  /** When `true`, builds a `rediss://` URL — TLS handshake against the
-   *  configured host. Trust roots come from the system store
-   *  (rustls-native-certs); for private CAs, set `SSL_CERT_FILE` to a PEM
-   *  bundle. Ignored when `url` is set. */
   tls?: boolean
-  /** Full Redis connection URL. When set, overrides every other field —
-   *  `redis://...` for plaintext, `rediss://...` for TLS. */
   url?: string
   // Other connection-shaped fields are accepted and silently ignored;
   // chasquimq's native producer manages its own pool.
