@@ -88,7 +88,7 @@ const conn = { host: "my-cluster.cache.amazonaws.com", port: 6379, tls: true }
 const conn = { url: "rediss://my-cluster.cache.amazonaws.com:6379" }
 ```
 
-Trust roots come from the system store, so AWS Trust CA-signed endpoints work out of the box. For private CAs, set `SSL_CERT_FILE` to a PEM bundle before launching Node.
+Trust roots come from the platform store via `rustls-native-certs`: keychain on macOS, the OS CA bundle on Linux (probed by `openssl-probe`), system store on Windows — so AWS Trust CA-signed endpoints work out of the box. For private CAs, point `SSL_CERT_FILE` at a PEM bundle before launching Node; that env var takes precedence over the platform store.
 
 ## Power-user surface
 
