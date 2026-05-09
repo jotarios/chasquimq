@@ -82,6 +82,35 @@ async fn add_then_xlen_is_one() {
 
 #[tokio::test]
 #[ignore = "requires REDIS_URL"]
+async fn add_then_shutdown_preserves_committed_write() {
+    let admin = admin().await;
+    let queue = "p_shutdown_preserves";
+    let key = stream_key(queue);
+    flush_stream(&admin, &key).await;
+
+    let producer: Producer<Sample> = Producer::connect(&redis_url(), cfg(queue, 1_000))
+        .await
+        .expect("connect producer");
+    producer
+        .add(Sample {
+            n: 7,
+            s: "shutdown".into(),
+        })
+        .await
+        .expect("add");
+    producer.shutdown().await.expect("shutdown");
+
+    assert_eq!(
+        xlen(&admin, &key).await,
+        1,
+        "add() acked → message persists across shutdown"
+    );
+
+    let _: () = admin.quit().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires REDIS_URL"]
 async fn add_bulk_xlen_matches_n() {
     let admin = admin().await;
     let queue = "p_add_bulk";
