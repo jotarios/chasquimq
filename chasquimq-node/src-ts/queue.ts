@@ -472,13 +472,15 @@ export class Queue<
 }
 
 function buildRedisUrl(c: ConnectionOptions): string {
+  if (c.url) return c.url;
   const host = c.host ?? "127.0.0.1";
   const port = c.port ?? 6379;
   const auth = c.password
     ? `${c.username ?? ""}:${encodeURIComponent(c.password)}@`
     : "";
   const db = c.db != null ? `/${c.db}` : "";
-  return `redis://${auth}${host}:${port}${db}`;
+  const scheme = c.tls ? "rediss" : "redis";
+  return `${scheme}://${auth}${host}:${port}${db}`;
 }
 
 /**

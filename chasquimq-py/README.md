@@ -73,6 +73,17 @@ asyncio.run(main())
 | `MissedFiresPolicy` | `.skip()` / `.fire_once()` / `.fire_all(max_catchup)` for cron catch-up after scheduler downtime. |
 | `UnrecoverableError` | Raise from your handler to bypass retries and route the job directly to DLQ. |
 
+### TLS / `rediss://`
+
+For TLS-fronted Redis (ElastiCache encryption-in-transit, MemoryDB), pass a `rediss://` URL:
+
+```python
+async with Queue("emails", redis_url="rediss://my-cluster.cache.amazonaws.com:6379") as queue:
+    ...
+```
+
+Trust roots come from the system store, so AWS Trust CA-signed endpoints work out of the box. For private CAs, set `SSL_CERT_FILE` to a PEM bundle before launching Python.
+
 ## Power-user surface
 
 The native engine handles ship from the same top-level package:

@@ -78,6 +78,18 @@ main()
 
 `Queue.add(name, data, opts)` accepts: `delay` (ms), `attempts`, `backoff`, `jobId`, `repeat: { kind: 'cron' | 'every', ... }`, `missedFires: { kind: 'skip' | 'fire-once' | 'fire-all', maxCatchup? }`.
 
+### TLS / `rediss://`
+
+For TLS-fronted Redis (ElastiCache encryption-in-transit, MemoryDB), set `tls: true` on `connection`, or pass a `rediss://` URL directly:
+
+```ts
+const conn = { host: "my-cluster.cache.amazonaws.com", port: 6379, tls: true }
+// or:
+const conn = { url: "rediss://my-cluster.cache.amazonaws.com:6379" }
+```
+
+Trust roots come from the system store, so AWS Trust CA-signed endpoints work out of the box. For private CAs, set `SSL_CERT_FILE` to a PEM bundle before launching Node.
+
 ## Power-user surface
 
 The native engine handles ship from the same top-level package:
