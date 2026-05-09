@@ -64,10 +64,10 @@ where
             events_enabled = self.cfg.events_enabled,
             "consumer run entry"
         );
-        let reader = connect(&self.redis_url).await?;
-        let dlq_writer = connect(&self.redis_url).await?;
-        let ack_client = connect(&self.redis_url).await?;
-        let retry_client = connect(&self.redis_url).await?;
+        let reader = connect(&self.redis_url, &self.cfg.connection).await?;
+        let dlq_writer = connect(&self.redis_url, &self.cfg.connection).await?;
+        let ack_client = connect(&self.redis_url, &self.cfg.connection).await?;
+        let retry_client = connect(&self.redis_url, &self.cfg.connection).await?;
 
         ensure_group(&reader, &self.stream_key, &self.cfg.group).await?;
 
@@ -83,7 +83,7 @@ where
         // clone-by-Arc on its underlying fred `Client`), keeping their
         // `events: EventsWriter` field shape unchanged.
         let events = Arc::new(if self.cfg.events_enabled {
-            let events_client = connect(&self.redis_url).await?;
+            let events_client = connect(&self.redis_url, &self.cfg.connection).await?;
             EventsWriter::new(
                 events_client,
                 &self.cfg.queue_name,
@@ -104,7 +104,7 @@ where
         // fast path — zero overhead for users who never call `get_result`.
         let (ok_result_tx, ok_result_handle) = if self.cfg.store_results {
             let (tx, rx) = mpsc::channel::<JobOk>(concurrency * 4);
-            let ok_client = connect(&self.redis_url).await?;
+            let ok_client = connect(&self.redis_url, &self.cfg.connection).await?;
             let handle = tokio::spawn(run_ok_result_writer(
                 ok_client,
                 OkResultWriterConfig {
@@ -267,6 +267,7 @@ where
             events_enabled: self.cfg.events_enabled,
             events_max_stream_len: self.cfg.events_max_stream_len,
             metrics: self.cfg.metrics.clone(),
+            connection: self.cfg.connection.clone(),
         };
         // Hand the embedded promoter the same events writer the consumer's
         // hot-path subsystems use, so a worker process with
@@ -290,6 +291,7 @@ where
         let scheduler_cfg = SchedulerConfig {
             queue_name: self.cfg.queue_name.clone(),
             metrics: self.cfg.metrics.clone(),
+            connection: self.cfg.connection.clone(),
             ..self.cfg.scheduler.clone()
         };
         let scheduler = Scheduler::<U>::new(self.redis_url.clone(), scheduler_cfg);

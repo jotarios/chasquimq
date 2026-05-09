@@ -1,9 +1,37 @@
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionTuning {
+    pub tcp_keepalive_secs: u64,
+    pub tcp_keepalive_interval_secs: u64,
+    pub reconnect_max_attempts: u32,
+    pub reconnect_min_delay_ms: u32,
+    pub reconnect_max_delay_ms: u32,
+    pub reconnect_backoff_base: u32,
+    pub reconnect_jitter_ms: u32,
+    pub connection_timeout_ms: u64,
+}
+
+impl Default for ConnectionTuning {
+    fn default() -> Self {
+        Self {
+            tcp_keepalive_secs: 60,
+            tcp_keepalive_interval_secs: 10,
+            reconnect_max_attempts: 0,
+            reconnect_min_delay_ms: 100,
+            reconnect_max_delay_ms: 30_000,
+            reconnect_backoff_base: 2,
+            reconnect_jitter_ms: 50,
+            connection_timeout_ms: 10_000,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ProducerConfig {
     pub queue_name: String,
     pub pool_size: usize,
     pub max_stream_len: u64,
     pub max_delay_secs: u64,
+    pub connection: ConnectionTuning,
 }
 
 impl Default for ProducerConfig {
@@ -13,6 +41,7 @@ impl Default for ProducerConfig {
             pool_size: 8,
             max_stream_len: 1_000_000,
             max_delay_secs: 30 * 24 * 3600,
+            connection: ConnectionTuning::default(),
         }
     }
 }
@@ -105,6 +134,7 @@ pub struct ConsumerConfig {
     /// Forwarded to the inline promoter the consumer spawns when
     /// `delayed_enabled` is true. Defaults to [`crate::metrics::NoopSink`].
     pub metrics: std::sync::Arc<dyn crate::metrics::MetricsSink>,
+    pub connection: ConnectionTuning,
 }
 
 impl std::fmt::Debug for ConsumerConfig {
@@ -138,6 +168,7 @@ impl std::fmt::Debug for ConsumerConfig {
             .field("store_results", &self.store_results)
             .field("result_ttl_secs", &self.result_ttl_secs)
             .field("metrics", &"<dyn MetricsSink>")
+            .field("connection", &self.connection)
             .finish()
     }
 }
@@ -173,6 +204,7 @@ impl Default for ConsumerConfig {
             store_results: false,
             result_ttl_secs: 3600,
             metrics: crate::metrics::noop_sink(),
+            connection: ConnectionTuning::default(),
         }
     }
 }
@@ -198,6 +230,7 @@ pub struct PromoterConfig {
     /// [`crate::metrics::NoopSink`]; swap in your own [`MetricsSink`] to
     /// bridge into Prometheus, OpenTelemetry, etc.
     pub metrics: std::sync::Arc<dyn crate::metrics::MetricsSink>,
+    pub connection: ConnectionTuning,
 }
 
 impl std::fmt::Debug for PromoterConfig {
@@ -212,6 +245,7 @@ impl std::fmt::Debug for PromoterConfig {
             .field("events_enabled", &self.events_enabled)
             .field("events_max_stream_len", &self.events_max_stream_len)
             .field("metrics", &"<dyn MetricsSink>")
+            .field("connection", &self.connection)
             .finish()
     }
 }
@@ -247,6 +281,7 @@ pub struct SchedulerConfig {
     /// metrics (fires per tick, exhaustion events) are intentionally
     /// reserved for a follow-up slice.
     pub metrics: std::sync::Arc<dyn crate::metrics::MetricsSink>,
+    pub connection: ConnectionTuning,
 }
 
 impl std::fmt::Debug for SchedulerConfig {
@@ -259,6 +294,7 @@ impl std::fmt::Debug for SchedulerConfig {
             .field("lock_ttl_secs", &self.lock_ttl_secs)
             .field("holder_id", &self.holder_id)
             .field("metrics", &"<dyn MetricsSink>")
+            .field("connection", &self.connection)
             .finish()
     }
 }
@@ -273,6 +309,7 @@ impl Default for SchedulerConfig {
             lock_ttl_secs: 5,
             holder_id: format!("s-{}", uuid::Uuid::new_v4()),
             metrics: crate::metrics::noop_sink(),
+            connection: ConnectionTuning::default(),
         }
     }
 }
@@ -289,6 +326,7 @@ impl Default for PromoterConfig {
             events_enabled: true,
             events_max_stream_len: 100_000,
             metrics: crate::metrics::noop_sink(),
+            connection: ConnectionTuning::default(),
         }
     }
 }

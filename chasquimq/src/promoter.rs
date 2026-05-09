@@ -82,7 +82,7 @@ impl Promoter {
             poll_ms = self.cfg.poll_interval_ms,
             "promoter run entry"
         );
-        let client = connect(&self.redis_url).await?;
+        let client = connect(&self.redis_url, &self.cfg.connection).await?;
         // Three cases for the events writer:
         // 1. Shared writer supplied (embedded promoter): clone the `Arc`-shared
         //    writer; no extra Redis connection. This is the conn-share fast
@@ -95,7 +95,7 @@ impl Promoter {
         let events = match &self.shared_events {
             Some(shared) => EventsWriter::clone(shared),
             None if self.cfg.events_enabled => {
-                let events_client = connect(&self.redis_url).await?;
+                let events_client = connect(&self.redis_url, &self.cfg.connection).await?;
                 EventsWriter::new(
                     events_client,
                     &self.cfg.queue_name,
