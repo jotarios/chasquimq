@@ -47,7 +47,15 @@ The moment we cut a v2.0 with breaking changes (Rust API, Node shim, Python shim
    - Plugin renders a sidebar version switcher and `/v1/` URLs automatically.
    - Set canonical link tags to point at `/latest/` for SEO; `/v1/` pages are noindex or canonical-to-themselves depending on traffic.
 
-4. **What needs to be true before flipping:** the doc tree should be reasonably stable (no half-finished sections), and at least one v2.0 RC should exist so the "latest" branch has actual v2 content to differentiate from v1.
+4. **Ordering matters.** The freeze must land on `main` *before* any v2 breaking changes do. The right sequence:
+   - Open a separate PR titled "freeze v1 docs ahead of v2.0 work" that does only the plugin install + freeze.
+   - Verify `/v1/start/getting-started/` resolves and reads as v1 in the CF Pages preview deploy on that PR.
+   - Merge that PR first.
+   - Then merge the v2 work as normal.
+
+   If you forget and v2 changes land on `main` before the freeze, recovery is messy: either revert v2 from `main`, or freeze from an older commit (and now `main` and the snapshot have diverged in awkward ways). Avoid by ordering correctly.
+
+5. **What needs to be true before flipping:** the doc tree should be reasonably stable (no half-finished sections), and at least one v2.0 RC should exist so the "latest" branch has actual v2 content to differentiate from v1.
 
 ### What we are NOT doing now
 
