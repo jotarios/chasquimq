@@ -82,7 +82,7 @@ async with Queue("emails", redis_url="rediss://my-cluster.cache.amazonaws.com:63
     ...
 ```
 
-Trust roots come from the system store, so AWS Trust CA-signed endpoints work out of the box. For private CAs, set `SSL_CERT_FILE` to a PEM bundle before launching Python.
+Trust roots come from the system TLS stack (Secure Transport on macOS, OpenSSL on Linux, Schannel on Windows), so AWS Trust CA-signed endpoints work out of the box. For private CAs, install them in the system store.
 
 ## Power-user surface
 
