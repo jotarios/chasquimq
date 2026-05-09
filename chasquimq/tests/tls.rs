@@ -6,9 +6,8 @@ use fred::prelude::Config;
 use fred::types::{ClusterHash, CustomCommand, Value};
 use serde::{Deserialize, Serialize};
 
-fn tls_url() -> String {
-    std::env::var("REDIS_TLS_URL")
-        .expect("REDIS_TLS_URL must be set (e.g. rediss://127.0.0.1:6390) for TLS tests")
+fn tls_url_opt() -> Option<String> {
+    std::env::var("REDIS_TLS_URL").ok()
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -17,8 +16,8 @@ struct Sample {
     s: String,
 }
 
-async fn admin_tls() -> Client {
-    let cfg = Config::from_url(&tls_url()).expect("REDIS_TLS_URL parses with rediss:// scheme");
+async fn admin_tls(url: &str) -> Client {
+    let cfg = Config::from_url(url).expect("REDIS_TLS_URL parses with rediss:// scheme");
     let client = Client::new(cfg, None, None, None);
     client.init().await.expect("connect TLS admin");
     client
@@ -51,13 +50,17 @@ async fn xlen(admin: &Client, key: &str) -> i64 {
 #[tokio::test]
 #[ignore = "requires REDIS_TLS_URL pointing to a TLS-fronted Redis (see scripts/test-tls.sh)"]
 async fn rediss_url_negotiates_tls_and_round_trips_xadd() {
-    let admin = admin_tls().await;
+    let Some(url) = tls_url_opt() else {
+        eprintln!("skipping: REDIS_TLS_URL not set (see scripts/test-tls.sh)");
+        return;
+    };
+    let admin = admin_tls(&url).await;
     let queue = "tls_round_trip";
     let key = stream_key(queue);
     flush_stream(&admin, &key).await;
 
     let producer: Producer<Sample> = Producer::connect(
-        &tls_url(),
+        &url,
         ProducerConfig {
             queue_name: queue.to_string(),
             pool_size: 2,
