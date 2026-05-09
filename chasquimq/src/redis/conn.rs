@@ -8,7 +8,10 @@ use fred::types::config::{ConnectionConfig, ReconnectPolicy, TcpConfig};
 use std::time::Duration;
 
 pub(crate) async fn connect(url: &str, tuning: &ConnectionTuning) -> Result<Client> {
-    let cfg = Config::from_url(url).map_err(Error::Redis)?;
+    let mut cfg = Config::from_url(url).map_err(Error::Redis)?;
+    if let Some(provider) = tuning.credential_provider.clone() {
+        cfg.credential_provider = Some(provider);
+    }
     let (conn, policy) = build_fred_slots(tuning);
     let client = Client::new(cfg, None, Some(conn), Some(policy));
     client.init().await.map_err(Error::Redis)?;
@@ -23,7 +26,10 @@ pub(crate) async fn connect_pool(
     if pool_size == 0 {
         return Err(Error::Config("pool_size must be > 0".into()));
     }
-    let cfg = Config::from_url(url).map_err(Error::Redis)?;
+    let mut cfg = Config::from_url(url).map_err(Error::Redis)?;
+    if let Some(provider) = tuning.credential_provider.clone() {
+        cfg.credential_provider = Some(provider);
+    }
     let (conn, policy) = build_fred_slots(tuning);
     let pool = Pool::new(cfg, None, Some(conn), Some(policy), pool_size).map_err(Error::Redis)?;
     std::mem::drop(pool.init().await.map_err(Error::Redis)?);
@@ -112,5 +118,51 @@ mod tests {
         let (conn, _) = build_fred_slots(&tuning);
         assert_eq!(conn.connection_timeout, Duration::from_millis(5_000));
         assert!(conn.reconnect_on_auth_error);
+    }
+
+    #[derive(Debug)]
+    struct StubProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl fred::types::config::CredentialProvider for StubProvider {
+        async fn fetch(
+            &self,
+            _server: Option<&fred::types::config::Server>,
+        ) -> std::result::Result<(Option<String>, Option<String>), fred::error::Error> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok((Some("user".into()), Some(format!("token-{n}"))))
+        }
+    }
+
+    #[tokio::test]
+    async fn credential_provider_fetch_returns_rotated_token() {
+        use fred::types::config::CredentialProvider;
+        let provider = StubProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let (_, p1) = provider.fetch(None).await.expect("fetch");
+        let (_, p2) = provider.fetch(None).await.expect("fetch");
+        assert_eq!(p1.as_deref(), Some("token-0"));
+        assert_eq!(p2.as_deref(), Some("token-1"));
+    }
+
+    #[test]
+    fn credential_provider_field_threads_into_tuning_clone() {
+        let provider: std::sync::Arc<dyn fred::types::config::CredentialProvider> =
+            std::sync::Arc::new(StubProvider {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            });
+        let tuning = ConnectionTuning {
+            credential_provider: Some(provider.clone()),
+            ..ConnectionTuning::default()
+        };
+        let cloned = tuning.clone();
+        assert!(cloned.credential_provider.is_some());
+        assert!(std::sync::Arc::ptr_eq(
+            cloned.credential_provider.as_ref().unwrap(),
+            &provider,
+        ));
     }
 }

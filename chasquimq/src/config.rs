@@ -1,4 +1,4 @@
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct ConnectionTuning {
     pub tcp_keepalive_secs: u64,
     pub tcp_keepalive_interval_secs: u64,
@@ -8,6 +8,32 @@ pub struct ConnectionTuning {
     pub reconnect_backoff_base: u32,
     pub reconnect_jitter_ms: u32,
     pub connection_timeout_ms: u64,
+    pub credential_provider: Option<std::sync::Arc<dyn fred::types::config::CredentialProvider>>,
+}
+
+impl std::fmt::Debug for ConnectionTuning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectionTuning")
+            .field("tcp_keepalive_secs", &self.tcp_keepalive_secs)
+            .field(
+                "tcp_keepalive_interval_secs",
+                &self.tcp_keepalive_interval_secs,
+            )
+            .field("reconnect_max_attempts", &self.reconnect_max_attempts)
+            .field("reconnect_min_delay_ms", &self.reconnect_min_delay_ms)
+            .field("reconnect_max_delay_ms", &self.reconnect_max_delay_ms)
+            .field("reconnect_backoff_base", &self.reconnect_backoff_base)
+            .field("reconnect_jitter_ms", &self.reconnect_jitter_ms)
+            .field("connection_timeout_ms", &self.connection_timeout_ms)
+            .field(
+                "credential_provider",
+                &self
+                    .credential_provider
+                    .as_ref()
+                    .map(|_| "<dyn CredentialProvider>"),
+            )
+            .finish()
+    }
 }
 
 impl Default for ConnectionTuning {
@@ -21,6 +47,7 @@ impl Default for ConnectionTuning {
             reconnect_backoff_base: 2,
             reconnect_jitter_ms: 50,
             connection_timeout_ms: 10_000,
+            credential_provider: None,
         }
     }
 }
