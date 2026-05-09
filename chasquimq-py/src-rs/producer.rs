@@ -83,6 +83,13 @@ impl Producer {
         self.inner.producer_id().to_string()
     }
 
+    fn shutdown<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            inner.shutdown().await.map_err(map_engine_err)
+        })
+    }
+
     fn add<'py>(
         &self,
         py: Python<'py>,

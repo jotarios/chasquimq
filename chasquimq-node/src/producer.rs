@@ -120,6 +120,11 @@ impl Producer {
     }
 
     #[napi]
+    pub async fn shutdown(&self) -> napi::Result<()> {
+        self.inner.shutdown().await.map_err(map_engine_err)
+    }
+
+    #[napi]
     pub async fn add(&self, payload: Buffer) -> napi::Result<String> {
         let bytes = buffer_to_bytes(&payload);
         self.inner
