@@ -286,6 +286,10 @@ impl<T: Serialize> Producer<T> {
 }
 
 impl<T> Producer<T> {
+    pub async fn shutdown(&self) -> Result<()> {
+        self.pool.quit().await.map_err(Error::Redis)
+    }
+
     /// Read the stored result bytes for `id`, written by a `store_results=true`
     /// consumer when its handler returned non-empty `Bytes`. Returns `None`
     /// for three indistinguishable cases: the job has not yet completed,
