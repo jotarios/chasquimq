@@ -14,7 +14,7 @@ rust-version.workspace = true
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
 tokio-util = { version = "0.7", features = ["rt"] }
-fred = { version = "10", features = ["i-streams"] }
+fred = { version = "10", features = ["i-streams", "credential-provider"] }
 rmp-serde = "1"
 serde = { version = "1", features = ["derive"] }
 ulid = "1"
@@ -38,3 +38,4 @@ chrono-tz = { version = "0.10", default-features = false }
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+async-trait = "0.1"
