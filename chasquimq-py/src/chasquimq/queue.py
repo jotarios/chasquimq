@@ -67,11 +67,16 @@ class Queue:
         name: str,
         *,
         redis_url: str = "redis://127.0.0.1:6379",
+        tls: bool = False,
         max_stream_len: Optional[int] = None,
         max_delay_secs: Optional[int] = None,
     ) -> None:
         self._name = name
-        self._redis_url = redis_url
+        self._redis_url = (
+            redis_url.replace("redis://", "rediss://", 1)
+            if tls and redis_url.startswith("redis://")
+            else redis_url
+        )
         self._max_stream_len = max_stream_len
         self._max_delay_secs = max_delay_secs
         self._producer: Optional[_native.Producer] = None

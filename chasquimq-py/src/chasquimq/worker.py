@@ -41,6 +41,7 @@ class Worker:
         handler: Handler,
         *,
         redis_url: str = "redis://127.0.0.1:6379",
+        tls: bool = False,
         concurrency: int = 100,
         max_attempts: int = 25,
         group: str = "default",
@@ -59,7 +60,11 @@ class Worker:
     ) -> None:
         self._queue_name = queue_name
         self._handler = handler
-        self._redis_url = redis_url
+        self._redis_url = (
+            redis_url.replace("redis://", "rediss://", 1)
+            if tls and redis_url.startswith("redis://")
+            else redis_url
+        )
         self._run_scheduler = run_scheduler
 
         consumer_kwargs: dict[str, Any] = {
@@ -88,7 +93,7 @@ class Worker:
         if scheduler_tick_ms is not None:
             consumer_kwargs["scheduler_tick_ms"] = scheduler_tick_ms
         self._consumer = _native.Consumer(
-            redis_url, queue_name, **consumer_kwargs
+            self._redis_url, queue_name, **consumer_kwargs
         )
 
         self._consumer_task: Optional[asyncio.Task[None]] = None

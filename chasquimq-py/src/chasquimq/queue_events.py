@@ -69,13 +69,19 @@ class QueueEvents:
         queue_name: str,
         *,
         redis_url: str = "redis://127.0.0.1:6379",
+        tls: bool = False,
         last_event_id: str = "$",
         block_ms: int = 5_000,
         count: int = 100,
     ) -> None:
         self._queue_name = queue_name
         self._stream_key = f"{{chasqui:{queue_name}}}:events"
-        self._client = aioredis.from_url(redis_url, decode_responses=False)
+        url = (
+            redis_url.replace("redis://", "rediss://", 1)
+            if tls and redis_url.startswith("redis://")
+            else redis_url
+        )
+        self._client = aioredis.from_url(url, decode_responses=False)
         self._last_id = last_event_id
         self._block_ms = block_ms
         self._count = count
