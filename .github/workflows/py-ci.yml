@@ -78,6 +78,8 @@ jobs:
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux }}
           args: --release --out dist --features pyo3/extension-module
+        env:
+          CFLAGS_aarch64_unknown_linux_gnu: -D__ARM_ARCH=8
 
       - uses: actions/upload-artifact@v7
         with:
