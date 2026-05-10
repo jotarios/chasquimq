@@ -9,11 +9,15 @@ on:
     paths:
       - 'chasquimq-node/**'
       - 'chasquimq/**'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
       - '.github/workflows/node-ci.yml'
   pull_request:
     paths:
       - 'chasquimq-node/**'
       - 'chasquimq/**'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
       - '.github/workflows/node-ci.yml'
 
 concurrency:

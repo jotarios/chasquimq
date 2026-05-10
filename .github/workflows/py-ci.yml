@@ -6,11 +6,15 @@ on:
     paths:
       - 'chasquimq-py/**'
       - 'chasquimq/**'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
       - '.github/workflows/py-ci.yml'
   pull_request:
     paths:
       - 'chasquimq-py/**'
       - 'chasquimq/**'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
       - '.github/workflows/py-ci.yml'
 
 concurrency:
