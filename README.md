@@ -172,6 +172,9 @@ chasqui events emails               # tail the events stream
 | Repeatable / cron jobs | ✓ | ✓ | ✓ | — |
 | Dead-letter queue | ✓ | ✓ | ✓ | — |
 | First-class observability hooks | ✓ (`MetricsSink`) | 3rd-party | 3rd-party | — |
+| TLS (`rediss://`, ElastiCache encryption-in-transit) | ✓ | ✓ | ✓ | ✓ |
+| TCP keepalive + automatic reconnect tuning | ✓ (`ConnectionTuning`) | partial | — | — |
+| Rotating-token credential hook (ElastiCache IAM) | ✓ (Rust) | — | — | — |
 | CLI dashboard | ✓ (`chasqui`) | 3rd-party | 3rd-party | — |
 | Priorities | Future | ✓ | ✓ | — |
 | Rate limiter | Future | ✓ | ✓ | — |
@@ -199,7 +202,9 @@ docs/                       design docs
 
 Phases 1–4 shipped (engine, delayed jobs + retries, Node bindings, Python bindings + CLI). 1.0 polish complete: stable `jobId` + `addUnique`, opt-in result backends, `Job.waitForResult` polling helper, `MissedFiresPolicy` on cron specs, `Python-handler-in-loop` + FFI buffer-copy benches.
 
-Future v1.x candidates: priorities, rate limiter, pause/resume, parent/child dependencies, fair queues, web UI.
+1.x cloud-Redis polish (May 2026) added TLS (`rediss://`), TCP keepalive + reconnect-policy tuning, `Producer::shutdown` clean disconnect, and a `CredentialProvider` hook for rotating-token auth (ElastiCache IAM) — see [`docs/history.md`](docs/history.md#slice-11--aws-lambda-prerequisites-cloud-redis-polish) for the slice writeup.
+
+Future v1.x candidates: priorities, rate limiter, pause/resume, parent/child dependencies, fair queues, web UI. Cross-FFI credential-provider callbacks for the Node and Python shims (today the hook is Rust-only).
 
 ## Contributing
 

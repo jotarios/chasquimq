@@ -19,7 +19,17 @@ exists.
 
 | Option | Node | Python | Rust | Controls |
 |---|---|---|---|---|
-| Redis URL or host:port | `connection.host`, `connection.port`, `connection.password`, `connection.username`, `connection.db` | `redis_url` | `redis_url` (passed to `connect` / `Consumer::new`) | Redis endpoint. Node default `127.0.0.1:6379`; Python and Rust default `redis://127.0.0.1:6379`. |
+| Redis URL or host:port | `connection.host`, `connection.port`, `connection.password`, `connection.username`, `connection.db`, `connection.url` | `redis_url` | `redis_url` (passed to `connect` / `Consumer::new`) | Redis endpoint. Node default `127.0.0.1:6379`; Python and Rust default `redis://127.0.0.1:6379`. Pass `connection.url` on Node, or a full string on Python/Rust, to bypass the host/port builder. |
+| TLS (`rediss://`) | `connection.tls: boolean` (**false**) | `Queue(tls=False)`, `Worker(tls=False)`, `QueueEvents(tls=False)` | scheme of `redis_url` | When `true`, the shim upgrades a `redis://` URL or schemeless host:port to `rediss://`; otherwise pass the URL directly. The engine negotiates TLS via fred's `enable-rustls-ring` feature; trust roots come from `rustls-native-certs`, with `SSL_CERT_FILE` taking precedence for private CAs. |
+| TCP keepalive interval (s) | (engine default) | (engine default) | `ConnectionTuning::tcp_keepalive_secs` (**60**) | Idle interval before TCP keepalive probes start. Set to `0` to disable. Matters for environments that drop idle TCP silently (AWS NAT 350s cutoff). |
+| TCP keepalive probe spacing (s) | (engine default) | (engine default) | `ConnectionTuning::tcp_keepalive_interval_secs` (**10**) | Spacing between probes after the first one fires. |
+| Reconnect attempts | (engine default) | (engine default) | `ConnectionTuning::reconnect_max_attempts` (**0** = unbounded) | Max reconnect attempts on transient failure. `0` = retry forever with exponential backoff. |
+| Reconnect min delay (ms) | (engine default) | (engine default) | `ConnectionTuning::reconnect_min_delay_ms` (**100**) | First reconnect delay. |
+| Reconnect max delay (ms) | (engine default) | (engine default) | `ConnectionTuning::reconnect_max_delay_ms` (**30_000**) | Cap on the exponential reconnect backoff. |
+| Reconnect backoff base | (engine default) | (engine default) | `ConnectionTuning::reconnect_backoff_base` (**2**) | Exponential growth factor. |
+| Reconnect jitter (ms) | (engine default) | (engine default) | `ConnectionTuning::reconnect_jitter_ms` (**50**) | ±jitter on each reconnect; decorrelates fleets. |
+| Connection timeout (ms) | (engine default) | (engine default) | `ConnectionTuning::connection_timeout_ms` (**10_000**) | Per-attempt deadline for TCP+TLS+AUTH handshake. |
+| Rotating-token credential provider | (not exposed) | (not exposed) | `ConnectionTuning::credential_provider: Option<Arc<dyn CredentialProvider>>` (**`None`**) | fred-side hook called before every `AUTH` / `HELLO`. Use for ElastiCache IAM auth (15-min token rotation). Node and Python shims do not yet expose a callback; rotate `REDIS_URL` externally and reconstruct the `Queue`. |
 | Producer pool size | (managed by binding) | (managed by binding) | `ProducerConfig::pool_size` (**8**) | Number of connections in the producer pool. |
 | Cluster prefix | `connection.prefix` (no-op) | n/a | n/a | ChasquiMQ uses `{chasqui:<queue>}` Cluster hash tags; there is no tunable prefix. |
 

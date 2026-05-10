@@ -197,7 +197,9 @@ removed from the delayed ZSET, throws `NotSupportedError` otherwise
 async close(): Promise<void>
 ```
 
-Drop the cached native producer. Idempotent. Compatible with
+If a producer was lazily connected, awaits the underlying pool's
+`QUIT` (clean disconnect) before clearing the handle. Idempotent.
+Calling without ever issuing an `add()` is a no-op. Compatible with
 `await using`:
 
 ```ts
@@ -205,6 +207,13 @@ await using queue = new Queue("emails", { connection });
 await queue.add("welcome", { to: "ada@example.com" });
 // queue.close() runs automatically at scope exit.
 ```
+
+`close()` is for clean disconnect, not flush. Every `await queue.add()`
+already waits for Redis to ack the `XADD` before resolving — by the
+time the call returns, the message is committed. Hosts that may be
+frozen the moment your handler returns (AWS Lambda, Cloud Run) can
+return immediately after `add` resolves; calling `close()` is
+optional polish.
 
 ### `queue.isClosed`
 
@@ -474,6 +483,8 @@ interface ConnectionOptions {
   password?: string;
   username?: string;
   db?: number;
+  tls?: boolean;
+  url?: string;
   [key: string]: unknown;
 }
 ```
@@ -482,6 +493,8 @@ interface ConnectionOptions {
 - `port` — **default `6379`**.
 - `password`, `username` — optional auth.
 - `db` — optional logical database number.
+- `tls` — when `true`, builds a `rediss://` URL (TLS) instead of plaintext. Combined with `url`, upgrades a `redis://` or schemeless input to `rediss://`. The engine negotiates TLS via fred's `enable-rustls-ring`; trust roots come from `rustls-native-certs`. For private CAs, point `SSL_CERT_FILE` at a PEM bundle before launching Node — that env var takes precedence over the platform store.
+- `url` — full Redis URL. When set, overrides `host` / `port` / `password` / `username` / `db`. Use `rediss://...` for TLS, or pass `tls: true` to upgrade in place.
 - Extra keys are accepted and silently ignored; the native pool
   manages its own connection lifetime.
 
