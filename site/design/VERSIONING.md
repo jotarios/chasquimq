@@ -2,8 +2,8 @@
 
 > Operator-facing decision doc. Not a public site page. The site itself follows the "v1.x = current" model below; this file captures *why* and what changes when v2.0 comes.
 
-**Last updated:** 2026-05-08
-**Status:** v1.x current; v2.0 versioning plan deferred until v2.0 work begins.
+**Last updated:** 2026-05-09
+**Status:** v1.x current (latest: v1.2.0); v2.0 versioning plan deferred until v2.0 work begins.
 
 ---
 
@@ -15,16 +15,16 @@ This works because:
 
 1. **One major version exists.** All users are on `chasquimq*` 1.x. There's no v0 long tail to support.
 2. **The audience reads docs to install or debug.** They want the current truth, not historical truth.
-3. **Binary versions are immutable.** crates.io / npm / PyPI / GitHub Releases lock past versions forever. A user installing 1.0.3 today gets the 1.0.3 binary; the docs at chasquimq.io describe 1.1.0 (latest). The mismatch is small and named.
+3. **Binary versions are immutable.** crates.io / npm / PyPI / GitHub Releases lock past versions forever. A user installing 1.0.3 today gets the 1.0.3 binary; the docs at chasquimq.io describe 1.2.0 (latest). The mismatch is small and named.
 
 ### Known gap: docs lead the binary
 
 When changes land on `main` that affect CLI flags, API surface, or behavior, the **docs reflect those changes immediately** but the **binary distributed to users is still the last released version**. Examples:
 
-- PR #110 promoted `--redis-url` to a global CLI flag. The site's `/reference/cli/` shows the new help layout. The actual `chasqui` binary on crates.io / Releases is still v1.1.0 with the old flag layout.
-- A user reading the docs and running `chasqui --help` sees different things until we cut a release.
+- Slice 11 (PRs #114–#120) added TLS, `ConnectionTuning`, `Producer::shutdown`, and `CredentialProvider`. The site's `/reference/` and the new `/guides/produce-from-aws-lambda/` describe these surfaces; users on a pre-1.2.0 binary won't have them yet.
+- A user reading the docs and running an older `chasqui` or pinning an older shim version sees different things until they upgrade past v1.2.0.
 
-Mitigation: cut releases more often, OR add a "Reflects main; latest released is v1.1.0" callout on volatile pages. Not doing either today; flagging for awareness.
+Mitigation: cut releases more often, OR add a "Reflects main; latest released is v1.2.0" callout on volatile pages. Not doing either today; flagging for awareness.
 
 ---
 
