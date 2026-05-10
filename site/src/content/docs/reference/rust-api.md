@@ -22,7 +22,7 @@ language shims so cross-references resolve.
 
 ## On this page
 
-- [Configs](#configs) — `ProducerConfig`, `ConsumerConfig`, `PromoterConfig`, `SchedulerConfig`, `RetryConfig`.
+- [Configs](#configs) — `ProducerConfig`, `ConsumerConfig`, `PromoterConfig`, `SchedulerConfig`, `RetryConfig`, `ConnectionTuning`.
 - [Job types](#job-types) — `Job<T>`, `JobId`, `JobRetryOverride`, `AddOptions`.
 - [Producer](#producer) — every method.
 - [Consumer](#consumer) — constructor and `run`.
@@ -44,6 +44,7 @@ pub struct ProducerConfig {
     pub pool_size: usize,
     pub max_stream_len: u64,
     pub max_delay_secs: u64,
+    pub connection: ConnectionTuning,
 }
 ```
 
@@ -51,6 +52,7 @@ pub struct ProducerConfig {
 - `pool_size` — `fred` connection pool size. **Default `8`.**
 - `max_stream_len` — `XADD MAXLEN ~` cap on the main stream. **Default `1_000_000`.**
 - `max_delay_secs` — reject `add_in` / `add_at` calls whose delay exceeds this. **Default `30 * 24 * 3600` (30 days).**
+- `connection` — TCP keepalive, reconnect policy, and credential-rotation hook. See [`ConnectionTuning`](#connectiontuning).
 
 ### `ConsumerConfig`
 
@@ -84,6 +86,7 @@ pub struct ConsumerConfig {
     pub store_results: bool,
     pub result_ttl_secs: u64,
     pub metrics: Arc<dyn MetricsSink>,
+    pub connection: ConnectionTuning,
 }
 ```
 
@@ -115,6 +118,7 @@ pub struct ConsumerConfig {
 - `store_results` — opt-in result backend. **Default `false`.**
 - `result_ttl_secs` — TTL for stored results when `store_results == true`. **Default `3600` (1h).**
 - `metrics` — `Arc<dyn MetricsSink>` for the embedded promoter / scheduler / hot-path subsystems. **Default `crate::metrics::noop_sink()`.**
+- `connection` — TCP keepalive, reconnect policy, and credential-rotation hook. The embedded promoter and scheduler inherit this through their parent `ConsumerConfig`. See [`ConnectionTuning`](#connectiontuning).
 
 ### `PromoterConfig`
 
@@ -129,6 +133,7 @@ pub struct PromoterConfig {
     pub events_enabled: bool,
     pub events_max_stream_len: u64,
     pub metrics: Arc<dyn MetricsSink>,
+    pub connection: ConnectionTuning,
 }
 ```
 
@@ -140,6 +145,7 @@ pub struct PromoterConfig {
 - `events_enabled` — write `waiting` events for promoted jobs. **Default `true`.**
 - `events_max_stream_len` — **default `100_000`**.
 - `metrics` — **default `noop_sink()`**.
+- `connection` — TCP keepalive, reconnect policy, credential-rotation hook. See [`ConnectionTuning`](#connectiontuning).
 
 ### `SchedulerConfig`
 
@@ -152,6 +158,7 @@ pub struct SchedulerConfig {
     pub lock_ttl_secs: u64,
     pub holder_id: String,
     pub metrics: Arc<dyn MetricsSink>,
+    pub connection: ConnectionTuning,
 }
 ```
 
@@ -161,6 +168,7 @@ pub struct SchedulerConfig {
 - `lock_ttl_secs` — leader-lock TTL on `{chasqui:<queue>}:scheduler:lock`. **Default `5`.**
 - `holder_id` — **default `format!("s-{}", Uuid::new_v4())`**.
 - `metrics` — **default `noop_sink()`**.
+- `connection` — TCP keepalive, reconnect policy, credential-rotation hook. See [`ConnectionTuning`](#connectiontuning).
 
 ### `RetryConfig`
 
@@ -180,6 +188,41 @@ The queue-wide retry curve. Per-job overrides via
 - `max_backoff_ms` — cap on the computed backoff per attempt. **Default `30_000`.**
 - `multiplier` — exponential growth factor. **Default `2.0`.**
 - `jitter_ms` — symmetric ±jitter added per retry. **Default `100`.**
+
+### `ConnectionTuning`
+
+```rust
+pub struct ConnectionTuning {
+    pub tcp_keepalive_secs: u64,
+    pub tcp_keepalive_interval_secs: u64,
+    pub reconnect_max_attempts: u32,
+    pub reconnect_min_delay_ms: u32,
+    pub reconnect_max_delay_ms: u32,
+    pub reconnect_backoff_base: u32,
+    pub reconnect_jitter_ms: u32,
+    pub connection_timeout_ms: u64,
+    pub credential_provider: Option<Arc<dyn fred::types::config::CredentialProvider>>,
+}
+```
+
+Fred-side connection knobs threaded through every `*Config`. The
+embedded promoter and scheduler that `Consumer::run` spawns inherit
+this from the parent `ConsumerConfig`, so a single override at the
+consumer level reaches every subsystem.
+
+- `tcp_keepalive_secs` — idle interval before TCP keepalive probes start. **Default `60`.** Set to `0` to disable. Matters for environments that drop idle TCP silently — most notably AWS NAT Gateways (350s idle cutoff).
+- `tcp_keepalive_interval_secs` — spacing between probes after the first. **Default `10`.**
+- `reconnect_max_attempts` — max reconnect attempts on transient failure. **Default `0`** (unbounded with exponential backoff per fred convention).
+- `reconnect_min_delay_ms` — first reconnect delay. **Default `100`.**
+- `reconnect_max_delay_ms` — cap on the exponential reconnect backoff. **Default `30_000`.**
+- `reconnect_backoff_base` — exponential growth factor. **Default `2`.**
+- `reconnect_jitter_ms` — ±jitter on each reconnect; decorrelates fleets. **Default `50`.**
+- `connection_timeout_ms` — per-attempt deadline for TCP+TLS+AUTH handshake. **Default `10_000`.**
+- `credential_provider` — fred-side hook called before every `AUTH` / `HELLO`. **Default `None`.** Use for ElastiCache IAM auth (15-min token rotation): implement `fred::types::config::CredentialProvider`, wrap in `Arc::new`, set this field. Combined with the unbounded `reconnect_max_attempts` default and `reconnect_on_auth_error: true` (built into the engine), the pool stays usable indefinitely across token rotations. The Node and Python shims do not yet expose a callback surface for this.
+
+`reconnect_on_auth_error: true` is hard-coded into the engine's
+`ConnectionConfig` builder (not user-tunable) so IAM-auth-rotated
+tokens have a path forward.
 
 ## Job types
 
@@ -370,6 +413,22 @@ Read the stored handler return value for `id` (one `GET`). Returns
 expired, or no result was written. The shims call this from
 `Queue.getJobResult` / `Queue.get_job_result` and from
 `Job.waitForResult` / `Job.wait_for_result`.
+
+### `Producer::shutdown`
+
+```rust
+pub async fn shutdown(&self) -> Result<()>;
+```
+
+Calls fred's `Pool::quit` to disconnect cleanly. Does not wait for
+in-flight commands because there are none — every `Producer::add`
+already awaits the Redis `XADD` response before resolving, so by the
+time `add` returns the bytes are committed (not just queued). This
+matters for hosts that may be frozen the moment your handler
+returns (AWS Lambda, Cloud Run, fly.io machines): you can return
+immediately after `add` resolves; calling `shutdown` is optional
+polish for long-lived servers and integration tests that want to
+free file descriptors deterministically.
 
 ### Key accessors
 

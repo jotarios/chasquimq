@@ -4,18 +4,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository status
 
-**1.0 polish complete; ready for the 1.0 tag.** Phases 1–4 shipped (engine, delayed jobs + retries, Node bindings, Python bindings + CLI). The three PRD-listed 1.0 release blockers are done:
+**1.0 shipped; 1.x cloud-Redis polish landed.** Phases 1–4 shipped (engine, delayed jobs + retries, Node bindings, Python bindings + CLI). 1.0 polish closed the three PRD-listed release blockers:
 
 - Function-reference enqueue: stable `jobId` + `Queue.addUnique` on both shims.
 - Per-job result backends: opt-in `Queue.getJobResult` + `Job.waitForResult` polling helpers.
 - Bench coverage with a non-Rust handler: `python_handler_bench.py` + the Criterion FFI buffer-copy microbench.
 
-**Slice-by-slice engineering history lives in [`docs/history.md`](docs/history.md)** — read that for the long-form context (Phase 2 slices, name-on-wire, the post-#62 polish slices, etc.). This file is the orientation doc; treat the history file as the changelog.
+Slice 11 (May 2026) added cloud-Redis prerequisites — TLS via `rediss://`, `ConnectionTuning` for TCP keepalive + reconnect policy, `Producer::shutdown` clean disconnect, and a `CredentialProvider` hook for rotating-token auth (ElastiCache IAM, Rust-only for now). PRs #114-#118 in `docs/history.md`.
+
+**Slice-by-slice engineering history lives in [`docs/history.md`](docs/history.md)** — read that for the long-form context (Phase 2 slices, name-on-wire, the post-#62 polish slices, the slice-11 cloud-Redis work, etc.). This file is the orientation doc; treat the history file as the changelog.
 
 **Deferred 1.x follow-ups:**
 
 - Opt-in result-write bench scenario (`store_results=true` sustained throughput).
 - `maxmemory` eviction-behavior verification (engine behavior under Redis eviction policies has not been exercised end-to-end).
+- Cross-FFI credential-provider callbacks for the Node and Python shims (today the hook is Rust-only; rotating-token auth on Lambda Node/Python needs `REDIS_URL`-rotation + `Queue` reconstruction or a follow-up wiring through napi-rs `ThreadsafeFunction` and pyo3 async-callback machinery).
 
 ## Workspace
 

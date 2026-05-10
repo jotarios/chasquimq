@@ -55,6 +55,7 @@ class Queue:
         name: str,
         *,
         redis_url: str = "redis://127.0.0.1:6379",
+        tls: bool = False,
         max_stream_len: int | None = None,
         max_delay_secs: int | None = None,
     ) -> None: ...
@@ -66,6 +67,7 @@ call. Safe to share across asyncio tasks and across threads.
 
 - `name` — queue name.
 - `redis_url` — **default `"redis://127.0.0.1:6379"`**.
+- `tls` — **default `False`**. When `True`, upgrades a `redis://` `redis_url` (or schemeless `host:port`) to `rediss://`; already-`rediss://` URLs pass through. Engine negotiates TLS via fred's `enable-rustls-ring`; trust roots come from `rustls-native-certs`. For private CAs, set `SSL_CERT_FILE` to a PEM bundle before launching Python (takes precedence over the platform store).
 - `max_stream_len` — `XADD MAXLEN ~` cap. **Default engine value: `1_000_000`.**
 - `max_delay_secs` — reject `add` calls with `delay > this`. **Default engine value: 30 days.**
 
@@ -234,7 +236,9 @@ Pipelined bulk variant. Returns a list aligned by index with
 async def close(self) -> None
 ```
 
-Drop the cached native producer. Idempotent. Compatible with
+If a producer was lazily connected, awaits the underlying pool's
+`QUIT` (clean disconnect) before clearing the handle. Idempotent.
+Calling without ever issuing an `add()` is a no-op. Compatible with
 `async with`:
 
 ```python
@@ -242,6 +246,13 @@ async with Queue("emails") as queue:
     await queue.add("welcome", {"to": "ada@example.com"})
 # queue.close() runs at scope exit.
 ```
+
+`close()` is for clean disconnect, not flush. Every `await queue.add()`
+already waits for Redis to ack the `XADD` before resolving — by the
+time the call returns, the message is committed. Hosts that may be
+frozen the moment your handler returns (AWS Lambda, Cloud Run) can
+return immediately after `add` resolves; calling `close()` is
+optional polish.
 
 ### Properties
 
@@ -258,6 +269,7 @@ class Worker:
         handler: Handler,
         *,
         redis_url: str = "redis://127.0.0.1:6379",
+        tls: bool = False,
         concurrency: int = 100,
         max_attempts: int = 25,
         group: str = "default",
@@ -416,6 +428,7 @@ class QueueEvents:
         queue_name: str,
         *,
         redis_url: str = "redis://127.0.0.1:6379",
+        tls: bool = False,
         last_event_id: str = "$",
         block_ms: int = 5_000,
         count: int = 100,
