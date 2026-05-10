@@ -110,6 +110,8 @@ Triggered by an AWS Lambda doc feasibility eval (2026-05-09): the existing engin
 
 The original AWS Lambda doc that motivated this slice is now actually buildable — engine supports it end-to-end for Rust producers, and the producer-side story for Node/Python on ElastiCache IAM is documented honestly with workarounds. Lands as a separate doc PR (Diátaxis: how-to + explanation + reference).
 
+**Release operator note (1.2.0).** When cutting a release PR, **squash-merge** so the head commit's subject is the PR title (which starts with `chore(release):`). The publish gate on `node-ci.yml` and `py-ci.yml` checks the head commit's subject; a regular merge commit titled "Merge pull request #N from ..." does not match the gate and silently skips both publishes. v1.2.0's first merge attempt (PR #121) used `gh pr merge --merge`, skipped the publishes, and required a follow-up `chore(release):`-prefixed commit on `main` to re-fire the gate. For future releases: `gh pr merge <N> --squash` is the right invocation.
+
 ## Deferred follow-ups for 1.x
 
 - **Opt-in result-write bench scenario.** The PR #75 bench guard locked in the no-overhead-when-off claim (`store_results=false` regresses 0%). The opt-in path (`store_results=true` under sustained load) is not yet measured.
