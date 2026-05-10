@@ -80,7 +80,7 @@ main()
 
 ### TLS / `rediss://`
 
-For TLS-fronted Redis (ElastiCache encryption-in-transit, MemoryDB), set `tls: true` on `connection`, or pass a `rediss://` URL directly:
+For TLS-fronted Redis (ElastiCache encryption-in-transit, or any non-cluster Redis with TLS), set `tls: true` on `connection`, or pass a `rediss://` URL directly:
 
 ```ts
 const conn = { host: "my-cluster.cache.amazonaws.com", port: 6379, tls: true }

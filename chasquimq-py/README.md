@@ -75,7 +75,7 @@ asyncio.run(main())
 
 ### TLS / `rediss://`
 
-For TLS-fronted Redis (ElastiCache encryption-in-transit, MemoryDB), set `tls=True` on `Queue` / `Worker` / `QueueEvents`, or pass a `rediss://` URL directly:
+For TLS-fronted Redis (ElastiCache encryption-in-transit, or any non-cluster Redis with TLS), set `tls=True` on `Queue` / `Worker` / `QueueEvents`, or pass a `rediss://` URL directly:
 
 ```python
 async with Queue("emails", redis_url="redis://my-cluster.cache.amazonaws.com:6379", tls=True) as queue:

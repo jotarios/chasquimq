@@ -61,6 +61,10 @@ export default defineConfig({
             { label: "Idempotent add", slug: "guides/idempotent-add" },
             { label: "Observe the engine", slug: "guides/observe-the-engine" },
             { label: "Tune for throughput", slug: "guides/tune-for-throughput" },
+            {
+              label: "Produce from AWS Lambda",
+              slug: "guides/produce-from-aws-lambda",
+            },
             { label: "Migrate from BullMQ", slug: "guides/migrate-from-bullmq" },
             {
               label: "Migrate from Sidekiq or Celery",

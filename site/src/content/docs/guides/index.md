@@ -27,6 +27,10 @@ Each guide solves one problem in 30–150 lines. Code first, gotchas at the end.
 
 - [Tune for throughput](/guides/tune-for-throughput/) — concurrency, batched acks, payload size, the `enableAutoPipelining` lesson.
 
+## Deployment
+
+- [Produce from AWS Lambda](/guides/produce-from-aws-lambda/) — TLS / `rediss://`, ElastiCache + IAM auth, module-scope clients, the operational gotchas (NAT 350s, ENI cap, IAM token rotation).
+
 ## Migration
 
 - [Migrate from BullMQ](/guides/migrate-from-bullmq/) — API mapping, what's compat, what's intentionally different.
