@@ -45,7 +45,9 @@ export const handler = async (event: { to: string }) => {
 };
 ```
 
-`tls: true` upgrades a `redis://` or schemeless `host:port` URL to `rediss://` in place. If `REDIS_URL` is already `rediss://...` it's left untouched. Do not call `queue.close()` — the warm container reuses the producer pool on the next invocation.
+`tls: true` upgrades a `redis://` or schemeless `host:port` URL to `rediss://` in place. If `REDIS_URL` is already `rediss://...` it's left untouched.
+
+Do **not** wrap the `Queue` in `await using` here, even though that's the recommended pattern in the Node README. `await using` calls `close()` at scope exit, which closes the underlying connection pool — fine for a CLI script, wrong for a Lambda handler where you want the warm container to reuse the pool on the next invocation. Build the `Queue` once at module scope, never close it from the handler.
 
 </TabItem>
 <TabItem label="Python">
@@ -67,7 +69,9 @@ async def handler(event):
     return {"ok": True}
 ```
 
-`tls=True` upgrades a `redis://` or schemeless input to `rediss://` in place. Do not `await _queue.close()` per invocation — the warm container reuses the producer pool.
+`tls=True` upgrades a `redis://` or schemeless input to `rediss://` in place.
+
+Do **not** wrap the `Queue` in `async with` here, even though that's the pattern in the Python README. `async with` calls `close()` at scope exit, which closes the underlying connection pool — fine for a script, wrong for a Lambda handler where you want the warm container to reuse the pool on the next invocation. Build the `Queue` once at module scope, never close it from the handler.
 
 </TabItem>
 </Tabs>
@@ -98,27 +102,15 @@ Three shapes for "Lambda enqueues, gets a result":
 
 1. **Fire-and-forget** (default). `await queue.add(...)`; return from the handler. The bytes are committed before `add` resolves — safe to return immediately.
 2. **Block on the result** for sync-style API Gateway integrations. `await queue.add(...)` returns a `Job`; call `await job.waitForResult({ timeoutMs })`. Cap `timeoutMs` well under your Lambda timeout (default 3s, max 15 min).
-3. **Async via a second Lambda.** Producer Lambda enqueues with a stable `jobId` (`Queue.addUnique`); a second Lambda triggered by the worker's events stream calls `Queue.getJobResult(jobId)` to fetch and respond on a different channel (S3 webhook, SNS, etc.).
+3. **Async pickup elsewhere.** Producer Lambda enqueues with a stable `jobId` (`Queue.addUnique`) and returns immediately; a different process — most realistically your existing worker fleet, since it already drains the queue — handles the result and pushes it onto whatever channel the original caller was waiting on (SNS, S3-webhook, a websocket gateway, a row in a results table). The events stream (`{chasqui:<queue>}:events`) carries `completed` / `failed` transitions for cross-process subscribers, but it's a Redis Stream — not an AWS event source — so a Lambda can't be triggered by it directly. Either subscribe with [`QueueEvents`](/reference/node-api/#queueevents) from a long-running process, or have the worker publish the result-channel push itself.
 
 For (2) and (3), the consumer side must run with `storeResults: true` / `store_results=True`.
-
-## Cold-start latency
-
-Local benchmarks against a quiet Redis 8.6 on macOS arm64 (the engine's bench host; AWS numbers will differ but track within an order of magnitude):
-
-| Step | Node | Python |
-|---|---:|---:|
-| Module import + first `Queue.add(50)` | ~75 ms | ~70 ms |
-| Warm `Queue.add(50)` p50 | ~1.4 ms | ~0.4 ms |
-| Warm `Queue.add(50)` p95 | ~2.1 ms | ~0.7 ms |
-
-Real-world ElastiCache numbers from inside the same VPC add: ~2-10 ms TCP+TLS+AUTH (one-shot, on cold-start), ~1-2 ms per warm `XADD`. Out-of-VPC public Redis adds NAT egress + WAN RTT (10s of ms).
 
 ## Operational gotchas
 
 - **NAT 350 s idle timeout.** Lambdas in a private subnet egressing through a NAT gateway to non-VPC Redis silently lose TCP after 350 s idle — the next invocation hangs until reconnect. ChasquiMQ's 60 s TCP keepalive default handles this; if you've overridden `tcp_keepalive_secs`, keep it under 350.
-- **Connection storm on cold-start spikes.** Each new execution environment opens its own pool. There is no Redis equivalent of RDS Proxy; ElastiCache's `maxclients` becomes your ceiling. Plan reserved concurrency accordingly. Producer pool size is engine-default `8`; Lambda doesn't need more — drop it to `1` if you're tight on `maxclients` (Rust API only for now).
-- **Cluster MOVED on first warm call after failover.** If using ElastiCache cluster mode, the first command after a topology change can return `MOVED`. Today ChasquiMQ targets single-shard (cluster mode is not supported); for multi-shard ElastiCache use a single-node configuration or wait for cluster support.
+- **Connection storm on cold-start spikes.** Each new execution environment opens its own producer pool (engine default: 8 sockets). There is no Redis equivalent of RDS Proxy; ElastiCache's `maxclients` becomes your ceiling. Plan reserved concurrency around `maxclients ÷ pool_size` headroom. Pool size is exposed only on the Rust `ProducerConfig` today; for Node and Python producers, treat the 8-socket-per-execution-environment count as fixed when sizing reserved concurrency.
+- **Redis Cluster is not supported today.** The engine pulls fred without the cluster feature, so it speaks plain Redis. A single-shard ElastiCache or MemoryDB cluster (or any non-clustered Redis) works; multi-shard cluster topologies will not route correctly. If you need to scale beyond one Redis instance, that's a roadmap gap rather than a knob.
 - **Don't `close()` between invocations.** Closing the cached `Queue` forfeits the warm-socket benefit and pays the handshake on every invoke. The TCP socket survives the freeze; let it.
 
 ## When not to use Lambda
