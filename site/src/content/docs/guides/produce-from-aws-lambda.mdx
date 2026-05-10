@@ -1,0 +1,138 @@
+---
+title: Produce jobs from AWS Lambda
+description: Connect a Lambda handler to a long-running ChasquiMQ worker fleet on ElastiCache, with TLS, IAM auth, and the right connection-tuning defaults.
+sidebar:
+  order: 11
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+This guide is the producer-side recipe: short-lived Lambda functions enqueueing jobs into ChasquiMQ on ElastiCache (or any TLS-fronted Redis 8.6+) for a long-running worker fleet to drain. It does **not** cover running ChasquiMQ workers _in_ Lambda — see [When not to use Lambda](#when-not-to-use-lambda) at the end.
+
+## Connection shape
+
+ChasquiMQ's defaults (from PRs #114–#117) are tuned for hosts that may be frozen or terminated between invocations:
+
+- TCP keepalive on (60s probe interval, well under AWS NAT's 350s idle cutoff).
+- Exponential reconnect with unbounded attempts (100 ms → 30 s, base 2, ±50 ms jitter).
+- 10 s connection timeout per handshake.
+- Reconnect on auth error.
+- Every `Producer::add` awaits the Redis `XADD` response before resolving — bytes are committed to Redis before your handler returns.
+
+You don't need to tune these. What you do need to wire is TLS, IAM auth, and a module-scope `Queue` so warm invocations reuse the producer pool.
+
+## Module-scope client
+
+Build the `Queue` once at module scope, never inside the handler. Lambda freezes the execution environment between invocations and thaws it on the next; sockets in module scope survive. Building per-invoke pays the TCP+TLS+AUTH handshake every time and bottoms out your throughput.
+
+<Tabs syncKey="binding">
+<TabItem label="Node">
+
+```ts
+// handler.ts
+import { Queue } from "chasquimq";
+
+const queue = new Queue("emails", {
+  connection: {
+    url: process.env.REDIS_URL,
+    tls: true,
+  },
+});
+
+export const handler = async (event: { to: string }) => {
+  await queue.add("welcome", { to: event.to });
+  return { ok: true };
+};
+```
+
+`tls: true` upgrades a `redis://` or schemeless `host:port` URL to `rediss://` in place. If `REDIS_URL` is already `rediss://...` it's left untouched. Do not call `queue.close()` — the warm container reuses the producer pool on the next invocation.
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+# handler.py
+import os
+from chasquimq import Queue
+
+_queue = Queue(
+    "emails",
+    redis_url=os.environ["REDIS_URL"],
+    tls=True,
+)
+
+
+async def handler(event):
+    await _queue.add("welcome", {"to": event["to"]})
+    return {"ok": True}
+```
+
+`tls=True` upgrades a `redis://` or schemeless input to `rediss://` in place. Do not `await _queue.close()` per invocation — the warm container reuses the producer pool.
+
+</TabItem>
+</Tabs>
+
+## ElastiCache + IAM auth
+
+For ElastiCache with encryption-in-transit (the secure default; required for IAM auth):
+
+1. Put the Lambda in a VPC with subnets that can reach the ElastiCache cluster's security group on port 6379. The Hyperplane shared-ENI architecture makes the VPC cold-start tax small (tens of milliseconds, not the 10 s of pre-2019 Lambda).
+2. The cluster URL the AWS console shows is schemeless (e.g. `my-cluster.cache.amazonaws.com:6379`). With `tls: true`, the shim prepends `rediss://`.
+3. ChasquiMQ's `enable-rustls-ring` TLS backend reads platform trust roots via `rustls-native-certs`. AWS Trust CA-signed endpoints work out of the box. For private CAs, set `SSL_CERT_FILE` to a PEM bundle in the Lambda environment variables — that env var takes precedence over the platform store.
+4. Use multiple subnets in your Lambda VPC config to spread connections across Hyperplane ENIs (the per-subnet-SG combo has a 65k-connection cap; under burst scale-out you can hit it).
+
+## Rotating IAM tokens
+
+ElastiCache IAM auth issues short-lived tokens (~15 min). The engine has a `CredentialProvider` hook that fred calls before every `AUTH` / `HELLO`, so a long-lived pool stays usable across rotations — but **the Node and Python shims do not yet expose this hook**.
+
+Until they do, two workarounds for Lambda Node/Python on IAM auth:
+
+- **Rotate `REDIS_URL` externally.** Rebuild the `Queue` when the cached instance is older than your token TTL. Pay one cold-start-ish reconnect every ~14 minutes. Simplest path; works today.
+- **Use a sidecar that injects fresh tokens into the URL.** A separate process (cron Lambda, ECS task) writes the rotated URL to Secrets Manager / Parameter Store; the producer Lambda reads it. Same effect, less reconnect noise.
+
+For Rust producers on Lambda (the rare case): plug an `Arc<dyn fred::types::config::CredentialProvider>` into `ProducerConfig::connection.credential_provider` and let fred do the rotation in-pool. See the [Rust API reference](/reference/rust-api/#connectiontuning) for the trait shape.
+
+## Result-back patterns
+
+Three shapes for "Lambda enqueues, gets a result":
+
+1. **Fire-and-forget** (default). `await queue.add(...)`; return from the handler. The bytes are committed before `add` resolves — safe to return immediately.
+2. **Block on the result** for sync-style API Gateway integrations. `await queue.add(...)` returns a `Job`; call `await job.waitForResult({ timeoutMs })`. Cap `timeoutMs` well under your Lambda timeout (default 3s, max 15 min).
+3. **Async via a second Lambda.** Producer Lambda enqueues with a stable `jobId` (`Queue.addUnique`); a second Lambda triggered by the worker's events stream calls `Queue.getJobResult(jobId)` to fetch and respond on a different channel (S3 webhook, SNS, etc.).
+
+For (2) and (3), the consumer side must run with `storeResults: true` / `store_results=True`.
+
+## Cold-start latency
+
+Local benchmarks against a quiet Redis 8.6 on macOS arm64 (the engine's bench host; AWS numbers will differ but track within an order of magnitude):
+
+| Step | Node | Python |
+|---|---:|---:|
+| Module import + first `Queue.add(50)` | ~75 ms | ~70 ms |
+| Warm `Queue.add(50)` p50 | ~1.4 ms | ~0.4 ms |
+| Warm `Queue.add(50)` p95 | ~2.1 ms | ~0.7 ms |
+
+Real-world ElastiCache numbers from inside the same VPC add: ~2-10 ms TCP+TLS+AUTH (one-shot, on cold-start), ~1-2 ms per warm `XADD`. Out-of-VPC public Redis adds NAT egress + WAN RTT (10s of ms).
+
+## Operational gotchas
+
+- **NAT 350 s idle timeout.** Lambdas in a private subnet egressing through a NAT gateway to non-VPC Redis silently lose TCP after 350 s idle — the next invocation hangs until reconnect. ChasquiMQ's 60 s TCP keepalive default handles this; if you've overridden `tcp_keepalive_secs`, keep it under 350.
+- **Connection storm on cold-start spikes.** Each new execution environment opens its own pool. There is no Redis equivalent of RDS Proxy; ElastiCache's `maxclients` becomes your ceiling. Plan reserved concurrency accordingly. Producer pool size is engine-default `8`; Lambda doesn't need more — drop it to `1` if you're tight on `maxclients` (Rust API only for now).
+- **Cluster MOVED on first warm call after failover.** If using ElastiCache cluster mode, the first command after a topology change can return `MOVED`. Today ChasquiMQ targets single-shard (cluster mode is not supported); for multi-shard ElastiCache use a single-node configuration or wait for cluster support.
+- **Don't `close()` between invocations.** Closing the cached `Queue` forfeits the warm-socket benefit and pays the handshake on every invoke. The TCP socket survives the freeze; let it.
+
+## When not to use Lambda
+
+ChasquiMQ workers are a long-running `tokio::XREADGROUP BLOCK` loop with a connection-multiplexed pool, batched pipelined `XACK`, and graceful shutdown. Everything that makes them fast is amortized across many jobs. Lambda gives you per-event handlers with a 15-minute ceiling and no graceful-shutdown signal. The mismatch is structural, not tunable:
+
+- **For Lambda-driven processing**, use SQS + Lambda event source mapping. AWS owns the pollers, scaling, dead-lettering, concurrency caps. ChasquiMQ is the wrong tool when your only requirement is "run this function in response to a queued message on AWS."
+- **For ChasquiMQ workers in AWS**, use Fargate, ECS, or EC2. The engine is built to live for hours, not seconds.
+
+This guide is the right shape only when you already have ChasquiMQ workers running somewhere durable and want Lambda functions to participate as producers (cross-cloud, on-prem hybrid, or a Rust hot path). For "everything in AWS, Redis-only," the answer is usually still ChasquiMQ on Fargate with Lambda producers — but think twice if the producer side is also greenfield.
+
+## See also
+
+- [Reference: connection options](/reference/options/#connection) — every `tls`, keepalive, and reconnect knob.
+- [Reference: Node API → ConnectionOptions](/reference/node-api/#connectionoptions).
+- [Reference: Python API → Queue](/reference/python-api/#queue).
+- [Reference: Rust API → ConnectionTuning](/reference/rust-api/#connectiontuning) — the full `CredentialProvider` shape.
