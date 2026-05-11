@@ -16,6 +16,10 @@ benchmarks/runs/
 # Per-user Claude Code agent state (settings, worktrees, scheduled tasks)
 .claude/
 
+# deepsec scan workspace + exported findings (local-only)
+.deepsec/
+/findings/
+
 # Python (chasquimq-py)
 __pycache__/
 *.py[cod]
