@@ -49,7 +49,7 @@ If that sentence is no longer true after a change, the change deviates from the 
 
 The runner — a Chasqui, the Inca relay messenger — is the heritage motif. The name carries it; the visual layer should not over-explain it. **No illustrated runners as hero art.** A small monoline glyph (used as favicon, README badge, and one place in the docs nav) is the entire visual quota for the runner. Treat it like Rust's gear or Redis's cube: present, not loud.
 
-The current logo lives at `docs/chasquimq.jpeg` (raster). It needs to be redrawn as SVG before launch — out of scope for this doc, but flagged.
+The canonical logo lives at `site/public/chasquimq.svg` (monoline SVG, `currentColor` stroke, 32×32 viewBox). A navy-fill copy for the README badge sits at `docs/chasquimq.svg`. The mark is a stylized runner with three trailing stream lines — motion + Redis Streams in one figure. The site favicon (`site/public/favicon.svg`) uses an inline `prefers-color-scheme` media rule so it inverts on dark browser tabs.
 
 ---
 

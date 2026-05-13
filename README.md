@@ -1,4 +1,4 @@
-![ChasquiMQ](docs/chasquimq.jpeg)
+![ChasquiMQ](docs/chasquimq.svg)
 
 # ChasquiMQ
 

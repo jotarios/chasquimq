@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="160" height="160" fill="none" stroke="#0a2540" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="ChasquiMQ">
+  <title>ChasquiMQ</title>
+  <desc>A monoline runner with three trailing stream lines, suggesting motion and Redis Streams.</desc>
+  <g stroke-width="1.5">
+    <path d="M 3 11 L 10 11" opacity="0.4"/>
+    <path d="M 3 16 L 12 16" opacity="0.6"/>
+    <path d="M 3 21 L 10 21" opacity="0.4"/>
+  </g>
+  <circle cx="22" cy="7.5" r="2.3"/>
+  <path d="M 20.5 10 L 17 18"/>
+  <path d="M 17 18 L 22 26.5"/>
+  <path d="M 17 18 L 10.5 21.5"/>
+  <path d="M 19 13 L 25 13"/>
+</svg>

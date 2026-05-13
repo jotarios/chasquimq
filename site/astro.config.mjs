@@ -10,10 +10,10 @@ export default defineConfig({
       title: "ChasquiMQ",
       description: "The fastest open-source message broker for Redis.",
       logo: {
-        src: "./src/assets/chasquimq.jpeg",
+        src: "./src/assets/chasquimq.svg",
         alt: "ChasquiMQ",
       },
-      favicon: "/favicon.jpeg",
+      favicon: "/favicon.svg",
       social: [
         {
           icon: "github",
