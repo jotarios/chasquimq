@@ -14,7 +14,7 @@
  */
 ---
 
-<figure class="chasqui-lifecycle chasqui-lifecycle--modern" aria-labelledby="lifecycle-caption">
+<figure class="chasqui-lifecycle chasqui-lifecycle--modern" aria-labelledby="lifecycle-title">
   <svg
     class="chasqui-lifecycle__svg"
     viewBox="0 0 760 360"
@@ -215,12 +215,6 @@
     </circle>
   </svg>
 
-  <figcaption id="lifecycle-caption" class="chasqui-lifecycle__caption">
-    Producers <code>XADD</code>. Delayed jobs sit in a sorted set until a
-    promoter moves them. Consumers <code>XREADGROUP</code>, dispatch to your
-    handler, then <code>XACKDEL</code> in a batched round trip. Failures retry
-    with backoff; exhausted ones land in the DLQ.
-  </figcaption>
 </figure>
 
 <style>
@@ -242,21 +236,6 @@
       0 1px 0 0 var(--sl-color-hairline-light) inset,
       0 12px 32px -16px rgba(0, 0, 0, 0.35);
   }
-  .chasqui-lifecycle__caption {
-    font-size: 0.875rem;
-    color: var(--sl-color-gray-2);
-    line-height: 1.55;
-    margin-top: 0.75rem;
-    max-width: 68ch;
-  }
-  .chasqui-lifecycle__caption code {
-    font-family: var(--sl-font-mono);
-    font-size: 0.85em;
-    background: var(--sl-color-bg-inline-code);
-    padding: 0.05em 0.35em;
-    border-radius: 3px;
-  }
-
   /* ---------- Background depth glow ---------- */
   .chasqui-lifecycle__svg .lifecycle-bgglow {
     pointer-events: none;
