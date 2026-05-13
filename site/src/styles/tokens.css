@@ -100,6 +100,20 @@ header.header site-search button {
   color: #b9c1cb;
 }
 
+/* Theme selector lives in the navy header in both modes. Light theme's
+ * --sl-color-gray-1 is near-black, which renders the "Auto/Light/Dark"
+ * label and caret invisible on navy. Force a light foreground on header
+ * descendants so the control is legible. */
+header.header starlight-theme-select label {
+  color: #b9c1cb;
+}
+header.header starlight-theme-select label:hover {
+  color: #f5f7fa;
+}
+header.header starlight-theme-select option {
+  color: #e2e6ec;
+}
+
 /* ---------- Code blocks: tighter, monospace-forward ---------- */
 .expressive-code {
   --ec-frm-edBg: var(--sl-color-bg-inline-code);

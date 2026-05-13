@@ -10,10 +10,44 @@ export default defineConfig({
       title: "ChasquiMQ",
       description: "The fastest open-source message broker for Redis.",
       logo: {
-        src: "./src/assets/chasquimq.jpeg",
+        src: "./src/assets/chasquimq-logo.svg",
         alt: "ChasquiMQ",
       },
-      favicon: "/favicon.jpeg",
+      favicon: "/favicon.svg",
+      head: [
+        {
+          tag: "meta",
+          attrs: { property: "og:image", content: "https://chasquimq.io/og.png" },
+        },
+        {
+          tag: "meta",
+          attrs: { property: "og:image:width", content: "1200" },
+        },
+        {
+          tag: "meta",
+          attrs: { property: "og:image:height", content: "630" },
+        },
+        {
+          tag: "meta",
+          attrs: { property: "og:image:alt", content: "ChasquiMQ — the fastest open-source message broker for Redis." },
+        },
+        {
+          tag: "meta",
+          attrs: { name: "twitter:image", content: "https://chasquimq.io/og.png" },
+        },
+        {
+          tag: "meta",
+          attrs: { name: "twitter:image:alt", content: "ChasquiMQ — the fastest open-source message broker for Redis." },
+        },
+        {
+          tag: "meta",
+          attrs: { name: "twitter:site", content: "@chasquimq" },
+        },
+        {
+          tag: "meta",
+          attrs: { name: "twitter:creator", content: "@chasquimq" },
+        },
+      ],
       social: [
         {
           icon: "github",
