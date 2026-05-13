@@ -1,0 +1,450 @@
+---
+/**
+ * Detailed lifecycle diagram for "Thinking in ChasquiMQ" — modern treatment.
+ *
+ * Replaces the ASCII flow block. Vertical: producer → stream → reader →
+ * worker pool → (ok | err) → (XACKDEL | retry path) → (delayed zset
+ * re-promote | DLQ).
+ *
+ * Modern: gradient-stroke active edges, animated trails, comet-tail tokens
+ * with soft glow, rounded layered cards with gradient borders on focal
+ * nodes, radial accent depth glow. All colors from existing tokens.css.
+ * Reduced-motion collapses to a static frame.
+ */
+---
+
+<figure
+  class="chasqui-lifecycle chasqui-lifecycle--tall chasqui-lifecycle--modern"
+  aria-labelledby="lifecycle-detail-caption"
+>
+  <svg
+    class="chasqui-lifecycle__svg"
+    viewBox="0 0 720 740"
+    role="img"
+    aria-labelledby="lifecycle-detail-title lifecycle-detail-desc"
+    preserveAspectRatio="xMidYMid meet"
+  >
+    <title id="lifecycle-detail-title">ChasquiMQ engine lifecycle</title>
+    <desc id="lifecycle-detail-desc">
+      A job moves from producer.add() into a Redis Stream, is read by a single
+      Consumer reader task with XREADGROUP, fans out to a tokio worker pool,
+      runs the user handler, and either acks atomically with XACKDEL on success
+      or enters the retry path on failure. Exhausted attempts route to a DLQ
+      stream; remaining attempts re-promote via the delayed sorted set.
+    </desc>
+
+    <defs>
+      <filter id="lld-glow" x="-50%" y="-50%" width="200%" height="200%">
+        <feGaussianBlur in="SourceGraphic" stdDeviation="3" result="blur" />
+        <feMerge>
+          <feMergeNode in="blur" />
+          <feMergeNode in="SourceGraphic" />
+        </feMerge>
+      </filter>
+
+      <filter id="lld-card-shadow" x="-20%" y="-20%" width="140%" height="160%">
+        <feGaussianBlur in="SourceAlpha" stdDeviation="2" />
+        <feOffset dx="0" dy="2" result="offset" />
+        <feComponentTransfer>
+          <feFuncA type="linear" slope="0.18" />
+        </feComponentTransfer>
+        <feMerge>
+          <feMergeNode />
+          <feMergeNode in="SourceGraphic" />
+        </feMerge>
+      </filter>
+
+      {/* Vertical gradient for the main flow trail (top-to-bottom) */}
+      <linearGradient id="lld-edge-grad" x1="0%" y1="0%" x2="0%" y2="100%">
+        <stop offset="0%" stop-color="var(--sl-color-gray-4)" stop-opacity="0.4" />
+        <stop offset="30%" stop-color="var(--sl-color-accent)" stop-opacity="0.85" />
+        <stop offset="100%" stop-color="var(--sl-color-accent-high)" stop-opacity="0.95" />
+      </linearGradient>
+
+      {/* Gradient stroke for focal cards */}
+      <linearGradient id="lld-accent-border" x1="0%" y1="0%" x2="100%" y2="100%">
+        <stop offset="0%" stop-color="var(--sl-color-accent)" />
+        <stop offset="100%" stop-color="var(--sl-color-accent-high)" />
+      </linearGradient>
+
+      {/* Radial depth glow centered between stream and worker pool */}
+      <radialGradient id="lld-bg-glow" cx="50%" cy="35%" r="50%">
+        <stop offset="0%" stop-color="var(--sl-color-accent-low)" stop-opacity="0.55" />
+        <stop offset="55%" stop-color="var(--sl-color-accent-low)" stop-opacity="0.12" />
+        <stop offset="100%" stop-color="var(--sl-color-accent-low)" stop-opacity="0" />
+      </radialGradient>
+
+      <marker
+        id="lld-arrow"
+        viewBox="0 0 8 8"
+        refX="7"
+        refY="4"
+        markerWidth="6"
+        markerHeight="6"
+        orient="auto-start-reverse"
+      >
+        <path d="M 0 0 L 8 4 L 0 8 z" class="lifecycle-arrowhead" />
+      </marker>
+    </defs>
+
+    {/* ---------- Background depth glow ---------- */}
+    <rect class="lifecycle-bgglow" x="40" y="40" width="640" height="500" fill="url(#lld-bg-glow)" />
+
+    {/* ---------- Edges ---------- */}
+    {/* Vertical spine: producer → stream → reader → workers → split */}
+    <path
+      class="edge edge--base"
+      d="M 360 40 L 360 65 M 360 125 L 360 165 M 360 225 L 360 265 M 360 325 L 360 365"
+      marker-end="url(#lld-arrow)"
+    />
+    {/* Animated bright trail along the happy path */}
+    <path
+      class="edge edge--trail"
+      d="M 360 40 L 360 165 L 360 265 L 360 365 L 360 405 L 240 470 L 240 545"
+    />
+    {/* Hidden motion twin (continuous) */}
+    <path
+      id="lld-ok-motion"
+      d="M 360 40 L 360 165 L 360 265 L 360 365 L 360 405 L 240 470 L 240 545"
+      fill="none"
+      stroke="none"
+    />
+
+    {/* Split arrows from workers */}
+    <path
+      class="edge edge--ok"
+      d="M 350 420 L 240 475"
+      marker-end="url(#lld-arrow)"
+    />
+    <path
+      class="edge edge--err"
+      d="M 370 420 L 480 475"
+      marker-end="url(#lld-arrow)"
+    />
+
+    {/* ok → XACKDEL */}
+    <path
+      class="edge edge--base"
+      d="M 240 505 L 240 545"
+      marker-end="url(#lld-arrow)"
+    />
+
+    {/* err → retry path → attempts split */}
+    <path
+      class="edge edge--base"
+      d="M 480 505 L 480 545 M 480 605 L 480 625"
+      marker-end="url(#lld-arrow)"
+    />
+
+    {/* attempts split */}
+    <path
+      class="edge edge--base"
+      d="M 470 630 L 380 660"
+      marker-end="url(#lld-arrow)"
+    />
+    <path
+      class="edge edge--base"
+      d="M 490 630 L 580 660"
+      marker-end="url(#lld-arrow)"
+    />
+
+    {/* Retry feedback loop: delayed zset re-promotes back into the stream */}
+    <path
+      class="edge edge--loop"
+      d="M 320 685 C 120 685, 60 400, 60 155 C 60 100, 200 95, 300 95"
+      marker-end="url(#lld-arrow)"
+    />
+
+    {/* Motion path for the err token (workers → retry → zset → re-enter stream) */}
+    <path
+      id="lld-err-motion"
+      d="M 360 365 L 360 405 L 480 470 L 480 545 L 480 605 L 480 625 L 380 660 L 320 685 C 120 685, 60 400, 60 155 C 60 100, 200 95, 300 95"
+      fill="none"
+      stroke="none"
+    />
+
+    {/* ---------- Nodes ---------- */}
+    {/* producer.add() — pill style */}
+    <g class="node" transform="translate(280 10)" filter="url(#lld-card-shadow)">
+      <rect class="node__box node__box--bare" width="160" height="30" rx="15" />
+      <text class="node__label node__label--sm" x="80" y="20">producer.add()</text>
+    </g>
+
+    {/* Redis Stream — focal */}
+    <g class="node node--focal" transform="translate(260 65)" filter="url(#lld-card-shadow)">
+      <rect class="node__box node__box--accent-fill" width="200" height="60" rx="10" />
+      <rect class="node__box node__box--accent-border" width="200" height="60" rx="10" />
+      <text class="node__label" x="100" y="26">Redis Stream</text>
+      <text class="node__sub node__sub--mono" x="100" y="46">{`{chasqui:<queue>}  ·  XADD`}</text>
+    </g>
+
+    {/* Consumer reader */}
+    <g class="node" transform="translate(260 165)" filter="url(#lld-card-shadow)">
+      <rect class="node__box" width="200" height="60" rx="10" />
+      <text class="node__label" x="100" y="26">Consumer reader</text>
+      <text class="node__sub node__sub--mono" x="100" y="46">XREADGROUP · CLAIM idle</text>
+    </g>
+
+    {/* Worker pool */}
+    <g class="node" transform="translate(260 265)" filter="url(#lld-card-shadow)">
+      <rect class="node__box" width="200" height="60" rx="10" />
+      <text class="node__label" x="100" y="26">Worker pool</text>
+      <text class="node__sub" x="100" y="46">N tokio tasks · your handler</text>
+    </g>
+
+    {/* Outcome labels on the split */}
+    <g class="edge-label">
+      <text x="232" y="448" text-anchor="end">Ok</text>
+      <text x="488" y="448" text-anchor="start">Err</text>
+    </g>
+
+    {/* XACKDEL — success terminal (accent border) */}
+    <g class="node" transform="translate(160 545)" filter="url(#lld-card-shadow)">
+      <rect class="node__box node__box--ok" width="160" height="60" rx="10" />
+      <text class="node__label" x="80" y="26">XACKDEL</text>
+      <text class="node__sub node__sub--mono" x="80" y="46">atomic ack + delete</text>
+    </g>
+
+    {/* Retry path */}
+    <g class="node" transform="translate(400 545)" filter="url(#lld-card-shadow)">
+      <rect class="node__box" width="160" height="60" rx="10" />
+      <text class="node__label" x="80" y="26">retry path</text>
+      <text class="node__sub node__sub--mono" x="80" y="46">Lua · attempts++</text>
+    </g>
+
+    {/* Attempts labels */}
+    <g class="edge-label">
+      <text x="396" y="650" text-anchor="end">{`< max`}</text>
+      <text x="564" y="650" text-anchor="start">{`≥ max`}</text>
+    </g>
+
+    {/* Delayed zset */}
+    <g class="node" transform="translate(300 660)" filter="url(#lld-card-shadow)">
+      <rect class="node__box node__box--muted" width="160" height="50" rx="10" />
+      <text class="node__label node__label--sm" x="80" y="22">delayed zset</text>
+      <text class="node__sub node__sub--mono" x="80" y="38">backoff · re-promote</text>
+    </g>
+
+    {/* DLQ stream */}
+    <g class="node" transform="translate(500 660)" filter="url(#lld-card-shadow)">
+      <rect class="node__box node__box--warn" width="160" height="50" rx="10" />
+      <text class="node__label node__label--sm" x="80" y="22">DLQ stream</text>
+      <text class="node__sub node__sub--mono" x="80" y="38">{`{...}:dlq`}</text>
+    </g>
+
+    {/* ---------- Comet-tail happy-path token ---------- */}
+    <g filter="url(#lld-glow)">
+      <circle class="token token--lead" r="6">
+        <animateMotion dur="7s" repeatCount="indefinite" calcMode="linear">
+          <mpath href="#lld-ok-motion" />
+        </animateMotion>
+      </circle>
+      <circle class="token token--tail-1" r="4.5">
+        <animateMotion dur="7s" begin="-0.18s" repeatCount="indefinite" calcMode="linear">
+          <mpath href="#lld-ok-motion" />
+        </animateMotion>
+      </circle>
+      <circle class="token token--tail-2" r="3.5">
+        <animateMotion dur="7s" begin="-0.36s" repeatCount="indefinite" calcMode="linear">
+          <mpath href="#lld-ok-motion" />
+        </animateMotion>
+      </circle>
+      <circle class="token token--tail-3" r="2.5">
+        <animateMotion dur="7s" begin="-0.54s" repeatCount="indefinite" calcMode="linear">
+          <mpath href="#lld-ok-motion" />
+        </animateMotion>
+      </circle>
+    </g>
+
+    {/* Failure-path token (single, dimmer) */}
+    <circle class="token token--err" r="4.5" filter="url(#lld-glow)">
+      <animateMotion dur="11s" begin="-3s" repeatCount="indefinite" calcMode="linear">
+        <mpath href="#lld-err-motion" />
+      </animateMotion>
+    </circle>
+  </svg>
+
+  <figcaption id="lifecycle-detail-caption" class="chasqui-lifecycle__caption">
+    Five tasks: producer, reader, workers, retry relocator, DLQ relocator. The
+    reader only pulls and CLAIMs idle pending. Workers only invoke your handler
+    and report the outcome. Relocators run on dedicated tasks so handler
+    latency doesn&rsquo;t block reading, and reading doesn&rsquo;t block acking.
+  </figcaption>
+</figure>
+
+<style>
+  .chasqui-lifecycle {
+    margin: 1.75rem 0;
+  }
+  .chasqui-lifecycle--tall .chasqui-lifecycle__svg {
+    max-width: 660px;
+    margin: 0 auto;
+  }
+  .chasqui-lifecycle__svg {
+    display: block;
+    width: 100%;
+    height: auto;
+    background:
+      linear-gradient(180deg, var(--sl-color-bg-inline-code) 0%, var(--sl-color-bg) 100%);
+    border: 1px solid var(--sl-color-hairline);
+    border-radius: 10px;
+    padding: 1.25rem 0.75rem;
+    box-sizing: border-box;
+    box-shadow:
+      0 1px 0 0 var(--sl-color-hairline-light) inset,
+      0 12px 32px -16px rgba(0, 0, 0, 0.35);
+  }
+  .chasqui-lifecycle__caption {
+    font-size: 0.875rem;
+    color: var(--sl-color-gray-2);
+    line-height: 1.55;
+    margin-top: 0.75rem;
+    max-width: 68ch;
+  }
+
+  /* ---------- Background depth glow ---------- */
+  .chasqui-lifecycle__svg .lifecycle-bgglow {
+    pointer-events: none;
+  }
+
+  /* ---------- Edges ---------- */
+  .chasqui-lifecycle__svg .edge {
+    fill: none;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  .chasqui-lifecycle__svg .edge--base {
+    stroke: var(--sl-color-gray-4);
+    stroke-width: 1.5;
+  }
+  .chasqui-lifecycle__svg .edge--ok {
+    stroke: var(--sl-color-gray-3);
+    stroke-width: 1.5;
+  }
+  .chasqui-lifecycle__svg .edge--err {
+    stroke: var(--sl-color-gray-4);
+    stroke-width: 1.5;
+    stroke-dasharray: 5 4;
+    opacity: 0.9;
+  }
+  .chasqui-lifecycle__svg .edge--loop {
+    stroke: var(--sl-color-gray-4);
+    stroke-width: 1.25;
+    stroke-dasharray: 3 5;
+    opacity: 0.7;
+  }
+  .chasqui-lifecycle__svg .edge--trail {
+    stroke: url(#lld-edge-grad);
+    stroke-width: 2.5;
+    stroke-dasharray: 60 540;
+    stroke-dashoffset: 600;
+    filter: url(#lld-glow);
+    opacity: 0.9;
+    animation: lld-trail 7s linear infinite;
+  }
+  @keyframes lld-trail {
+    from { stroke-dashoffset: 600; }
+    to   { stroke-dashoffset: 0;   }
+  }
+  .chasqui-lifecycle__svg .lifecycle-arrowhead {
+    fill: var(--sl-color-gray-3);
+  }
+  .chasqui-lifecycle__svg .edge-label text {
+    fill: var(--sl-color-gray-2);
+    font-family: var(--sl-font-mono);
+    font-size: 11px;
+  }
+
+  /* ---------- Nodes ---------- */
+  .chasqui-lifecycle__svg .node__box {
+    fill: var(--sl-color-bg);
+    stroke: var(--sl-color-hairline-light);
+    stroke-width: 1;
+  }
+  .chasqui-lifecycle__svg .node__box--bare {
+    fill: var(--sl-color-bg-inline-code);
+    stroke: var(--sl-color-hairline);
+  }
+  .chasqui-lifecycle__svg .node__box--accent-fill {
+    fill: var(--sl-color-accent-low);
+    fill-opacity: 0.55;
+    stroke: none;
+  }
+  .chasqui-lifecycle__svg .node__box--accent-border {
+    fill: none;
+    stroke: url(#lld-accent-border);
+    stroke-width: 1.5;
+  }
+  .chasqui-lifecycle__svg .node__box--muted {
+    fill: var(--sl-color-bg-inline-code);
+  }
+  .chasqui-lifecycle__svg .node__box--ok {
+    stroke: var(--sl-color-accent);
+    stroke-width: 1.25;
+  }
+  .chasqui-lifecycle__svg .node__box--warn {
+    stroke: var(--sl-color-gray-3);
+    stroke-dasharray: 2 2;
+  }
+  .chasqui-lifecycle__svg .node__label {
+    fill: var(--sl-color-text);
+    font-family: var(--sl-font);
+    font-size: 14px;
+    font-weight: 500;
+    text-anchor: middle;
+    letter-spacing: -0.005em;
+  }
+  .chasqui-lifecycle__svg .node__label--sm {
+    font-size: 12.5px;
+  }
+  .chasqui-lifecycle__svg .node__sub {
+    fill: var(--sl-color-gray-3);
+    font-family: var(--sl-font);
+    font-size: 12px;
+    text-anchor: middle;
+  }
+  .chasqui-lifecycle__svg .node__sub--mono {
+    font-family: var(--sl-font-mono);
+    font-size: 11px;
+    letter-spacing: -0.01em;
+  }
+  .chasqui-lifecycle__svg .node--focal .node__box--accent-border {
+    animation: lld-focal-pulse 4s ease-in-out infinite;
+  }
+  @keyframes lld-focal-pulse {
+    0%, 100% { opacity: 0.85; }
+    50%      { opacity: 1; }
+  }
+
+  /* ---------- Tokens ---------- */
+  .chasqui-lifecycle__svg .token--lead {
+    fill: var(--sl-color-accent-high);
+  }
+  .chasqui-lifecycle__svg .token--tail-1 {
+    fill: var(--sl-color-accent);
+    opacity: 0.7;
+  }
+  .chasqui-lifecycle__svg .token--tail-2 {
+    fill: var(--sl-color-accent);
+    opacity: 0.45;
+  }
+  .chasqui-lifecycle__svg .token--tail-3 {
+    fill: var(--sl-color-accent);
+    opacity: 0.22;
+  }
+  .chasqui-lifecycle__svg .token--err {
+    fill: var(--sl-color-gray-2);
+    opacity: 0.8;
+  }
+
+  /* ---------- Reduced motion ---------- */
+  @media (prefers-reduced-motion: reduce) {
+    .chasqui-lifecycle__svg .token,
+    .chasqui-lifecycle__svg .edge--trail {
+      display: none;
+    }
+    .chasqui-lifecycle__svg .node--focal .node__box--accent-border {
+      animation: none;
+    }
+  }
+</style>

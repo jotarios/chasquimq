@@ -12,6 +12,7 @@ import { Tabs, TabItem } from "@astrojs/starlight/components";
 import StatRow from "../../components/StatRow.astro";
 import FeatureCard from "../../components/FeatureCard.astro";
 import DiataxisGrid from "../../components/DiataxisGrid.astro";
+import LifecycleDiagram from "../../components/LifecycleDiagram.astro";
 
 <div class="chasqui-splash">
 
@@ -198,15 +199,7 @@ async fn main() -> anyhow::Result<()> {
 <section class="chasqui-section" aria-labelledby="arch-title">
   <h2 id="arch-title" class="chasqui-section__opener">Architecture at a glance</h2>
   <p class="chasqui-section__lede">Producers <span class="mono">XADD</span> onto a Redis Stream. Delayed jobs sit in a sorted set until a promoter moves them. Consumers <span class="mono">XREADGROUP</span>, dispatch to your handler, then <span class="mono">XACKDEL</span> in a single batched round trip. Failures retry with backoff; exhausted ones land in the DLQ.</p>
-  <pre class="chasqui-arch" aria-label="ChasquiMQ data flow"><code>{`Producer ── XADD ─────────────▶ stream:emails  ──▶ XREADGROUP ──▶ Consumer
-   │                                                              │
-   └─ delayed: ZADD ──▶ zset:emails:z ──▶ promoter ──▶ XADD       │
-                                                                  ▼
-                                                              handler(job)
-                                                                  │
-                                                       success ◀──┴──▶ failure
-                                                          │              │
-                                                       XACKDEL       retry / DLQ`}</code></pre>
+  <LifecycleDiagram />
 </section>
 
 {/* ---------- Final CTA ---------- */}

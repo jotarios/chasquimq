@@ -1,0 +1,402 @@
+---
+/**
+ * Landing-page lifecycle diagram — modern treatment.
+ *
+ * Replaces the ASCII <pre class="chasqui-arch"> on the homepage.
+ * SVG diagram with: gradient-stroke edges, animated trails that pulse
+ * along the path, comet-tail tokens with a soft glow, layered card
+ * surfaces with gradient borders, and a faint radial accent glow
+ * under the focal nodes for depth.
+ *
+ * All colors come from existing tokens.css design tokens — no new
+ * palette introduced. Motion collapses to a static modern frame under
+ * prefers-reduced-motion (DESIGN.md §9).
+ */
+---
+
+<figure class="chasqui-lifecycle chasqui-lifecycle--modern" aria-labelledby="lifecycle-caption">
+  <svg
+    class="chasqui-lifecycle__svg"
+    viewBox="0 0 760 360"
+    role="img"
+    aria-labelledby="lifecycle-title lifecycle-desc"
+    preserveAspectRatio="xMidYMid meet"
+  >
+    <title id="lifecycle-title">ChasquiMQ data flow</title>
+    <desc id="lifecycle-desc">
+      Producers XADD onto a Redis Stream. Delayed jobs sit in a sorted set until
+      a promoter moves them. Consumers XREADGROUP, invoke a handler, and either
+      XACKDEL on success or route to retry / DLQ on failure.
+    </desc>
+
+    <defs>
+      {/* Soft glow for tokens and accent strokes (DESIGN.md §9 — used sparingly). */}
+      <filter id="ll-glow" x="-50%" y="-50%" width="200%" height="200%">
+        <feGaussianBlur in="SourceGraphic" stdDeviation="3" result="blur" />
+        <feMerge>
+          <feMergeNode in="blur" />
+          <feMergeNode in="SourceGraphic" />
+        </feMerge>
+      </filter>
+
+      {/* Subtle card drop-shadow */}
+      <filter id="ll-card-shadow" x="-20%" y="-20%" width="140%" height="160%">
+        <feGaussianBlur in="SourceAlpha" stdDeviation="2" />
+        <feOffset dx="0" dy="2" result="offset" />
+        <feComponentTransfer>
+          <feFuncA type="linear" slope="0.18" />
+        </feComponentTransfer>
+        <feMerge>
+          <feMergeNode />
+          <feMergeNode in="SourceGraphic" />
+        </feMerge>
+      </filter>
+
+      {/* Gradient stroke for the active flow edge — fades from low accent to high accent */}
+      <linearGradient id="ll-edge-grad" x1="0%" y1="0%" x2="100%" y2="0%">
+        <stop offset="0%" stop-color="var(--sl-color-gray-4)" stop-opacity="0.5" />
+        <stop offset="40%" stop-color="var(--sl-color-accent)" stop-opacity="0.85" />
+        <stop offset="100%" stop-color="var(--sl-color-accent-high)" stop-opacity="0.95" />
+      </linearGradient>
+
+      {/* Gradient for the accent (Stream) card border */}
+      <linearGradient id="ll-accent-border" x1="0%" y1="0%" x2="100%" y2="100%">
+        <stop offset="0%" stop-color="var(--sl-color-accent)" />
+        <stop offset="100%" stop-color="var(--sl-color-accent-high)" />
+      </linearGradient>
+
+      {/* Radial pad of light under the stream + consumer to add depth */}
+      <radialGradient id="ll-bg-glow" cx="50%" cy="40%" r="55%">
+        <stop offset="0%" stop-color="var(--sl-color-accent-low)" stop-opacity="0.55" />
+        <stop offset="60%" stop-color="var(--sl-color-accent-low)" stop-opacity="0.1" />
+        <stop offset="100%" stop-color="var(--sl-color-accent-low)" stop-opacity="0" />
+      </radialGradient>
+
+      {/* Arrowhead — gradient-aware (currentColor inherits from edge) */}
+      <marker
+        id="ll-arrow"
+        viewBox="0 0 8 8"
+        refX="7"
+        refY="4"
+        markerWidth="6"
+        markerHeight="6"
+        orient="auto-start-reverse"
+      >
+        <path d="M 0 0 L 8 4 L 0 8 z" class="lifecycle-arrowhead" />
+      </marker>
+    </defs>
+
+    {/* ---------- Background depth glow ---------- */}
+    <rect class="lifecycle-bgglow" x="240" y="20" width="460" height="220" fill="url(#ll-bg-glow)" />
+
+    {/* ---------- Edges ---------- */}
+    {/* Main visible (subtle) edges */}
+    <path
+      class="edge edge--base"
+      d="M 130 90 L 280 90 M 400 90 L 540 90 M 600 110 L 600 170 M 600 220 L 600 248 L 480 270"
+      marker-end="url(#ll-arrow)"
+    />
+    {/* Animated bright trail along the main flow */}
+    <path
+      class="edge edge--trail"
+      id="ll-main-trail"
+      d="M 130 90 L 280 90 L 400 90 L 540 90 L 600 90 L 600 170 L 600 220 L 600 248 L 480 270"
+    />
+    {/* Hidden continuous twin used only as the motion path */}
+    <path
+      id="ll-main-motion"
+      d="M 130 90 L 280 90 L 400 90 L 540 90 L 600 90 L 600 170 L 600 220 L 600 248 L 480 270"
+      fill="none"
+      stroke="none"
+    />
+
+    {/* Delayed branch (dashed, dimmer) */}
+    <path
+      class="edge edge--delayed"
+      d="M 80 120 L 80 182 L 140 182 M 260 182 L 340 182 L 340 120"
+      marker-end="url(#ll-arrow)"
+    />
+    <path
+      id="ll-delayed-motion"
+      d="M 80 120 L 80 182 L 140 182 L 260 182 L 340 182 L 340 120"
+      fill="none"
+      stroke="none"
+    />
+
+    {/* Failure split: handler → retry / DLQ */}
+    <path
+      class="edge edge--err"
+      d="M 600 220 L 600 248 L 720 270"
+      marker-end="url(#ll-arrow)"
+    />
+
+    {/* ---------- Nodes ---------- */}
+    {/* Producer */}
+    <g class="node" transform="translate(20 60)" filter="url(#ll-card-shadow)">
+      <rect class="node__box" width="110" height="60" rx="8" />
+      <text class="node__label" x="55" y="28">Producer</text>
+      <text class="node__sub node__sub--mono" x="55" y="46">Queue.add()</text>
+    </g>
+
+    {/* Stream — the focal node, gradient border + accent glow */}
+    <g class="node node--focal" transform="translate(280 60)" filter="url(#ll-card-shadow)">
+      <rect class="node__box node__box--accent-fill" width="120" height="60" rx="8" />
+      <rect class="node__box node__box--accent-border" width="120" height="60" rx="8" />
+      <text class="node__label" x="60" y="26">stream:emails</text>
+      <text class="node__sub node__sub--mono" x="60" y="44">XADD · XREADGROUP</text>
+    </g>
+
+    {/* Consumer */}
+    <g class="node" transform="translate(540 60)" filter="url(#ll-card-shadow)">
+      <rect class="node__box" width="120" height="60" rx="8" />
+      <text class="node__label" x="60" y="28">Consumer</text>
+      <text class="node__sub" x="60" y="46">tokio pool</text>
+    </g>
+
+    {/* Delayed zset */}
+    <g class="node" transform="translate(140 158)" filter="url(#ll-card-shadow)">
+      <rect class="node__box node__box--muted" width="120" height="48" rx="8" />
+      <text class="node__label node__label--sm" x="60" y="22">delayed zset</text>
+      <text class="node__sub node__sub--mono" x="60" y="38">ZADD · promoter</text>
+    </g>
+
+    {/* Handler — accent-soft glow ring as it's where the user's code runs */}
+    <g class="node node--handler" transform="translate(540 170)" filter="url(#ll-card-shadow)">
+      <rect class="node__box" width="120" height="50" rx="8" />
+      <text class="node__label" x="60" y="22">handler(job)</text>
+      <text class="node__sub" x="60" y="38">your code</text>
+    </g>
+
+    {/* XACKDEL — success terminal */}
+    <g class="node node--ok" transform="translate(420 250)" filter="url(#ll-card-shadow)">
+      <rect class="node__box node__box--ok" width="120" height="44" rx="8" />
+      <text class="node__label node__label--sm" x="60" y="20">XACKDEL</text>
+      <text class="node__sub" x="60" y="34">batched, atomic</text>
+    </g>
+
+    {/* retry / DLQ — failure terminal */}
+    <g class="node" transform="translate(640 250)" filter="url(#ll-card-shadow)">
+      <rect class="node__box node__box--warn" width="110" height="44" rx="8" />
+      <text class="node__label node__label--sm" x="55" y="20">retry → DLQ</text>
+      <text class="node__sub" x="55" y="34">backoff · attempts</text>
+    </g>
+
+    {/* ---------- Comet-tail token on the main flow ----------
+       Three chained circles with decreasing radius and opacity,
+       offset in time so they form a trailing comet. */}
+    <g filter="url(#ll-glow)">
+      <circle class="token token--lead" r="5.5">
+        <animateMotion dur="6s" repeatCount="indefinite" calcMode="linear">
+          <mpath href="#ll-main-motion" />
+        </animateMotion>
+      </circle>
+      <circle class="token token--tail token--tail-1" r="4">
+        <animateMotion dur="6s" begin="-0.15s" repeatCount="indefinite" calcMode="linear">
+          <mpath href="#ll-main-motion" />
+        </animateMotion>
+      </circle>
+      <circle class="token token--tail token--tail-2" r="3" >
+        <animateMotion dur="6s" begin="-0.3s" repeatCount="indefinite" calcMode="linear">
+          <mpath href="#ll-main-motion" />
+        </animateMotion>
+      </circle>
+      <circle class="token token--tail token--tail-3" r="2" >
+        <animateMotion dur="6s" begin="-0.45s" repeatCount="indefinite" calcMode="linear">
+          <mpath href="#ll-main-motion" />
+        </animateMotion>
+      </circle>
+    </g>
+
+    {/* Token following the delayed branch — slower, dimmer */}
+    <circle class="token token--delayed" r="3.5" filter="url(#ll-glow)">
+      <animateMotion dur="8s" begin="-1.5s" repeatCount="indefinite" calcMode="linear">
+        <mpath href="#ll-delayed-motion" />
+      </animateMotion>
+    </circle>
+  </svg>
+
+  <figcaption id="lifecycle-caption" class="chasqui-lifecycle__caption">
+    Producers <code>XADD</code>. Delayed jobs sit in a sorted set until a
+    promoter moves them. Consumers <code>XREADGROUP</code>, dispatch to your
+    handler, then <code>XACKDEL</code> in a batched round trip. Failures retry
+    with backoff; exhausted ones land in the DLQ.
+  </figcaption>
+</figure>
+
+<style>
+  .chasqui-lifecycle {
+    margin: 2rem 0 0;
+    padding: 0;
+  }
+  .chasqui-lifecycle__svg {
+    display: block;
+    width: 100%;
+    height: auto;
+    background:
+      linear-gradient(180deg, var(--sl-color-bg-inline-code) 0%, var(--sl-color-bg) 100%);
+    border: 1px solid var(--sl-color-hairline);
+    border-radius: 10px;
+    padding: 1.25rem 0.75rem;
+    box-sizing: border-box;
+    box-shadow:
+      0 1px 0 0 var(--sl-color-hairline-light) inset,
+      0 12px 32px -16px rgba(0, 0, 0, 0.35);
+  }
+  .chasqui-lifecycle__caption {
+    font-size: 0.875rem;
+    color: var(--sl-color-gray-2);
+    line-height: 1.55;
+    margin-top: 0.75rem;
+    max-width: 68ch;
+  }
+  .chasqui-lifecycle__caption code {
+    font-family: var(--sl-font-mono);
+    font-size: 0.85em;
+    background: var(--sl-color-bg-inline-code);
+    padding: 0.05em 0.35em;
+    border-radius: 3px;
+  }
+
+  /* ---------- Background depth glow ---------- */
+  .chasqui-lifecycle__svg .lifecycle-bgglow {
+    pointer-events: none;
+  }
+
+  /* ---------- Edges ---------- */
+  .chasqui-lifecycle__svg .edge {
+    fill: none;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  .chasqui-lifecycle__svg .edge--base {
+    stroke: var(--sl-color-gray-4);
+    stroke-width: 1.5;
+  }
+  .chasqui-lifecycle__svg .edge--trail {
+    stroke: url(#ll-edge-grad);
+    stroke-width: 2;
+    stroke-dasharray: 24 220;
+    stroke-dashoffset: 244;
+    filter: url(#ll-glow);
+    opacity: 0.9;
+    animation: ll-trail 6s linear infinite;
+  }
+  @keyframes ll-trail {
+    from { stroke-dashoffset: 244; }
+    to   { stroke-dashoffset: 0;   }
+  }
+  .chasqui-lifecycle__svg .edge--delayed {
+    stroke: var(--sl-color-gray-4);
+    stroke-width: 1.5;
+    stroke-dasharray: 4 4;
+    opacity: 0.85;
+  }
+  .chasqui-lifecycle__svg .edge--err {
+    stroke: var(--sl-color-gray-4);
+    stroke-width: 1.5;
+    stroke-dasharray: 5 4;
+    opacity: 0.9;
+  }
+  .chasqui-lifecycle__svg .lifecycle-arrowhead {
+    fill: var(--sl-color-gray-3);
+  }
+
+  /* ---------- Nodes ---------- */
+  .chasqui-lifecycle__svg .node__box {
+    fill: var(--sl-color-bg);
+    stroke: var(--sl-color-hairline-light);
+    stroke-width: 1;
+  }
+  /* Focal stream node — gradient border + soft accent wash */
+  .chasqui-lifecycle__svg .node__box--accent-fill {
+    fill: var(--sl-color-accent-low);
+    fill-opacity: 0.55;
+    stroke: none;
+  }
+  .chasqui-lifecycle__svg .node__box--accent-border {
+    fill: none;
+    stroke: url(#ll-accent-border);
+    stroke-width: 1.5;
+  }
+  .chasqui-lifecycle__svg .node__box--muted {
+    fill: var(--sl-color-bg-inline-code);
+  }
+  .chasqui-lifecycle__svg .node__box--ok {
+    stroke: var(--sl-color-accent);
+    stroke-width: 1.25;
+  }
+  .chasqui-lifecycle__svg .node__box--warn {
+    stroke: var(--sl-color-gray-3);
+    stroke-dasharray: 2 2;
+  }
+  .chasqui-lifecycle__svg .node__label {
+    fill: var(--sl-color-text);
+    font-family: var(--sl-font);
+    font-size: 13px;
+    font-weight: 500;
+    text-anchor: middle;
+    letter-spacing: -0.005em;
+  }
+  .chasqui-lifecycle__svg .node__label--sm {
+    font-size: 12px;
+  }
+  .chasqui-lifecycle__svg .node__sub {
+    fill: var(--sl-color-gray-3);
+    font-family: var(--sl-font);
+    font-size: 11px;
+    text-anchor: middle;
+  }
+  .chasqui-lifecycle__svg .node__sub--mono {
+    font-family: var(--sl-font-mono);
+    font-size: 10.5px;
+    letter-spacing: -0.01em;
+  }
+  /* Subtle pulsing glow on the focal (Stream) node */
+  .chasqui-lifecycle__svg .node--focal .node__box--accent-border {
+    animation: ll-focal-pulse 4s ease-in-out infinite;
+  }
+  @keyframes ll-focal-pulse {
+    0%, 100% { opacity: 0.85; }
+    50%      { opacity: 1; }
+  }
+
+  /* ---------- Tokens (the "job" travelling the system) ---------- */
+  .chasqui-lifecycle__svg .token--lead {
+    fill: var(--sl-color-accent-high);
+  }
+  .chasqui-lifecycle__svg .token--tail-1 {
+    fill: var(--sl-color-accent);
+    opacity: 0.7;
+  }
+  .chasqui-lifecycle__svg .token--tail-2 {
+    fill: var(--sl-color-accent);
+    opacity: 0.45;
+  }
+  .chasqui-lifecycle__svg .token--tail-3 {
+    fill: var(--sl-color-accent);
+    opacity: 0.22;
+  }
+  .chasqui-lifecycle__svg .token--delayed {
+    fill: var(--sl-color-gray-2);
+    opacity: 0.75;
+  }
+
+  /* ---------- Reduced motion — DESIGN.md §9 ---------- */
+  @media (prefers-reduced-motion: reduce) {
+    .chasqui-lifecycle__svg .token,
+    .chasqui-lifecycle__svg .edge--trail {
+      display: none;
+    }
+    .chasqui-lifecycle__svg .node--focal .node__box--accent-border {
+      animation: none;
+    }
+  }
+
+  /* ---------- Small screens ---------- */
+  @media (max-width: 640px) {
+    .chasqui-lifecycle__svg {
+      padding: 0.5rem 0.25rem;
+      border-radius: 8px;
+    }
+  }
+</style>
