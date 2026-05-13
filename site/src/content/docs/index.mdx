@@ -6,6 +6,9 @@ hero:
   title: ""
   tagline: ""
 pagefind: false
+prev: false
+next: false
+editUrl: false
 ---
 
 import { Tabs, TabItem } from "@astrojs/starlight/components";
@@ -208,5 +211,22 @@ async fn main() -> anyhow::Result<()> {
   <p class="chasqui-final__sub">Read the five-minute getting-started. Hello-world job in your terminal, running through Redis, before your coffee cools.</p>
   <a class="chasqui-btn chasqui-btn--primary" href="/start/getting-started/">Get started &rarr;</a>
 </section>
+
+{/* ---------- Footer ---------- */}
+<footer class="chasqui-footer" aria-labelledby="footer-label">
+  <h2 id="footer-label" class="sr-only">Site footer</h2>
+  <div class="chasqui-footer__row">
+    <span class="chasqui-footer__meta">&copy; 2026 Jorge Rios &middot; MIT</span>
+    <nav class="chasqui-footer__links" aria-label="Footer">
+      <a href="/start/getting-started/">Docs</a>
+      <a href="/benchmarks/">Benchmarks</a>
+      <a href="https://github.com/jotarios/chasquimq">GitHub</a>
+      <a href="https://www.npmjs.com/package/chasquimq">npm</a>
+      <a href="https://pypi.org/project/chasquimq/">PyPI</a>
+      <a href="https://crates.io/crates/chasquimq">crates.io</a>
+      <a href="https://x.com/chasquimq">@chasquimq</a>
+    </nav>
+  </div>
+</footer>
 
 </div>
