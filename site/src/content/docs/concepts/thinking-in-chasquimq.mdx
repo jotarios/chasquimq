@@ -5,6 +5,8 @@ sidebar:
   order: 1
 ---
 
+import LifecycleDetailedDiagram from "../../../components/LifecycleDetailedDiagram.astro";
+
 If you remember one thing from this page:
 
 > A job is a row in a Redis Stream, an ack is a delete from a pending entries list, and a DLQ is just another stream with a different name.
@@ -27,45 +29,7 @@ The runner stays implicit. The Producer puts a message into the relay; the Consu
 
 ## The flow
 
-```text
-                         producer.add()
-                                │
-                                ▼
-                    ┌───────────────────────┐
-                    │   Redis Stream        │   {chasqui:<queue>}
-                    │   (XADD entries)      │
-                    └─────────┬─────────────┘
-                              │ XREADGROUP (batched)
-                              ▼
-                    ┌───────────────────────┐
-                    │   Consumer reader     │   one tokio task
-                    │   (CLAIM idle pending)│
-                    └─────────┬─────────────┘
-                              │ async-channel fan-out
-                              ▼
-                    ┌───────────────────────┐
-                    │   Worker pool         │   N tokio tasks
-                    │   (your handler runs) │   N = concurrency
-                    └─────────┬─────────────┘
-                              │
-                ┌─────────────┴──────────────┐
-                ▼                            ▼
-         handler returns Ok            handler returns Err
-                │                            │
-                ▼                            ▼
-         ┌──────────────┐             ┌──────────────┐
-         │  XACKDEL     │             │  retry path  │
-         │  (atomic)    │             │  (Lua)       │
-         └──────────────┘             └──────┬───────┘
-                                             │
-                            attempts < max ──┴── attempts >= max
-                                  │                       │
-                                  ▼                       ▼
-                         ┌────────────────┐      ┌────────────────┐
-                         │ delayed ZSET   │      │  DLQ stream    │
-                         │ (re-promoted)  │      │ {...}:dlq      │
-                         └────────────────┘      └────────────────┘
-```
+<LifecycleDetailedDiagram />
 
 Five tasks: producer, reader, workers, retry relocator, DLQ relocator. The reader does only one thing — pull batches off the stream and CLAIM idle pending. The workers do only one thing — invoke your handler and report the outcome. The relocators run on dedicated tasks so handler latency doesn't block reading, and reading doesn't block acking.
 
