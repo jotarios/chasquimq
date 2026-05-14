@@ -6,6 +6,7 @@ use crate::redis::commands::{
 use crate::redis::parse::StreamEntryId;
 use bytes::Bytes;
 use fred::clients::Client;
+use fred::error::Error as FredError;
 use fred::interfaces::ClientLike;
 use fred::types::{ClusterHash, CustomCommand, Value};
 use std::time::Duration;
@@ -127,18 +128,22 @@ pub(crate) struct OkResultWriterConfig {
 /// `cfg.idle` deadline elapses, then flushed with [`flush_pipeline`].
 /// `Ok(None)` from `rx.recv()` flushes any pending entries and returns.
 ///
-/// Per-pipeline failure contract:
-/// - Whole-pipeline `NOSCRIPT` → reload the SHA and rebuild the same
-///   pipeline as inline `EVAL`s, single retry.
-/// - Any other whole-pipeline error → error-log with the buffered count
-///   and leave the entries pending. No automatic retry: a partial
-///   server-side success would re-execute already-committed SETs.
-///   `XCLAIM` from the same consumer group reclaims the entries on the
-///   next idle sweep.
-/// - `Ok(values)` → pair each `Value` with its `JobOk`; `1` = ack+SET
-///   committed, `0` = race lost (entry was already removed via CLAIM or
-///   a prior delivery), debug-log only; anything else is defensive-logged
-///   and the entry left pending.
+/// Per-pipeline failure contract (per-element via `pipeline.try_all`):
+/// - Any element returning `NOSCRIPT` → reload the SHA and rebuild the
+///   *whole* pipeline as inline `EVAL`s, single retry. Scripts are
+///   per-server: if one element NOSCRIPTs, every element on that
+///   connection will too, so re-running the whole batch is correct.
+/// - Per-element non-NOSCRIPT error → error-log with the entry id; leave
+///   that one entry pending so `XCLAIM` reclaims it. Other elements'
+///   outcomes are still applied. The committed-SET concern from the
+///   single-call path doesn't apply: `try_all` reports per-element
+///   results, so we never re-execute a successful element.
+/// - Per-element value `1` = ack+SET committed.
+/// - Per-element value `0` = race lost (entry was already removed via
+///   CLAIM or a prior delivery), debug-log only.
+/// - Per-element value `-1` = entry not found in the stream (CLAIM
+///   already moved it; XACKDEL is an idempotent no-op). Documented
+///   `JOB_OK_SCRIPT` return; debug-log only.
 pub(crate) async fn run_ok_result_writer(
     client: Client,
     cfg: OkResultWriterConfig,
@@ -188,8 +193,9 @@ pub(crate) async fn run_ok_result_writer(
 }
 
 /// Pipelines one `EVALSHA` (or `EVAL` fallback) per buffered `JobOk` and
-/// awaits the whole window with `pipeline.all()`. Caller resets `buf` on
-/// return — this function never partial-acks.
+/// awaits the whole window with `pipeline.try_all` to surface per-element
+/// outcomes. Caller resets `buf` on return — this function never
+/// partial-acks at the buffer level.
 async fn flush_pipeline(
     client: &Client,
     cfg: &OkResultWriterConfig,
@@ -202,45 +208,28 @@ async fn flush_pipeline(
 
     // First attempt: EVALSHA if we have a SHA, otherwise straight EVAL.
     if !sha.is_empty() {
-        match run_evalsha_pipeline(client, cfg, buf, sha).await {
-            Ok(values) => {
-                report_pipeline_outcomes(buf, &values);
-                return;
-            }
-            Err(e) if format!("{e}").contains("NOSCRIPT") => {
-                // Script flushed between LOAD and flush (or mid-pipeline
-                // on a follower). Reload + retry inline below.
-                match load_job_ok_script(client).await {
-                    Ok(s) => *sha = s,
-                    Err(le) => {
-                        tracing::warn!(error = %le, "ok-result writer: SCRIPT LOAD on NOSCRIPT recovery failed; falling through to inline EVAL");
-                        sha.clear();
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::error!(
-                    error = %e,
-                    count = buf.len(),
-                    "ok-result pipeline failed; entries remain pending and will reclaim via CLAIM (no retry — would re-execute committed SETs)",
-                );
-                return;
+        let results = run_evalsha_pipeline(client, cfg, buf, sha).await;
+        if !pipeline_has_noscript(&results) {
+            report_pipeline_outcomes(buf, &results);
+            return;
+        }
+        // Any element NOSCRIPT'd. Reload SHA and fall through to inline
+        // EVAL for the whole batch — scripts are per-server, so all
+        // elements on the same connection are equally affected.
+        match load_job_ok_script(client).await {
+            Ok(s) => *sha = s,
+            Err(le) => {
+                tracing::warn!(error = %le, "ok-result writer: SCRIPT LOAD on NOSCRIPT recovery failed; falling through to inline EVAL");
+                sha.clear();
             }
         }
     }
 
     // Inline EVAL fallback: either we never had a SHA, or NOSCRIPT just
-    // forced a rebuild. One retry, then leave pending on failure.
-    match run_eval_pipeline(client, cfg, buf).await {
-        Ok(values) => report_pipeline_outcomes(buf, &values),
-        Err(e) => {
-            tracing::error!(
-                error = %e,
-                count = buf.len(),
-                "ok-result EVAL pipeline failed; entries remain pending and will reclaim via CLAIM",
-            );
-        }
-    }
+    // forced a rebuild. One retry, then per-element outcomes determine
+    // which entries leave pending.
+    let results = run_eval_pipeline(client, cfg, buf).await;
+    report_pipeline_outcomes(buf, &results);
 }
 
 async fn run_evalsha_pipeline(
@@ -248,7 +237,7 @@ async fn run_evalsha_pipeline(
     cfg: &OkResultWriterConfig,
     buf: &[JobOk],
     sha: &str,
-) -> std::result::Result<Vec<Value>, fred::error::Error> {
+) -> Vec<std::result::Result<Value, FredError>> {
     let pipeline = client.pipeline();
     let evalsha_cmd = CustomCommand::new_static("EVALSHA", ClusterHash::FirstKey, false);
     for item in buf {
@@ -262,16 +251,24 @@ async fn run_evalsha_pipeline(
             item.result_bytes.clone(),
             item.ttl_secs,
         );
-        let _: () = pipeline.custom(evalsha_cmd.clone(), args).await?;
+        // Enqueueing into a pipeline is in-memory; the `await` returns
+        // immediately. Errors here are buffer-allocation level and would
+        // also break `try_all`; surface them as a per-element error so
+        // the report path handles it uniformly.
+        if let Err(e) = pipeline.custom::<Value, _>(evalsha_cmd.clone(), args).await {
+            return std::iter::repeat_with(|| Err(e.clone()))
+                .take(buf.len())
+                .collect();
+        }
     }
-    pipeline.all().await
+    pipeline.try_all::<Value>().await
 }
 
 async fn run_eval_pipeline(
     client: &Client,
     cfg: &OkResultWriterConfig,
     buf: &[JobOk],
-) -> std::result::Result<Vec<Value>, fred::error::Error> {
+) -> Vec<std::result::Result<Value, FredError>> {
     let pipeline = client.pipeline();
     let eval_cmd = CustomCommand::new_static("EVAL", ClusterHash::FirstKey, false);
     for item in buf {
@@ -285,28 +282,51 @@ async fn run_eval_pipeline(
             item.result_bytes.clone(),
             item.ttl_secs,
         );
-        let _: () = pipeline.custom(eval_cmd.clone(), args).await?;
+        if let Err(e) = pipeline.custom::<Value, _>(eval_cmd.clone(), args).await {
+            return std::iter::repeat_with(|| Err(e.clone()))
+                .take(buf.len())
+                .collect();
+        }
     }
-    pipeline.all().await
+    pipeline.try_all::<Value>().await
 }
 
-fn report_pipeline_outcomes(buf: &[JobOk], values: &[Value]) {
-    if values.len() != buf.len() {
+fn pipeline_has_noscript(results: &[std::result::Result<Value, FredError>]) -> bool {
+    results
+        .iter()
+        .any(|r| matches!(r, Err(e) if format!("{e}").contains("NOSCRIPT")))
+}
+
+fn report_pipeline_outcomes(buf: &[JobOk], results: &[std::result::Result<Value, FredError>]) {
+    if results.len() != buf.len() {
         tracing::error!(
             count = buf.len(),
-            returned = values.len(),
+            returned = results.len(),
             "ok-result pipeline returned unexpected element count; entries left pending and will reclaim via CLAIM",
         );
         return;
     }
-    for (item, v) in buf.iter().zip(values.iter()) {
-        match parse_lua_int(v) {
-            1 => {}
-            0 => {
-                tracing::debug!(entry_id = %item.entry_id, job_id = %item.job_id, "ok-result write gated: entry already removed");
-            }
-            other => {
-                tracing::error!(entry_id = %item.entry_id, job_id = %item.job_id, returned = other, value = ?v, "ok-result write returned unexpected value; entry left pending");
+    for (item, r) in buf.iter().zip(results.iter()) {
+        match r {
+            Ok(v) => match parse_lua_int(v) {
+                1 => {}
+                // `0` = race lost (entry already removed for this group);
+                // `-1` = XACKDEL no-op (entry never pending). Both are
+                // documented `JOB_OK_SCRIPT` returns — debug only.
+                0 | -1 => {
+                    tracing::debug!(entry_id = %item.entry_id, job_id = %item.job_id, returned = parse_lua_int(v), "ok-result write gated: entry already removed");
+                }
+                other => {
+                    tracing::error!(entry_id = %item.entry_id, job_id = %item.job_id, returned = other, value = ?v, "ok-result write returned unexpected value; entry left pending");
+                }
+            },
+            Err(e) => {
+                tracing::error!(
+                    entry_id = %item.entry_id,
+                    job_id = %item.job_id,
+                    error = %e,
+                    "ok-result write failed for entry; will reclaim via CLAIM",
+                );
             }
         }
     }

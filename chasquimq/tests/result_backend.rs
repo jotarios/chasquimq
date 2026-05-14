@@ -771,9 +771,10 @@ async fn result_writer_partial_lua_zero_drops_silently() {
     // Setup: push N jobs, start consumer with a long result-writer idle so
     // every handler-Ok lands in the writer's buffer before any flush. While
     // the buffer is parked, manually XACKDEL one specific entry out of band.
-    // When the pipelined flush fires, that entry's `JOB_OK_SCRIPT` sees
-    // XACKDEL=-1 → returns 0 → debug-log only → no result key written for
-    // that entry, while the others land normally.
+    // When the pipelined flush fires, that entry's `JOB_OK_SCRIPT` sees the
+    // entry already removed and returns `-1` (XACKDEL no-op) → debug-log
+    // only → no result key written for that entry, while the others land
+    // normally.
     let admin = admin().await;
     let queue = "result_writer_partial_lua_zero";
     flush_all(&admin, queue).await;
