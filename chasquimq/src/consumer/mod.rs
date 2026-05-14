@@ -111,6 +111,8 @@ where
                     stream_key: self.stream_key.clone(),
                     queue_name: self.cfg.queue_name.clone(),
                     group: self.cfg.group.clone(),
+                    batch: self.cfg.result_batch.max(1),
+                    idle: std::time::Duration::from_millis(self.cfg.result_idle_ms),
                 },
                 rx,
             ));
