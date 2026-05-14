@@ -60,24 +60,41 @@ jobs:
           python-version: "3.12"
 
       # macOS runners as of mid-May 2026 ship a Homebrew `rustup` whose
-      # rustup-init wrapper rejects the `+stable` toolchain selector that
-      # maturin-action's internal `rustup component add` invocation passes.
-      # That breaks `PyO3/maturin-action@v1` on both `macos-latest`
-      # variants (x86_64 + aarch64 Apple Silicon) — error reads
-      # "unexpected argument '+stable' found". Replace the Homebrew
-      # binary with the official `rustup-init` shipped from sh.rustup.rs
-      # *before* maturin-action runs, so its internal rustup calls
-      # resolve to a working wrapper. The official binary already lives
-      # at `~/.cargo/bin/rustup` post-install; we just need to make sure
-      # it precedes `/opt/homebrew/bin` on PATH for subsequent steps.
+      # `rustup-init` wrapper rejects subcommands like `+stable` and
+      # `cargo metadata` — every shim at `/opt/homebrew/bin/{rustup,
+      # cargo, rustc}` ultimately invokes `rustup-init [OPTIONS]` and
+      # explodes on those arguments. That breaks `PyO3/maturin-action@v1`
+      # (and napi-rs's build in `node-ci.yml`) on both `macos-latest`
+      # variants. Replace the Homebrew install with the official rustup
+      # from sh.rustup.rs and remove the Homebrew shims so the official
+      # `~/.cargo/bin` entries win unambiguously — prepending to
+      # `GITHUB_PATH` alone is not enough because the Homebrew shims
+      # respond differently to PATH lookup depending on the spawned
+      # process (`napi build` calls cargo via a non-shell exec).
       - name: Replace Homebrew rustup on macOS
         if: startsWith(matrix.os, 'macos')
         shell: bash
         run: |
           set -euo pipefail
+          # Force the official installer to overwrite anything stale in
+          # ~/.cargo/bin; --default-toolchain none avoids fetching a
+          # toolchain we'll replace via dtolnay/rust-toolchain anyway.
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
             | sh -s -- --default-toolchain none -y
+          # Remove every broken Homebrew shim so neither `cargo` nor
+          # `rustup` resolves there. `brew uninstall rustup` only works
+          # when no toolchain has been installed via Homebrew rustup;
+          # the safest minimum is to unlink the shims by hand.
+          for bin in rustup cargo rustc rustdoc rust-gdb rust-lldb; do
+            sudo rm -f "/opt/homebrew/bin/$bin" "/usr/local/bin/$bin"
+          done
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          # Sanity check: print the binary now on PATH for subsequent
+          # steps. If this resolves to /opt/homebrew/bin we know the
+          # unlink missed and the matrix will fail loud.
+          export PATH="$HOME/.cargo/bin:$PATH"
+          which rustup cargo
+          rustup --version
 
       - uses: dtolnay/rust-toolchain@stable
         with:

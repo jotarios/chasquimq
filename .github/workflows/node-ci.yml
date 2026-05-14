@@ -73,11 +73,13 @@ jobs:
           cache-dependency-path: chasquimq-node/package-lock.json
 
       # macOS runners as of mid-May 2026 ship a Homebrew `rustup` whose
-      # rustup-init wrapper rejects subcommands like `+stable`, `cargo
-      # metadata`, etc. that the napi-rs CLI invokes internally. Replace
-      # it with the official rustup from sh.rustup.rs so every subsequent
-      # `cargo` / `rustup` resolves to a working wrapper. See py-ci.yml
-      # for the matching workaround on the Python wheels job.
+      # shims at `/opt/homebrew/bin/{rustup,cargo,rustc}` reject the
+      # subcommands napi-rs's CLI invokes (e.g. `cargo metadata`). See
+      # py-ci.yml for the full diagnosis. Replace with the official
+      # rustup and unlink the shims so subsequent steps cannot pick them
+      # up — prepending GITHUB_PATH alone isn't enough because napi-rs
+      # invokes `cargo` via a non-shell exec that doesn't always honor
+      # the bash-only PATH semantics.
       - name: Replace Homebrew rustup on macOS
         if: startsWith(matrix.settings.host, 'macos')
         shell: bash
@@ -85,7 +87,13 @@ jobs:
           set -euo pipefail
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
             | sh -s -- --default-toolchain none -y
+          for bin in rustup cargo rustc rustdoc rust-gdb rust-lldb; do
+            sudo rm -f "/opt/homebrew/bin/$bin" "/usr/local/bin/$bin"
+          done
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.cargo/bin:$PATH"
+          which rustup cargo
+          rustup --version
 
       - uses: dtolnay/rust-toolchain@stable
         with:
