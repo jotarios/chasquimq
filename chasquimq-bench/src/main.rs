@@ -41,7 +41,10 @@ async fn main() {
     }
 
     if matches!(args.format, Format::Markdown) {
-        report::print_markdown_table(&all_reports, args.discard_slowest);
+        let stdout = std::io::stdout();
+        let mut handle = stdout.lock();
+        report::print_markdown_table(&all_reports, args.discard_slowest, &mut handle)
+            .expect("write markdown table");
     }
 
     let _: () = admin.quit().await.unwrap();

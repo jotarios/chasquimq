@@ -31,6 +31,7 @@ pub async fn run_scenario(name: &str, redis_url: &str, queue: &str, scale: u32) 
         "queue-add-delayed" => scenarios::queue_add_delayed::run(redis_url, queue, scale).await,
         "worker-generic" => scenarios::worker_generic::run(redis_url, queue, scale).await,
         "worker-concurrent" => scenarios::worker_concurrent::run(redis_url, queue, scale).await,
+        "worker-latency" => scenarios::worker_latency::run(redis_url, queue, scale).await,
         "worker-concurrent-store-results" => {
             scenarios::worker_concurrent_store_results::run(redis_url, queue, scale).await
         }

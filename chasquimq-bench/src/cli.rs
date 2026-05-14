@@ -12,6 +12,7 @@ pub struct Args {
         "queue-add-delayed".to_string(),
         "worker-generic".to_string(),
         "worker-concurrent".to_string(),
+        "worker-latency".to_string(),
         "worker-concurrent-store-results".to_string(),
         "worker-delayed-end-to-end".to_string(),
         "worker-retry-throughput".to_string(),
