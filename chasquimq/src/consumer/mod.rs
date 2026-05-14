@@ -103,7 +103,11 @@ where
         // tx is `None` and the worker's match always takes the batched-ack
         // fast path — zero overhead for users who never call `get_result`.
         let (ok_result_tx, ok_result_handle) = if self.cfg.store_results {
-            let (tx, rx) = mpsc::channel::<JobOk>(concurrency * 4);
+            // Size so the writer always has ≥4 batches of headroom even
+            // when batch >> concurrency (cloud-Redis with high
+            // result_batch tuned to amortise per-RTT cost).
+            let result_cap = (concurrency * 4).max(self.cfg.result_batch.max(1) * 4);
+            let (tx, rx) = mpsc::channel::<JobOk>(result_cap);
             let ok_client = connect(&self.redis_url, &self.cfg.connection).await?;
             let handle = tokio::spawn(run_ok_result_writer(
                 ok_client,
@@ -111,6 +115,8 @@ where
                     stream_key: self.stream_key.clone(),
                     queue_name: self.cfg.queue_name.clone(),
                     group: self.cfg.group.clone(),
+                    batch: self.cfg.result_batch.max(1),
+                    idle: std::time::Duration::from_millis(self.cfg.result_idle_ms),
                 },
                 rx,
             ));
