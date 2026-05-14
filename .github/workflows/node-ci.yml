@@ -85,15 +85,23 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-            | sh -s -- --default-toolchain none -y
-          for bin in rustup cargo rustc rustdoc rust-gdb rust-lldb; do
+          # See py-ci.yml for the full diagnosis. Nuking pre-existing
+          # rustup state + installing with `--default-toolchain stable`
+          # (not `none`) is what actually makes cargo dispatch to a
+          # real toolchain — without a default toolchain cargo (as a
+          # rustup proxy) invokes rustup-init and produces the
+          # misleading "unexpected argument 'metadata'" error.
+          rm -rf "$HOME/.cargo" "$HOME/.rustup"
+          for bin in rustup cargo rustc rustdoc rust-gdb rust-lldb rustup-init; do
             sudo rm -f "/opt/homebrew/bin/$bin" "/usr/local/bin/$bin"
           done
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- --default-toolchain stable --profile minimal -y
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           export PATH="$HOME/.cargo/bin:$PATH"
-          which rustup cargo
+          which rustup cargo rustc
           rustup --version
+          cargo --version
 
       - uses: dtolnay/rust-toolchain@stable
         with:

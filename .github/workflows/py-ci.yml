@@ -76,25 +76,28 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Force the official installer to overwrite anything stale in
-          # ~/.cargo/bin; --default-toolchain none avoids fetching a
-          # toolchain we'll replace via dtolnay/rust-toolchain anyway.
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-            | sh -s -- --default-toolchain none -y
-          # Remove every broken Homebrew shim so neither `cargo` nor
-          # `rustup` resolves there. `brew uninstall rustup` only works
-          # when no toolchain has been installed via Homebrew rustup;
-          # the safest minimum is to unlink the shims by hand.
-          for bin in rustup cargo rustc rustdoc rust-gdb rust-lldb; do
+          # Nuke any pre-existing rustup state from the runner image so
+          # the fresh install starts clean. The runner ships with a
+          # stale `/Users/runner/.rustup/settings.toml` that confuses
+          # `rustup default` resolution; cargo (as a rustup proxy) then
+          # invokes `rustup-init` instead of dispatching to a toolchain
+          # cargo, which produces the misleading "unexpected argument
+          # 'metadata'" error.
+          rm -rf "$HOME/.cargo" "$HOME/.rustup"
+          # Remove the Homebrew shims first so the installer doesn't see
+          # them as the "current rustup" and try to upgrade-in-place.
+          for bin in rustup cargo rustc rustdoc rust-gdb rust-lldb rustup-init; do
             sudo rm -f "/opt/homebrew/bin/$bin" "/usr/local/bin/$bin"
           done
+          # Install with default profile + stable so cargo has a real
+          # toolchain to dispatch to (no --default-toolchain none).
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- --default-toolchain stable --profile minimal -y
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          # Sanity check: print the binary now on PATH for subsequent
-          # steps. If this resolves to /opt/homebrew/bin we know the
-          # unlink missed and the matrix will fail loud.
           export PATH="$HOME/.cargo/bin:$PATH"
-          which rustup cargo
+          which rustup cargo rustc
           rustup --version
+          cargo --version
 
       - uses: dtolnay/rust-toolchain@stable
         with:
