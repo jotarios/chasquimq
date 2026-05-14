@@ -22,9 +22,9 @@ The benchmark methodology mirrors BullMQ's upstream `bullmq-bench` so the number
 
 Redis runs in Docker on the same machine as the bench client. The bench process and Redis share CPU. BullMQ's published methodology uses a beefier client box than Redis box specifically to avoid this. **Numbers in this section are upper-bounded by single-host contention and should not be compared to BullMQ's published cross-host blog numbers.** They are valid as our internal A/B because we run ChasquiMQ on the same host with the same Redis.
 
-## The four scenarios
+## The scenarios
 
-All four mirror `bullmq-suite.ts` from `bullmq-bench`:
+Four mirror `bullmq-suite.ts` from `bullmq-bench` and form the head-to-head comparison:
 
 | Scenario | Warmup | Bench jobs | Bulk size | Payload | Worker concurrency |
 |---|---|---|---|---|---|
@@ -34,6 +34,14 @@ All four mirror `bullmq-suite.ts` from `bullmq-bench`:
 | `worker-concurrent` | 1,000 | 10,000 | n/a | 1×1 tiny | 100 |
 
 `queue-add-bulk` and `worker-concurrent` are the two scenarios that matter for the headline throughput claim. `queue-add` and `worker-generic` are latency-bound (single in-flight op) — useful for direction-only comparison, not for a 3× claim.
+
+One ChasquiMQ-only scenario reports per-job latency rather than throughput:
+
+| Scenario | Warmup | Bench jobs | Producer | Worker concurrency | What it measures |
+|---|---|---|---|---|---|
+| `worker-latency` | 200 | 10,000 | paced (~1 ms inter-arrival) | 100 | end-to-end p50/p99/p99.9 + engine-measured handler-only |
+
+The producer paces deliberately so the consumer is never saturated; the goal is dispatch overhead on an idle queue, not the throughput-ceiling tail. `bullmq-bench` does not measure per-job latency, so this scenario has no BullMQ comparator. Full methodology in [Latency under low-rate dispatch](https://github.com/jotarios/chasquimq/blob/main/benchmarks/latency-1.x.md).
 
 ## ChasquiMQ harness flags
 
@@ -86,11 +94,12 @@ To genuinely separate bench client from Redis on this host, we'd need to also pi
 
 ## Numbers we don't yet have
 
-Two open caveats:
+One open caveat remains for the head-to-head claim:
 
-- **Latency p99.** The harness reports per-scenario distribution stats but doesn't aggregate dispatch-to-ack p99. The `handler_duration_us` instrumentation exists; the bench wrapper hasn't aggregated it yet.
 - **Worker CPU% vs. BullMQ.** ChasquiMQ's bench measures its own CPU%. `bullmq-bench` does not. To claim "≥50% less worker CPU" defensibly, we'd need to instrument BullMQ's bench process with `top -pid` or a CPU-aware wrapper. Not done end-to-end.
 
 The 1.0 ship deliberately doesn't claim a CPU% delta against BullMQ — only ChasquiMQ's own CPU% (`jobs/CPU-sec`) is reported.
+
+Latency under low-rate dispatch is measured (see the `worker-latency` row above and the [latency report](https://github.com/jotarios/chasquimq/blob/main/benchmarks/latency-1.x.md)). Saturated-tail latency at the throughput ceiling is a separate question and not yet reported.
 
 For the actual numbers: [The 1.0 numbers](/benchmarks/the-1-0-numbers/). For the host-load reasoning: [Regressions and floors](/benchmarks/regressions-and-floors/).
