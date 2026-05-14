@@ -76,23 +76,29 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Nuke any pre-existing rustup state from the runner image so
-          # the fresh install starts clean. The runner ships with a
-          # stale `/Users/runner/.rustup/settings.toml` that confuses
-          # `rustup default` resolution; cargo (as a rustup proxy) then
-          # invokes `rustup-init` instead of dispatching to a toolchain
-          # cargo, which produces the misleading "unexpected argument
-          # 'metadata'" error.
+          # Nuke any pre-existing rustup state. The runner image ships
+          # with a stale `/Users/runner/.rustup/settings.toml` that
+          # confuses `rustup default` resolution.
           rm -rf "$HOME/.cargo" "$HOME/.rustup"
-          # Remove the Homebrew shims first so the installer doesn't see
-          # them as the "current rustup" and try to upgrade-in-place.
-          for bin in rustup cargo rustc rustdoc rust-gdb rust-lldb rustup-init; do
-            sudo rm -f "/opt/homebrew/bin/$bin" "/usr/local/bin/$bin"
-          done
-          # Install with default profile + stable so cargo has a real
-          # toolchain to dispatch to (no --default-toolchain none).
+          # Install official rustup with a real default toolchain so
+          # `cargo` is a working dispatcher from call zero.
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
             | sh -s -- --default-toolchain stable --profile minimal -y
+          # Symlink the working binaries INTO the homebrew bin dir, so
+          # ANY subprocess (regardless of PATH ordering or which shell
+          # spawns it) that resolves `cargo` / `rustup` / `rustc` hits
+          # the working binaries. We can't just remove the broken shims
+          # without leaving a hole: maturin-action spawns commands via
+          # exec() with a constrained PATH that may not include
+          # ~/.cargo/bin. Linking into /opt/homebrew/bin (already on
+          # PATH for every runner subprocess) avoids that whole class
+          # of failure.
+          for bin in rustup cargo rustc rustdoc rust-gdb rust-lldb rustup-init; do
+            sudo rm -f "/opt/homebrew/bin/$bin" "/usr/local/bin/$bin"
+            if [ -e "$HOME/.cargo/bin/$bin" ]; then
+              sudo ln -sf "$HOME/.cargo/bin/$bin" "/opt/homebrew/bin/$bin"
+            fi
+          done
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           export PATH="$HOME/.cargo/bin:$PATH"
           which rustup cargo rustc
