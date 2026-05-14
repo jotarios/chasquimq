@@ -36,6 +36,7 @@ The two scenarios that matter for the headline claim are:
 - [Methodology](/benchmarks/methodology/) — how we measure. Same host, same Redis, same scenarios.
 - [The 1.0 numbers](/benchmarks/the-1-0-numbers/) — the same-host re-bench that landed with 1.0.
 - [Regressions and floors](/benchmarks/regressions-and-floors/) — the host-load gate, the engine ceiling, when contention is a valid explanation.
+- [Latency under low-rate dispatch](https://github.com/jotarios/chasquimq/blob/main/benchmarks/latency-1.x.md) — `worker-latency` p50/p99/p99.9 for handler and end-to-end, contended-Mac numbers.
 
 The raw `.md` reports live in [`benchmarks/`](https://github.com/jotarios/chasquimq/tree/main/benchmarks) in the repo. The committed reports are the canonical record; raw run logs are gitignored.
 
@@ -58,7 +59,7 @@ For the BullMQ comparison run, see [Methodology](/benchmarks/methodology/) — t
 
 The numbers are defensible for *this hardware* and *this setup*. Open caveats:
 
-- **Latency is unmeasured.** Throughput only — no dispatch-to-ack p99 yet.
+- **Latency is measured under low-rate dispatch only.** The `worker-latency` scenario reports end-to-end p50 ~1 ms / p99.9 < 3 ms and engine-side handler dispatch p99.9 ~13 µs on a contended Mac. Saturated-tail latency (i.e. latency at the throughput ceiling) is a separate question, not yet measured. Methodology and caveats: [Latency under low-rate dispatch](https://github.com/jotarios/chasquimq/blob/main/benchmarks/latency-1.x.md).
 - **Same-host bench.** Bench process and Redis share cores. Apples-to-apples vs. BullMQ on the same host; not directly comparable to BullMQ's published cross-host numbers.
 - **Worker CPU vs. BullMQ unmeasured.** ChasquiMQ's CPU is instrumented; the upstream `bullmq-bench` doesn't measure it. The PRD's "≥50% less worker CPU" target needs parallel CPU measurement before we can claim a number.
 - **No persistence.** Redis runs default in-memory config — no AOF, no RDB. Production-realistic numbers would be lower for both queues.
