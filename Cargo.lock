@@ -284,8 +284,10 @@ dependencies = [
 name = "chasquimq-node"
 version = "1.2.0"
 dependencies = [
+ "async-trait",
  "bytes",
  "chasquimq",
+ "fred",
  "napi",
  "napi-build",
  "napi-derive",

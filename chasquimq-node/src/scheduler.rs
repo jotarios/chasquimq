@@ -12,6 +12,7 @@
 //! calls `Queue.add(name, data, { repeat: { ... } })` and runs a `Worker`
 //! gets cron / interval fires without a separate scheduler process.
 
+use crate::credential_provider::{build_js_credential_provider, CredentialProviderTsfn};
 use crate::payload::RawBytes;
 use crate::producer::map_engine_err;
 use chasquimq::Scheduler as EngineScheduler;
@@ -39,9 +40,25 @@ pub struct Scheduler {
 
 #[napi]
 impl Scheduler {
-    #[napi(constructor)]
-    pub fn new(redis_url: String, opts: Option<SchedulerOpts>) -> napi::Result<Self> {
-        let cfg = build_scheduler_config(opts);
+    /// `credentialProvider` mirrors the producer / consumer / promoter
+    /// shape: an optional JS callback fred invokes on every reconnect /
+    /// `AUTH` cycle. Hooked onto `ConnectionTuning::credential_provider`
+    /// so a standalone scheduler process can authenticate against a
+    /// rotating token source. `None` keeps the engine on its default
+    /// auth-from-URL behaviour.
+    #[napi(
+        constructor,
+        ts_args_type = "redisUrl: string, opts?: SchedulerOpts | undefined | null, credentialProvider?: ((host: string | null) => Promise<CredentialResponseJs>) | undefined | null"
+    )]
+    pub fn new(
+        redis_url: String,
+        opts: Option<SchedulerOpts>,
+        credential_provider: Option<CredentialProviderTsfn>,
+    ) -> napi::Result<Self> {
+        let mut cfg = build_scheduler_config(opts);
+        if let Some(tsfn) = credential_provider {
+            cfg.connection.credential_provider = Some(build_js_credential_provider(tsfn));
+        }
         Ok(Self {
             redis_url,
             cfg,
