@@ -30,6 +30,10 @@ struct LatencyState {
     end_to_end: StdMutex<Histogram<u64>>,
     overflow: AtomicU64,
     warned: AtomicBool,
+    /// Flipped to `true` when the warmup boundary is crossed. Per-job
+    /// recorders consult this so the 500 warmup jobs don't pollute the
+    /// distribution.
+    warm: AtomicBool,
 }
 
 impl LatencyState {
@@ -39,10 +43,22 @@ impl LatencyState {
             end_to_end: StdMutex::new(make_hist()),
             overflow: AtomicU64::new(0),
             warned: AtomicBool::new(false),
+            warm: AtomicBool::new(false),
         }
     }
 
+    fn is_warm(&self) -> bool {
+        self.warm.load(Ordering::Relaxed)
+    }
+
+    fn mark_warm(&self) {
+        self.warm.store(true, Ordering::Relaxed);
+    }
+
     fn record_handler(&self, value_us: u64) {
+        if !self.is_warm() {
+            return;
+        }
         record_into(
             &self.handler,
             value_us,
@@ -53,6 +69,9 @@ impl LatencyState {
     }
 
     fn record_end_to_end(&self, value_us: u64) {
+        if !self.is_warm() {
+            return;
+        }
         record_into(
             &self.end_to_end,
             value_us,
@@ -193,12 +212,23 @@ pub async fn run(redis_url: &str, queue: &str, scale: u32) -> ScenarioReport {
                             let created_us = (job.created_at_ms as u128) * 1_000;
                             let end_to_end_us =
                                 finish_us.saturating_sub(created_us).min(u64::MAX as u128) as u64;
-                            state.record_end_to_end(end_to_end_us);
 
+                            // Tick the stopwatch first so we can read its
+                            // post-tick warm state in the same critical section.
+                            // This flips `state.warm` exactly at the warmup
+                            // boundary, so warmup jobs are excluded from both
+                            // the end-to-end histogram (recorded here) and the
+                            // handler histogram (recorded by `LatencySink`).
                             let outcome = {
                                 let mut guard = sw.lock().await;
-                                guard.tick()
+                                let outcome = guard.tick();
+                                if guard.is_warm() {
+                                    state.mark_warm();
+                                }
+                                outcome
                             };
+                            state.record_end_to_end(end_to_end_us);
+
                             if let Some(outcome) = outcome
                                 && let Some(tx) = done_tx.lock().await.take()
                             {
@@ -214,7 +244,29 @@ pub async fn run(redis_url: &str, queue: &str, scale: u32) -> ScenarioReport {
             .await
     });
 
-    let outcome = done_rx.await.expect("scenario must finish");
+    // BUG 3: avoid `expect()` panic if the consumer dies before reporting
+    // (Redis disconnect, all attempts exhaust to DLQ, etc.). Fall back to a
+    // generous timeout and surface scenario state on failure.
+    const SCENARIO_TIMEOUT: Duration = Duration::from_secs(300);
+    let outcome = match tokio::time::timeout(SCENARIO_TIMEOUT, done_rx).await {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(_)) => panic!(
+            "worker-latency: done_tx dropped without firing (consumer task likely panicked); \
+             warm={}, samples_handler={}, samples_end_to_end={}",
+            state.warm.load(Ordering::Relaxed),
+            state.handler.lock().map(|g| g.len()).unwrap_or(0),
+            state.end_to_end.lock().map(|g| g.len()).unwrap_or(0),
+        ),
+        Err(_) => panic!(
+            "worker-latency: timed out after {:?} waiting for {} bench jobs \
+             (warm={}, samples_handler={}, samples_end_to_end={})",
+            SCENARIO_TIMEOUT,
+            params.warmup + params.bench,
+            state.warm.load(Ordering::Relaxed),
+            state.handler.lock().map(|g| g.len()).unwrap_or(0),
+            state.end_to_end.lock().map(|g| g.len()).unwrap_or(0),
+        ),
+    };
     producer_shutdown.cancel();
     consumer_shutdown.cancel();
     let _ = tokio::time::timeout(Duration::from_secs(10), consumer_task).await;
@@ -250,6 +302,7 @@ mod tests {
     #[test]
     fn clamps_overflow_and_warns_once() {
         let state = LatencyState::new();
+        state.mark_warm();
         state.record_handler(HIST_HI + 1);
         assert_eq!(state.overflow.load(Ordering::Relaxed), 1);
         assert!(state.warned.load(Ordering::Relaxed));
@@ -262,6 +315,7 @@ mod tests {
     #[test]
     fn underflow_clamps_to_one() {
         let state = LatencyState::new();
+        state.mark_warm();
         state.record_handler(0);
         let guard = state.handler.lock().unwrap();
         assert_eq!(guard.len(), 1);
@@ -271,6 +325,7 @@ mod tests {
     #[test]
     fn metrics_sink_forwards_handler_duration() {
         let state = Arc::new(LatencyState::new());
+        state.mark_warm();
         let sink = LatencySink {
             state: state.clone(),
         };
@@ -283,5 +338,21 @@ mod tests {
         let guard = state.handler.lock().unwrap();
         assert_eq!(guard.len(), 1);
         assert!(guard.value_at_quantile(1.0) >= 42);
+    }
+
+    #[test]
+    fn record_pre_warmup_is_dropped() {
+        let state = LatencyState::new();
+        // Before warmup boundary: recordings must be discarded.
+        state.record_handler(100);
+        state.record_end_to_end(200);
+        assert_eq!(state.handler.lock().unwrap().len(), 0);
+        assert_eq!(state.end_to_end.lock().unwrap().len(), 0);
+        // After mark_warm: recordings land.
+        state.mark_warm();
+        state.record_handler(100);
+        state.record_end_to_end(200);
+        assert_eq!(state.handler.lock().unwrap().len(), 1);
+        assert_eq!(state.end_to_end.lock().unwrap().len(), 1);
     }
 }

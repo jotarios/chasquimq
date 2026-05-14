@@ -55,6 +55,7 @@ pub struct Stopwatch {
     bench_count: u64,
     warmup: u64,
     bench: u64,
+    done: bool,
 }
 
 impl Stopwatch {
@@ -65,15 +66,27 @@ impl Stopwatch {
             bench_count: 0,
             warmup,
             bench,
+            done: false,
         }
     }
 
+    /// `true` once the bench window has begun (warmup jobs have all been ticked).
+    /// Used to gate per-job recording (latency histograms, etc.) so warmup
+    /// jobs don't pollute the distribution.
+    pub fn is_warm(&self) -> bool {
+        self.started.is_some()
+    }
+
     pub fn tick(&mut self) -> Option<ScenarioOutcome> {
+        if self.done {
+            return None;
+        }
         self.bench_count += 1;
         if self.bench_count == self.warmup {
             self.started = Some(Instant::now());
             self.rusage_at_start = Some(Rusage::now());
-        } else if self.bench_count == self.warmup + self.bench {
+        } else if self.bench_count >= self.warmup + self.bench {
+            self.done = true;
             let elapsed = self.started.unwrap().elapsed();
             let rusage_diff = Rusage::now().diff(self.rusage_at_start.as_ref().unwrap());
             return Some(ScenarioOutcome {
@@ -154,6 +167,33 @@ mod tests {
         let back: ScenarioReport = serde_json::from_str(&s).expect("deserialize");
         assert!(back.latency.is_none());
         assert_eq!(back.name, "x");
+    }
+
+    #[test]
+    fn stopwatch_is_warm_flips_at_warmup_boundary() {
+        let mut sw = Stopwatch::new(2, 3);
+        assert!(!sw.is_warm());
+        // warmup ticks 1 and 2 — second tick sets `started`.
+        sw.tick();
+        assert!(!sw.is_warm());
+        sw.tick();
+        assert!(sw.is_warm());
+    }
+
+    #[test]
+    fn stopwatch_tick_fires_once_on_overshoot() {
+        let mut sw = Stopwatch::new(2, 3);
+        // warmup + bench = 5 ticks until completion.
+        for _ in 0..4 {
+            assert!(sw.tick().is_none());
+        }
+        // 5th tick is the boundary — fires.
+        let first = sw.tick();
+        assert!(first.is_some());
+        // Any subsequent ticks (overshoot from retries) must be no-ops.
+        for _ in 0..5 {
+            assert!(sw.tick().is_none());
+        }
     }
 
     #[test]
