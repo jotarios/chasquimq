@@ -116,7 +116,7 @@ const conn = {
 }
 ```
 
-A thrown error or rejected Promise from the callback maps to a fred auth error; with the default reconnect policy fred retries on the next attempt, so a transient blip in your secrets backend doesn't take the worker down. Hard misconfiguration (e.g. permanently invalid credentials) currently surfaces on the next produce / consume call — see the [TODOs](#todos--known-limitations) for the bounded-retry follow-up.
+A thrown error or rejected Promise from the callback maps to a fred auth error. On the **initial connect** (the first `Queue.add` / `Worker.run`), an auth failure surfaces as a hard rejection on the caller — useful for fail-loud startup of a misconfigured deployment. After the pool is up, the default `reconnect_on_auth_error` policy treats subsequent auth failures as transient and retries on the next reconnect attempt, so a brief blip in your secrets backend doesn't take the worker down. Permanently broken providers post-startup will retry-loop inside fred until [`reconnect_max_attempts` is exposed to the Node shim](#todos--known-limitations).
 
 ## Power-user surface
 
