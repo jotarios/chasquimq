@@ -84,24 +84,27 @@ jobs:
           # `cargo` is a working dispatcher from call zero.
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
             | sh -s -- --default-toolchain stable --profile minimal -y
-          # Symlink the working binaries INTO the homebrew bin dir, so
-          # ANY subprocess (regardless of PATH ordering or which shell
-          # spawns it) that resolves `cargo` / `rustup` / `rustc` hits
-          # the working binaries. We can't just remove the broken shims
-          # without leaving a hole: maturin-action spawns commands via
-          # exec() with a constrained PATH that may not include
-          # ~/.cargo/bin. Linking into /opt/homebrew/bin (already on
-          # PATH for every runner subprocess) avoids that whole class
-          # of failure.
+          # Symlink the working binaries into BOTH `/opt/homebrew/bin`
+          # (used on aarch64 runners) AND `/usr/local/bin` (used on
+          # x86_64 runners + always on default PATH for `/bin/sh -c`).
+          # Any subprocess that resolves `cargo` via PATH — bash, sh,
+          # napi-rs's `child_process.exec`, maturin-action's exec() —
+          # hits a working binary regardless of which spawn API was
+          # used. Removing the broken shims without filling the hole
+          # caused "cargo: command not found" in the napi-rs subshell
+          # (it inherits an env where ~/.cargo/bin isn't on PATH).
           for bin in rustup cargo rustc rustdoc rust-gdb rust-lldb rustup-init; do
             sudo rm -f "/opt/homebrew/bin/$bin" "/usr/local/bin/$bin"
             if [ -e "$HOME/.cargo/bin/$bin" ]; then
+              sudo mkdir -p /opt/homebrew/bin /usr/local/bin
               sudo ln -sf "$HOME/.cargo/bin/$bin" "/opt/homebrew/bin/$bin"
+              sudo ln -sf "$HOME/.cargo/bin/$bin" "/usr/local/bin/$bin"
             fi
           done
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           export PATH="$HOME/.cargo/bin:$PATH"
           which rustup cargo rustc
+          /bin/sh -c "which cargo"
           rustup --version
           cargo --version
 

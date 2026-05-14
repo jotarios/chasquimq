@@ -89,19 +89,21 @@ jobs:
           rm -rf "$HOME/.cargo" "$HOME/.rustup"
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
             | sh -s -- --default-toolchain stable --profile minimal -y
-          # Symlink working binaries into /opt/homebrew/bin so the
-          # napi-rs CLI's `child_process.exec("cargo metadata ...")`
-          # spawned subprocess finds a working cargo regardless of
-          # PATH ordering.
+          # Symlink working binaries into BOTH /opt/homebrew/bin (aarch64
+          # runners) and /usr/local/bin (x86_64 runners + always on the
+          # default `/bin/sh` PATH). See py-ci.yml for the full diagnosis.
           for bin in rustup cargo rustc rustdoc rust-gdb rust-lldb rustup-init; do
             sudo rm -f "/opt/homebrew/bin/$bin" "/usr/local/bin/$bin"
             if [ -e "$HOME/.cargo/bin/$bin" ]; then
+              sudo mkdir -p /opt/homebrew/bin /usr/local/bin
               sudo ln -sf "$HOME/.cargo/bin/$bin" "/opt/homebrew/bin/$bin"
+              sudo ln -sf "$HOME/.cargo/bin/$bin" "/usr/local/bin/$bin"
             fi
           done
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           export PATH="$HOME/.cargo/bin:$PATH"
           which rustup cargo rustc
+          /bin/sh -c "which cargo"
           rustup --version
           cargo --version
 
