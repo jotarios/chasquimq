@@ -1,22 +1,29 @@
 use crate::scenarios::ScenarioReport;
 use crate::stats::compute_stats;
 use std::collections::BTreeMap;
+use std::io::{self, Write};
 
 const NOISY_SCENARIOS: &[&str] = &["worker-generic"];
 
-pub fn print_markdown_table(all: &BTreeMap<String, Vec<ScenarioReport>>, discard_slowest: u32) {
+pub fn print_markdown_table<W: Write>(
+    all: &BTreeMap<String, Vec<ScenarioReport>>,
+    discard_slowest: u32,
+    out: &mut W,
+) -> io::Result<()> {
     let cores = num_logical_cores();
-    println!();
-    println!(
+    writeln!(out)?;
+    writeln!(
+        out,
         "Each row drops the {} slowest repeat(s) before computing stats. \
          CPU load is across all worker threads (host has {} logical core(s)).",
         discard_slowest, cores
-    );
-    println!();
-    println!(
+    )?;
+    writeln!(out)?;
+    writeln!(
+        out,
         "| Scenario | Mean (jobs/s) | p50 | p95 | p99 | stddev | CPU load (× core) | jobs/CPU-sec |"
-    );
-    println!("|---|---:|---:|---:|---:|---:|---:|---:|");
+    )?;
+    writeln!(out, "|---|---:|---:|---:|---:|---:|---:|---:|")?;
     for (name, runs) in all {
         if runs.is_empty() {
             continue;
@@ -32,18 +39,21 @@ pub fn print_markdown_table(all: &BTreeMap<String, Vec<ScenarioReport>>, discard
         } else {
             format!("`{name}`")
         };
-        println!(
+        writeln!(
+            out,
             "| {label} | **{:.0}** | {:.0} | {:.0} | {:.0} | {:.0} | {:.2}× | {:.0} |",
             stats.mean, stats.p50, stats.p95, stats.p99, stats.stddev, cpu.mean, jpcs.mean
-        );
+        )?;
     }
     if all.keys().any(|k| NOISY_SCENARIOS.contains(&k.as_str())) {
-        println!();
-        println!(
+        writeln!(out)?;
+        writeln!(
+            out,
             "⚠ noisy: bench window is too small (~ms) for stable measurement; \
              treat as direction-only, not a defensible headline."
-        );
+        )?;
     }
+    Ok(())
 }
 
 fn num_logical_cores() -> usize {
