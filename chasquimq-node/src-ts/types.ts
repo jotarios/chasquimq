@@ -19,6 +19,34 @@
 
 export type JobProgress = number | object
 
+/**
+ * Resolved shape returned by a {@link ConnectionOptions.credentialProvider}
+ * callback. Both fields are optional — omitted username falls back to the
+ * Redis `default` user, omitted password skips `AUTH` entirely for that
+ * reconnect cycle. Mirrors the native `CredentialResponseJs` 1:1.
+ */
+export interface CredentialResponse {
+  username?: string
+  password?: string
+}
+
+/**
+ * Async credential resolver. Invoked by the engine on every reconnect /
+ * `AUTH` cycle, **not** per-job — the hot path is unaffected. Use it
+ * for rotating-token auth sources (ElastiCache IAM, Vault, AWS Secrets
+ * Manager, GCP Secret Manager, ...).
+ *
+ * `host` is the `host:port` of the server the engine is about to AUTH
+ * against, or `null` when fred has not yet resolved a target (e.g. on
+ * the initial `Config::from_url` parse). The callback should return a
+ * fresh `{ username?, password? }` pair; a thrown error / rejected
+ * Promise routes through fred's `reconnect_on_auth_error` policy and
+ * is retried on the next attempt.
+ */
+export type CredentialProvider = (
+  host: string | null,
+) => Promise<CredentialResponse>
+
 export interface ConnectionOptions {
   host?: string // default '127.0.0.1'
   port?: number // default 6379
@@ -27,6 +55,19 @@ export interface ConnectionOptions {
   db?: number
   tls?: boolean
   url?: string
+  /**
+   * Opt-in async resolver for rotating-token auth. When set, the engine
+   * invokes this callback on every reconnect / `AUTH` cycle and uses the
+   * returned `{ username, password }` to authenticate against Redis.
+   * `undefined` (the default) keeps the engine on inline auth from `url`
+   * / `username` / `password`.
+   *
+   * **Note:** the credentialProvider hook only fires on auth / reconnect,
+   * never per-job. Per-job overhead is zero.
+   *
+   * See {@link CredentialProvider} for the callback shape.
+   */
+  credentialProvider?: CredentialProvider
   // Other connection-shaped fields are accepted and silently ignored;
   // chasquimq's native producer manages its own pool.
   [key: string]: unknown
