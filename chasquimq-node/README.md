@@ -90,6 +90,34 @@ const conn = { url: "rediss://my-cluster.cache.amazonaws.com:6379" }
 
 Trust roots come from the platform store via `rustls-native-certs`: keychain on macOS, the OS CA bundle on Linux (probed by `openssl-probe`), system store on Windows — so AWS Trust CA-signed endpoints work out of the box. For private CAs, point `SSL_CERT_FILE` at a PEM bundle before launching Node; that env var takes precedence over the platform store.
 
+### Rotating IAM tokens
+
+For deployments that use short-lived auth tokens (ElastiCache IAM auth, Vault, AWS Secrets Manager, GCP Secret Manager, ...), pass an async `credentialProvider` on `connection`. The engine invokes it on every reconnect / `AUTH` cycle — never per job, so the hot path is unaffected:
+
+```ts
+import { ElastiCacheClient } from "@aws-sdk/client-elasticache"
+
+// Sketch — swap in your own token source.
+async function fetchIamToken(host: string | null) {
+  // Real implementations call AWS SDK's `signer.presign` against
+  // `redis://<replication-group-id>/?Action=connect&User=<user>`, or
+  // hit Vault's `/database/creds/<role>`. Both return a short-lived
+  // credential pair; cache + refresh on the schedule your provider
+  // recommends (ElastiCache rotates every 15 minutes).
+  return {
+    username: "iam-user",
+    password: await mintToken(host),
+  }
+}
+
+const conn = {
+  url: "rediss://my-cluster.cache.amazonaws.com:6379",
+  credentialProvider: fetchIamToken,
+}
+```
+
+A thrown error or rejected Promise from the callback maps to a fred auth error; with the default reconnect policy fred retries on the next attempt, so a transient blip in your secrets backend doesn't take the worker down. Hard misconfiguration (e.g. permanently invalid credentials) currently surfaces on the next produce / consume call — see the [TODOs](#todos--known-limitations) for the bounded-retry follow-up.
+
 ## Power-user surface
 
 The native engine handles ship from the same top-level package:
@@ -99,6 +127,10 @@ import { Producer, Consumer, Scheduler } from "chasquimq"
 ```
 
 There is one user-facing `Job` — the high-level class returned by `Queue.add` and passed to your `Worker` processor. The native binding's `Job` value-type is internal-only and not re-exported (mirrors the Python shim).
+
+## TODOs / known limitations
+
+- **`reconnect_max_attempts` is not yet exposed to the Node shim.** A permanently-misconfigured `credentialProvider` will retry-loop inside fred indefinitely. The engine's `ConnectionTuning::reconnect_max_attempts` field needs a sibling option on `ConnectionOptions` (Node) to cap retries — tracked for a follow-up slice.
 
 ## See also
 
