@@ -20,6 +20,8 @@ Apple M3, Redis 8.6 (loopback Docker), `bullmq-bench` vs `chasquimq-bench` on th
 
 `worker-concurrent` is the most CPU-contention-sensitive scenario in the suite; on a quiet host (load < 1) ChasquiMQ reaches ~419k jobs/s for an 8.78× ratio. See [`benchmarks/`](benchmarks/) for full methodology, distribution stats, and the canonical quiet-host run.
 
+**Latency, low-rate dispatch:** end-to-end p50 ~1 ms, p99.9 < 3 ms; engine-side handler dispatch p99.9 ~13 µs on a no-op handler. Same contended Mac. Methodology and caveats in [`benchmarks/latency-1.x.md`](benchmarks/latency-1.x.md).
+
 ## Why it's fast
 
 - **Redis Streams over `LPUSH`/`BRPOP`.** Consumer groups, idle-claim recovery, and atomic ack/delete primitives — not LIST polling.
