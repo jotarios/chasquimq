@@ -11,7 +11,7 @@
 //! engine's drain (workers, ack flusher, DLQ relocator, retry relocator,
 //! optional in-process promoter) all settle.
 
-use crate::credential_provider::{build_js_credential_provider, CredentialProviderTsfn};
+use crate::credential_provider::{CredentialProviderTsfn, build_js_credential_provider};
 use crate::payload::RawBytes;
 use crate::producer::map_engine_err;
 use bytes::Bytes;

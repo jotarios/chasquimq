@@ -5,7 +5,7 @@
 //! separate process (or sidecar). Same `run` / `shutdown` shape as
 //! `Consumer`.
 
-use crate::credential_provider::{build_js_credential_provider, CredentialProviderTsfn};
+use crate::credential_provider::{CredentialProviderTsfn, build_js_credential_provider};
 use crate::producer::map_engine_err;
 use chasquimq::Promoter as EnginePromoter;
 use chasquimq::config::PromoterConfig;

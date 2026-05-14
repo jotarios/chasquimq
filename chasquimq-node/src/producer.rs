@@ -7,7 +7,7 @@
 //! several orders of magnitude. No `BigInt` ergonomic tax for the common
 //! "schedule N seconds from now" call.
 
-use crate::credential_provider::{build_js_credential_provider, CredentialProviderTsfn};
+use crate::credential_provider::{CredentialProviderTsfn, build_js_credential_provider};
 use crate::payload::RawBytes;
 use crate::repeat::{MissedFiresPolicy, RepeatPattern, RepeatableMeta, RepeatableSpec};
 use bytes::Bytes;

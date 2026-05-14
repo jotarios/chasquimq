@@ -12,7 +12,7 @@
 //! calls `Queue.add(name, data, { repeat: { ... } })` and runs a `Worker`
 //! gets cron / interval fires without a separate scheduler process.
 
-use crate::credential_provider::{build_js_credential_provider, CredentialProviderTsfn};
+use crate::credential_provider::{CredentialProviderTsfn, build_js_credential_provider};
 use crate::payload::RawBytes;
 use crate::producer::map_engine_err;
 use chasquimq::Scheduler as EngineScheduler;

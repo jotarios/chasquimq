@@ -54,8 +54,7 @@ pub struct CredentialResponseJs {
 /// break that signature. Aliased here so every napi factory in this crate
 /// refers to one canonical type — keeps the cross-cutting parameter type
 /// from drifting if napi-rs ever changes the const-generic syntax.
-pub type CredentialProviderTsfn =
-    ThreadsafeFunction<Option<String>, ErrorStrategy::Fatal>;
+pub type CredentialProviderTsfn = ThreadsafeFunction<Option<String>, ErrorStrategy::Fatal>;
 
 /// Wraps a JS-side TSFN as something fred can call on every reconnect /
 /// `AUTH` cycle. The TSFN handle is reference-counted; cloning is cheap
@@ -112,8 +111,6 @@ impl CredentialProvider for JsCredentialProvider {
 /// of the four native factory entry points (producer / consumer / promoter
 /// / scheduler) so the `Option<TSFN> -> Option<Arc<...>>` conversion lives
 /// in exactly one place.
-pub fn build_js_credential_provider(
-    tsfn: CredentialProviderTsfn,
-) -> Arc<dyn CredentialProvider> {
+pub fn build_js_credential_provider(tsfn: CredentialProviderTsfn) -> Arc<dyn CredentialProvider> {
     Arc::new(JsCredentialProvider { tsfn })
 }
