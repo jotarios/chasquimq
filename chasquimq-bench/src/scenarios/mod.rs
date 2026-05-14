@@ -22,6 +22,25 @@ pub struct ScenarioReport {
     pub cpu_sys_pct: f64,
     pub cpu_total_pct: f64,
     pub jobs_per_cpu_sec: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency: Option<LatencyReport>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LatencyDistribution {
+    pub p50_us: u64,
+    pub p90_us: u64,
+    pub p99_us: u64,
+    pub p999_us: u64,
+    pub max_us: u64,
+    pub samples: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LatencyReport {
+    pub handler_us: LatencyDistribution,
+    pub end_to_end_us: LatencyDistribution,
+    pub overflow_count: u64,
 }
 
 pub struct ScenarioParams {
@@ -95,6 +114,7 @@ impl ScenarioOutcome {
             } else {
                 0.0
             },
+            latency: None,
         }
     }
 }
