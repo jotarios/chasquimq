@@ -72,6 +72,21 @@ jobs:
           cache: npm
           cache-dependency-path: chasquimq-node/package-lock.json
 
+      # macOS runners as of mid-May 2026 ship a Homebrew `rustup` whose
+      # rustup-init wrapper rejects subcommands like `+stable`, `cargo
+      # metadata`, etc. that the napi-rs CLI invokes internally. Replace
+      # it with the official rustup from sh.rustup.rs so every subsequent
+      # `cargo` / `rustup` resolves to a working wrapper. See py-ci.yml
+      # for the matching workaround on the Python wheels job.
+      - name: Replace Homebrew rustup on macOS
+        if: startsWith(matrix.settings.host, 'macos')
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- --default-toolchain none -y
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.settings.target }}

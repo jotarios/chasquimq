@@ -59,6 +59,26 @@ jobs:
         with:
           python-version: "3.12"
 
+      # macOS runners as of mid-May 2026 ship a Homebrew `rustup` whose
+      # rustup-init wrapper rejects the `+stable` toolchain selector that
+      # maturin-action's internal `rustup component add` invocation passes.
+      # That breaks `PyO3/maturin-action@v1` on both `macos-latest`
+      # variants (x86_64 + aarch64 Apple Silicon) — error reads
+      # "unexpected argument '+stable' found". Replace the Homebrew
+      # binary with the official `rustup-init` shipped from sh.rustup.rs
+      # *before* maturin-action runs, so its internal rustup calls
+      # resolve to a working wrapper. The official binary already lives
+      # at `~/.cargo/bin/rustup` post-install; we just need to make sure
+      # it precedes `/opt/homebrew/bin` on PATH for subsequent steps.
+      - name: Replace Homebrew rustup on macOS
+        if: startsWith(matrix.os, 'macos')
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- --default-toolchain none -y
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
