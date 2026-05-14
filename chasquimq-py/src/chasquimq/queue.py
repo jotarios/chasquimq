@@ -12,7 +12,7 @@ from __future__ import annotations
 import math
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional, Sequence, Union
+from typing import Any, Awaitable, Callable, Optional, Sequence, Tuple, Union
 
 from . import _native
 from ._encoding import decode_payload, encode_payload
@@ -47,6 +47,24 @@ BackoffLike = Union[int, BackoffSpec, dict]
 
 RepeatLike = Union[RepeatPattern, dict]
 
+CredentialProvider = Callable[
+    [Optional[str]], Awaitable[Tuple[Optional[str], Optional[str]]]
+]
+"""Async callable used to source rotating credentials per Redis handshake.
+
+Called by the engine before every `AUTH` / `HELLO` (initial connect and
+every reconnect). The single argument is the target server as
+``"host:port"`` (or ``None`` when fred has no specific endpoint to
+report — e.g. cluster bootstrap). Must return a 2-tuple of
+``(username, password)`` where either side may be ``None``.
+
+Typical ElastiCache IAM shape::
+
+    async def fetch(host: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+        token = await aws_elasticache.generate_iam_auth_token(...)
+        return ("my-iam-user", token)
+"""
+
 MissedFiresLike = Union[MissedFiresPolicy, dict]
 """Anything :meth:`Queue.upsert_repeatable_job` accepts as ``missed_fires``.
 
@@ -71,11 +89,19 @@ class Queue:
         tls: bool = False,
         max_stream_len: Optional[int] = None,
         max_delay_secs: Optional[int] = None,
+        credential_provider: Optional[CredentialProvider] = None,
     ) -> None:
         self._name = name
         self._redis_url = apply_tls(redis_url, tls)
         self._max_stream_len = max_stream_len
         self._max_delay_secs = max_delay_secs
+        # The native producer captures the running asyncio loop at
+        # construction time (needed because fred dispatches the AUTH
+        # callback from its router thread, which has no loop of its
+        # own). Store the callable and pass it on first use — when
+        # ``Queue.add`` is first awaited there is, by definition, a
+        # running loop.
+        self._credential_provider = credential_provider
         self._producer: Optional[_native.Producer] = None
         self._closed = False
 
@@ -94,6 +120,8 @@ class Queue:
                 kwargs["max_stream_len"] = self._max_stream_len
             if self._max_delay_secs is not None:
                 kwargs["max_delay_secs"] = self._max_delay_secs
+            if self._credential_provider is not None:
+                kwargs["credential_provider"] = self._credential_provider
             self._producer = _native.Producer(
                 self._redis_url, self._name, **kwargs
             )

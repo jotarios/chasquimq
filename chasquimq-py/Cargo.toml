@@ -17,13 +17,22 @@ crate-type = ["cdylib"]
 pyo3 = { version = "0.28", features = ["extension-module", "abi3-py39"] }
 pyo3-async-runtimes = { version = "0.28", features = ["tokio-runtime"] }
 chasquimq = { path = "../chasquimq" }
+async-trait = "0.1"
 bytes = "1"
+# Pull in fred only for its `CredentialProvider` trait + `Error` types so the
+# Python shim can construct an `Arc<dyn CredentialProvider>` and hand it to
+# `ConnectionTuning::credential_provider`. `default-features = false` keeps
+# this build lean — the engine crate already enables the heavier feature
+# matrix (`i-streams`, `enable-rustls-ring`, ...), and Cargo merges feature
+# sets across the shared dependency tree.
+fred = { version = "10", default-features = false, features = ["credential-provider"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }
 
 [profile.release]
 lto = true

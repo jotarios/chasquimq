@@ -1,6 +1,7 @@
 use pyo3::prelude::*;
 
 mod consumer;
+mod credential_provider;
 mod job;
 mod payload;
 mod producer;

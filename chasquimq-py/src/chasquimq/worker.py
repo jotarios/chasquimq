@@ -12,7 +12,7 @@ only one worker fires at a time.
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional, Tuple
 
 from . import _native
 from ._encoding import decode_payload, encode_payload
@@ -21,6 +21,12 @@ from .job import Job
 
 
 Handler = Callable[[Job], Awaitable[Any]]
+
+CredentialProvider = Callable[
+    [Optional[str]], Awaitable[Tuple[Optional[str], Optional[str]]]
+]
+"""See :data:`chasquimq.queue.CredentialProvider`. Re-aliased here so
+typed worker code does not have to import from ``chasquimq.queue``."""
 
 
 class Worker:
@@ -58,6 +64,7 @@ class Worker:
         scheduler_tick_ms: Optional[int] = None,
         store_results: bool = False,
         result_ttl_ms: Optional[int] = None,
+        credential_provider: Optional[CredentialProvider] = None,
     ) -> None:
         self._queue_name = queue_name
         self._handler = handler
@@ -89,9 +96,23 @@ class Worker:
             consumer_kwargs["dlq_max_stream_len"] = dlq_max_stream_len
         if scheduler_tick_ms is not None:
             consumer_kwargs["scheduler_tick_ms"] = scheduler_tick_ms
-        self._consumer = _native.Consumer(
-            self._redis_url, queue_name, **consumer_kwargs
-        )
+
+        if credential_provider is not None:
+            # The native consumer captures the running asyncio loop at
+            # construction time so fred's reconnect-driven AUTH dispatch
+            # can later hand the awaited coroutine back to it. That
+            # capture must happen inside a running loop — defer
+            # construction to ``run()`` (which is async by definition)
+            # rather than ``__init__`` (which historically does not
+            # require an active loop).
+            self._consumer: Optional[_native.Consumer] = None
+            self._deferred_kwargs: Optional[dict[str, Any]] = consumer_kwargs
+            self._deferred_kwargs["credential_provider"] = credential_provider
+        else:
+            self._consumer = _native.Consumer(
+                self._redis_url, queue_name, **consumer_kwargs
+            )
+            self._deferred_kwargs = None
 
         self._consumer_task: Optional[asyncio.Task[None]] = None
         self._running = False
@@ -113,6 +134,16 @@ class Worker:
             assert self._consumer_task is not None
             await self._consumer_task
             return
+
+        # If a credential_provider was passed, the native Consumer was
+        # deferred to here so it can capture the now-running asyncio
+        # loop. Construct it once on first ``run`` and keep the handle —
+        # the binding's ``shutdown()`` is then valid for ``close()``.
+        if self._consumer is None:
+            assert self._deferred_kwargs is not None
+            self._consumer = _native.Consumer(
+                self._redis_url, self._queue_name, **self._deferred_kwargs
+            )
 
         self._running = True
 
@@ -151,7 +182,12 @@ class Worker:
         if self._closed:
             return
         self._closed = True
-        self._consumer.shutdown()
+        # ``close()`` may be called before ``run()`` (e.g. an aborted
+        # async-context-manager path). When a credential_provider
+        # deferred construction, the native consumer may not exist yet —
+        # there is nothing to drain, so just flag closed.
+        if self._consumer is not None:
+            self._consumer.shutdown()
 
     @property
     def is_running(self) -> bool:
