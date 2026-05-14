@@ -55,11 +55,13 @@ To make the CPU claim defensible, we'd need to instrument BullMQ's bench process
 
 **Ship state.** The throughput claim is robust. The CPU claim is unverified. Both are flagged honestly in the benchmark docs.
 
-## Latency is unmeasured
+## Latency: measured under low-rate dispatch
 
-ChasquiMQ's bench harness reports throughput. It does not yet report dispatch-to-ack p99. For most workloads throughput is the right number; for low-latency RPC-style work, it's not.
+The bench harness now reports per-job latency for one scenario, `worker-latency` — a live producer at ~1000 jobs/sec against a `concurrency=100` consumer pool with no preloading. On a contended Apple M3 (load avg ~3): end-to-end p50 is 1,044us, p99 is 1,734us, p99.9 is 2,747us. The engine-measured handler-only distribution (no-op handler, sourced from `JobOutcome.handler_duration_us`) is sub-microsecond at p50 (1us), 2us at p99, 13us at p99.9 — most of the end-to-end envelope is Redis round trips, msgpack encode/decode, and async-channel dispatch, not engine compute.
 
-This is on the v1.x deferred list. The instrumentation is in place (`handler_duration_us` is on every `JobOutcome` event), but the bench harness doesn't yet aggregate the distribution.
+This answers the **dispatch-overhead-on-an-idle-queue** question, not the saturated-tail one. Tail latency under heavy producer rates is a function of queue depth and consumer rate, not the engine, and is not separately reported. There is also no BullMQ comparator — the upstream `bullmq-bench` suite does not measure per-job latency, so we deliberately do not publish a "ChasquiMQ is N× lower latency than BullMQ" claim.
+
+Full numbers, methodology, and reproducibility instructions: [`benchmarks/latency-1.x.md`](https://github.com/jotarios/chasquimq/blob/main/benchmarks/latency-1.x.md).
 
 ## What's not on the roadmap
 

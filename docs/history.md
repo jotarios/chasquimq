@@ -112,6 +112,26 @@ The original AWS Lambda doc that motivated this slice is now actually buildable 
 
 **Release operator note (1.2.0).** When cutting a release PR, **squash-merge** so the head commit's subject is the PR title (which starts with `chore(release):`). The publish gate on `node-ci.yml` and `py-ci.yml` checks the head commit's subject; a regular merge commit titled "Merge pull request #N from ..." does not match the gate and silently skips both publishes. v1.2.0's first merge attempt (PR #121) used `gh pr merge --merge`, skipped the publishes, and required a follow-up `chore(release):`-prefixed commit on `main` to re-fire the gate. For future releases: `gh pr merge <N> --squash` is the right invocation.
 
+## Latency bench scenario (post-slice-11)
+
+**Date:** 2026-05-14. **Branch:** `feat/latency-bench` (six commits ahead of `main`; engine code byte-identical to `main`).
+
+A new bench-crate-only scenario `worker-latency` measures dispatch overhead on an idle queue — the question "if I publish a job to an idle queue right now, how long until it's done?" — which the throughput-only bench harness was silent on. Implemented as a single live producer on `tokio::time::interval(1ms)` against a consumer pool with `concurrency=100`, `batch=64`. Two histograms recorded per invocation via `hdrhistogram = "7"`: `handler_us` (engine-measured handler future duration, sourced from `JobOutcome.handler_duration_us` via a bench-side `MetricsSink` impl) and `end_to_end_us` (wall-clock delta from `Job::created_at_ms` to a `SystemTime::now()` reading inside the handler). A derived `engine_overhead_us` per-percentile delta (`end_to_end - handler`) is rendered as a footnote.
+
+Headline numbers on a contended Apple M3 (load avg ~3, in the documented 1.8–4.3 today's-laptop envelope), `--repeats 5 --scale 5 --discard-slowest 1`:
+
+| Histogram | p50 (us) | p99 (us) | p99.9 (us) |
+|---|---:|---:|---:|
+| `end_to_end_us` | 1,044 | 1,734 | 2,747 |
+| `handler_us` (no-op handler, engine-measured) | 1 | 2 | 13 |
+| `engine_overhead_us` (derived) | 1,043 | 1,732 | 2,734 |
+
+Why this matters: the previous bench harness reported throughput only, leaving the "latency is unmeasured" caveat live on the Starlight `performance-trade-offs` page and the `benchmarks/README.md` methodology limitations list. This scenario closes that gap with an honest, dispatch-overhead-shaped measurement. There is no BullMQ comparator (their bench does not measure per-job latency), so the report deliberately does not publish a "N× lower latency than BullMQ" claim. The p50 ~1ms reading is bounded from below by the producer's 1ms inter-arrival cadence and the millisecond-resolution of `created_at_ms` on the wire (~500us floor per-job); both are documented in the report.
+
+Two MEDIUM fixes from the late `daster-bug` review landed in the same branch: a **warmup gate** (both histograms now only record on jobs past the `warmup` boundary — without it, cold-start outliers from consumer pool spin-up and the first XREADGROUP block polluted the aggregate), and an **overshoot-deadlock fix** (the producer task is cancelled via a dedicated `CancellationToken` once the bench-count reaches `warmup + bench`; without it, the 1ms `tokio::time::interval` kept XADDing past the bench window and on rare runs deadlocked the `done_rx` await). Both fixes held on the canonical run.
+
+Full report with raw numbers, distribution stats, and reproducibility instructions: [`benchmarks/latency-1.x.md`](../benchmarks/latency-1.x.md).
+
 ## Deferred follow-ups for 1.x
 
 - **Opt-in result-write bench scenario.** The PR #75 bench guard locked in the no-overhead-when-off claim (`store_results=false` regresses 0%). The opt-in path (`store_results=true` under sustained load) is not yet measured.

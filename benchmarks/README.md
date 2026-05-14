@@ -40,6 +40,7 @@ The two scenarios that matter for "fastest broker on Redis" are `queue-add-bulk`
 - [`ffi-buffer-copy.md`](ffi-buffer-copy.md) — **FFI buffer-copy gate.** Criterion microbench isolating the Rust-side cost of moving msgpack payloads across the Node and Python FFI seams. ~15ns inbound + ~30ns outbound for a realistic 256B payload — ~1.9% of one core at the engine's 420k jobs/s ceiling. Source: [`chasquimq-bench/benches/ffi_buffer_copy.rs`](../chasquimq-bench/benches/ffi_buffer_copy.rs).
 - [`post-1.0-bench-baseline.md`](post-1.0-bench-baseline.md) — **Post-1.0 polish slice 3 baseline + no-regression check.** Adds the two bench scenarios above and confirms `queue-add-bulk` reproduces Phase 2 final to within 0.2%; `worker-concurrent` matches the Phase 4 bench-guard re-run (host-load-explained, no engine code changed).
 - [`store-results-opt-in.md`](store-results-opt-in.md) — **Result-backend opt-in path bench.** Quantifies the cost of `store_results=true` (per-entry `JOB_OK_SCRIPT` EVALSHA, no batching) vs. the default `store_results=false` (batched `XACKDEL`) on the same host: opt-in is **7.1% of opt-out throughput** at concurrency=100. Closes the deferred sustained-throughput gate flagged in [`post-1.0-bench-baseline.md`](post-1.0-bench-baseline.md).
+- [`latency-1.x.md`](latency-1.x.md) — **Worker latency under low-rate dispatch.** New `worker-latency` scenario: live producer at ~1000 jobs/sec against a `concurrency=100` consumer pool. End-to-end p50 ~1ms, p99 ~1.7ms, p99.9 ~2.7ms on a contended Mac; engine-measured handler-only p50 1us, p99.9 13us. Dispatch-overhead measurement, not a saturated-tail number. No BullMQ comparator (their bench does not measure per-job latency).
 
 ## Reproducing
 
@@ -87,7 +88,7 @@ fresh run.
 
 The numbers above are defensible for *this hardware* and *this setup*. Open caveats, tracked in `TODOS.md`:
 
-- **Latency unmeasured.** Throughput only — no dispatch-to-ack p99 yet.
+- **Latency measured under low-rate dispatch only.** [`latency-1.x.md`](latency-1.x.md) reports the dispatch-overhead question (idle queue, ~1000 jobs/sec). Saturated-tail latency under heavy producer rates is not separately measured — it's a function of queue depth and consumer rate, not the engine.
 - **Same-host bench.** Bench process and Redis share cores. Apples-to-apples vs BullMQ on the same host; not directly comparable to BullMQ's published cross-host numbers.
 - **Worker CPU vs BullMQ unmeasured.** ChasquiMQ's CPU is instrumented; BullMQ's isn't (the `bullmq-bench` suite doesn't measure it). The PRD's "≥50% less worker CPU" target requires building a parallel CPU measurement against BullMQ before we can claim it.
 - **No persistence.** Redis is in-memory default config — no AOF, no RDB. Production-realistic numbers would be lower for both queues.
