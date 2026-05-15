@@ -10,6 +10,7 @@
 //! - §6: error mapping (rejection → retry → DLQ)
 
 mod consumer;
+mod credential_provider;
 mod payload;
 mod producer;
 mod promoter;
@@ -17,6 +18,12 @@ mod repeat;
 mod scheduler;
 
 pub use consumer::{Consumer, ConsumerOpts, Job, RetryOpts};
+// `CredentialResponseJs` is the `#[napi(object)]` return type of the JS
+// `credentialProvider` callback. Re-exported so napi-rs generates the
+// `CredentialResponseJs` type in `index.d.ts` for downstream TS callers
+// even though the high-level shim plumbs the callback through a typed
+// `ConnectionOptions.credentialProvider` field of its own.
+pub use credential_provider::CredentialResponseJs;
 pub use payload::RawBytes;
 pub use producer::{
     AddOptions, BackoffSpec, DlqEntry, JobRetryOverride, NamedPayload, Producer, ProducerOpts,

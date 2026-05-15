@@ -11,6 +11,7 @@
 //! engine's drain (workers, ack flusher, DLQ relocator, retry relocator,
 //! optional in-process promoter) all settle.
 
+use crate::credential_provider::{CredentialProviderTsfn, build_js_credential_provider};
 use crate::payload::RawBytes;
 use crate::producer::map_engine_err;
 use bytes::Bytes;
@@ -85,9 +86,26 @@ pub struct Consumer {
 
 #[napi]
 impl Consumer {
-    #[napi(constructor)]
-    pub fn new(redis_url: String, opts: Option<ConsumerOpts>) -> napi::Result<Self> {
-        let cfg = build_consumer_config(opts)?;
+    /// `credentialProvider` is an opt-in JS callback fred invokes on every
+    /// reconnect / `AUTH` cycle. Passed through to
+    /// `ConnectionTuning::credential_provider` on the engine's
+    /// `ConsumerConfig`; mirrors the producer's `connect` signature so the
+    /// high-level `Worker` shim can plumb the same `connection.credentialProvider`
+    /// into both sides of the pipeline. `None` (the common path) leaves the
+    /// engine on its default auth-from-URL behaviour.
+    #[napi(
+        constructor,
+        ts_args_type = "redisUrl: string, opts?: ConsumerOpts | undefined | null, credentialProvider?: ((host: string | null) => Promise<CredentialResponseJs>) | undefined | null"
+    )]
+    pub fn new(
+        redis_url: String,
+        opts: Option<ConsumerOpts>,
+        credential_provider: Option<CredentialProviderTsfn>,
+    ) -> napi::Result<Self> {
+        let mut cfg = build_consumer_config(opts)?;
+        if let Some(tsfn) = credential_provider {
+            cfg.connection.credential_provider = Some(build_js_credential_provider(tsfn));
+        }
         Ok(Self {
             redis_url,
             cfg,

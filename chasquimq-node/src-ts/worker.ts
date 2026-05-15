@@ -207,7 +207,13 @@ export class Worker<
       storeResults: opts.storeResults,
       resultTtlMs: opts.resultTtlMs,
     }
-    this.native = new NativeConsumer(url, nativeOpts)
+    // Plumb the optional credentialProvider through to the native
+    // Consumer constructor. `undefined` (the common path) collapses to
+    // the engine's default auth-from-URL behaviour; a function value
+    // installs a `JsCredentialProvider` on the engine's
+    // `ConnectionTuning::credential_provider` so fred invokes it on
+    // every reconnect / AUTH cycle.
+    this.native = new NativeConsumer(url, nativeOpts, opts.connection.credentialProvider)
 
     if (opts.autorun !== false) {
       // Defer to the next microtask so subscribers can attach listeners

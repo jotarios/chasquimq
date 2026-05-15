@@ -23,6 +23,18 @@ bytes = "1"
 rmp-serde = "1"
 thiserror = "1"
 tracing = "0.1"
+# `JsCredentialProvider` implements `fred::types::config::CredentialProvider`,
+# which is `#[async_trait]`. The crate is already in the workspace lockfile
+# (transitive via the engine's `fred` dep); pull it in directly here so the
+# trait impl can annotate `#[async_trait]` without a stale version skew.
+async-trait = "0.1"
+# Direct dep on `fred` so the binding can implement
+# `fred::types::config::CredentialProvider` and reference
+# `fred::types::config::Server` / `fred::error::{Error, ErrorKind}` in the
+# `JsCredentialProvider` impl. Pinned to the same version the engine uses
+# (`Cargo.lock` resolves to a single 10.x); features kept minimal —
+# `credential-provider` is the only one this crate needs.
+fred = { version = "10", default-features = false, features = ["credential-provider"] }
 
 [build-dependencies]
 napi-build = "2"

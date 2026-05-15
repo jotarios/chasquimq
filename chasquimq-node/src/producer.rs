@@ -7,6 +7,7 @@
 //! several orders of magnitude. No `BigInt` ergonomic tax for the common
 //! "schedule N seconds from now" call.
 
+use crate::credential_provider::{CredentialProviderTsfn, build_js_credential_provider};
 use crate::payload::RawBytes;
 use crate::repeat::{MissedFiresPolicy, RepeatPattern, RepeatableMeta, RepeatableSpec};
 use bytes::Bytes;
@@ -108,9 +109,28 @@ pub struct Producer {
 impl Producer {
     /// Connect a producer pool against `redisUrl`. Async because the
     /// underlying `fred::Pool::connect` is async.
-    #[napi(factory)]
-    pub async fn connect(redis_url: String, opts: Option<ProducerOpts>) -> napi::Result<Producer> {
-        let cfg = build_producer_config(opts);
+    ///
+    /// `credentialProvider` is an opt-in JS callback that fred invokes on
+    /// every reconnect / `AUTH` cycle. When `Some`, the callback's
+    /// resolved `{ username, password }` overrides any inline auth in
+    /// `redisUrl` for that connection's `HELLO` / `AUTH` round trip,
+    /// which is the cloud-Redis IAM-token rotation use case. `None`
+    /// (the common path; the high-level shim passes `undefined` when
+    /// `connection.credentialProvider` is unset) leaves the engine on
+    /// its default auth-from-URL behaviour.
+    #[napi(
+        factory,
+        ts_args_type = "redisUrl: string, opts?: ProducerOpts | undefined | null, credentialProvider?: ((host: string | null) => Promise<CredentialResponseJs>) | undefined | null"
+    )]
+    pub async fn connect(
+        redis_url: String,
+        opts: Option<ProducerOpts>,
+        credential_provider: Option<CredentialProviderTsfn>,
+    ) -> napi::Result<Producer> {
+        let mut cfg = build_producer_config(opts);
+        if let Some(tsfn) = credential_provider {
+            cfg.connection.credential_provider = Some(build_js_credential_provider(tsfn));
+        }
         let inner = EngineProducer::<RawBytes>::connect(&redis_url, cfg)
             .await
             .map_err(map_engine_err)?;

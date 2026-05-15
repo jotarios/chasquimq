@@ -61,7 +61,16 @@ export class Queue<
     if (!this.producerPromise) {
       const url = buildRedisUrl(this.opts.connection);
       const native: NativeProducerOpts = { queueName: this.name };
-      this.producerPromise = NativeProducer.connect(url, native);
+      // `connection.credentialProvider` is optional; passing `undefined`
+      // through to the native binding routes to the
+      // `Option<ThreadsafeFunction<...>>` -> `None` branch, leaving the
+      // engine on its default auth-from-URL path. The native binding
+      // ignores `null` vs `undefined`; both collapse to `None`.
+      this.producerPromise = NativeProducer.connect(
+        url,
+        native,
+        this.opts.connection.credentialProvider,
+      );
     }
     return this.producerPromise;
   }

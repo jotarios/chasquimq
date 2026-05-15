@@ -5,6 +5,7 @@
 //! separate process (or sidecar). Same `run` / `shutdown` shape as
 //! `Consumer`.
 
+use crate::credential_provider::{CredentialProviderTsfn, build_js_credential_provider};
 use crate::producer::map_engine_err;
 use chasquimq::Promoter as EnginePromoter;
 use chasquimq::config::PromoterConfig;
@@ -31,9 +32,25 @@ pub struct Promoter {
 
 #[napi]
 impl Promoter {
-    #[napi(constructor)]
-    pub fn new(redis_url: String, opts: Option<PromoterOpts>) -> napi::Result<Self> {
-        let cfg = build_promoter_config(opts);
+    /// `credentialProvider` mirrors the producer / consumer shape: an
+    /// optional JS callback fred invokes on every reconnect / `AUTH`
+    /// cycle. Hooked onto `ConnectionTuning::credential_provider` so a
+    /// standalone promoter process can authenticate against a rotating
+    /// token source (ElastiCache IAM, etc.). `None` keeps the engine on
+    /// its default auth-from-URL behaviour.
+    #[napi(
+        constructor,
+        ts_args_type = "redisUrl: string, opts?: PromoterOpts | undefined | null, credentialProvider?: ((host: string | null) => Promise<CredentialResponseJs>) | undefined | null"
+    )]
+    pub fn new(
+        redis_url: String,
+        opts: Option<PromoterOpts>,
+        credential_provider: Option<CredentialProviderTsfn>,
+    ) -> napi::Result<Self> {
+        let mut cfg = build_promoter_config(opts);
+        if let Some(tsfn) = credential_provider {
+            cfg.connection.credential_provider = Some(build_js_credential_provider(tsfn));
+        }
         Ok(Self {
             redis_url,
             cfg,
