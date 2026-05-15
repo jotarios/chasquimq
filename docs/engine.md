@@ -40,11 +40,13 @@ DLQ growth is capped via `ConsumerConfig::dlq_max_stream_len` (default 100,000).
 
 ## Result backends
 
-Opt-in per-job result storage. `ConsumerConfig::store_results = true` enables it; `result_ttl_secs` (default 3600) controls expiry. When the handler returns `Ok(bytes)`, a single Lua script atomically `XACKDEL`s the stream entry and `SET`s `{chasqui:<queue>}:result:<job_id>` with the bytes and TTL.
+Opt-in per-job result storage. `ConsumerConfig::store_results = true` enables it; `result_ttl_secs` (default 3600) controls expiry. When the handler returns `Ok(bytes)`, a Lua script atomically `XACKDEL`s the stream entry and `SET`s `{chasqui:<queue>}:result:<job_id>` with the bytes and TTL.
+
+Result-writes are batched, not per-job: completed entries accumulate in a bounded channel and flush as a single pipelined round trip, mirroring the batched `XACKDEL` ack-flusher. `result_batch` (default 64) caps the flush size; `result_idle_ms` (default 5) bounds latency when the batch isn't full. A `NOSCRIPT` mid-batch rebuilds the whole flush as inline `EVAL`; a per-element error leaves only that entry pending so `CLAIM` reclaims it. Tune `result_batch` up for throughput, down for lower result-visibility latency.
 
 `Producer::get_result(&JobId) -> Result<Option<Bytes>>` and `get_result_bulk(&[JobId])` read it back. `None` collapses three indistinguishable cases: not yet completed, expired, never written. For at-most-once result semantics, prefer `QueueEvents` subscription over `get_result`.
 
-Default-config consumers (`store_results = false`) skip the writer task entirely — zero overhead vs. the no-result-backend path.
+Default-config consumers (`store_results = false`) skip the writer task entirely — zero overhead vs. the no-result-backend path. On opt-in workloads the batched writer lifts `worker-concurrent-store-results` 8.4× over the per-entry PR #75 path (see [`benchmarks/store-results-opt-in.md`](../benchmarks/store-results-opt-in.md)).
 
 ### Behavior under `maxmemory` eviction
 

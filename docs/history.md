@@ -132,6 +132,20 @@ Two MEDIUM fixes from the late `daster-bug` review landed in the same branch: a 
 
 Full report with raw numbers, distribution stats, and reproducibility instructions: [`benchmarks/latency-1.x.md`](../benchmarks/latency-1.x.md).
 
+## Result-writer pipelining (result-backend perf)
+
+**Date:** 2026-05-14. **Branch:** merged via PR #92 (`perf(consumer): pipeline result-writer EVALSHA`, e67aef0). Closes issue #92.
+
+The PR #75 result backend wrote each `store_results=true` job's result with its own EVALSHA round trip (`run_ok_result_writer`, per-entry). On opt-in workloads that serialized the consumer on Redis RTT: `worker-concurrent-store-results` ran at 8,291 jobs/s, only 7.1% of the opt-out path. This PR batches the result-writes through a single `fred` `Pipeline` (`try_all`) per flush, mirroring the existing batched `XACKDEL` ack-flusher shape.
+
+- Two new Rust `ConsumerConfig` knobs (mirroring the ack-side `ack_batch` / `ack_idle_ms`): `result_batch` (default 64) and `result_idle_ms` (default 5) control flush granularity. Rust-only — the Node/Python shims do not surface them (the #92 commit message's "also on both shims" claim was inaccurate; the shims keep the engine defaults).
+- Per-element failure semantics via `pipeline.try_all`: a `NOSCRIPT` on any element rebuilds the whole batch as inline `EVAL`; a per-element error leaves only the affected entry pending so `CLAIM` reclaims it; documented Lua returns (`0` = race lost, `-1` = `XACKDEL` no-op) are silent-debug only.
+- Result-writer channel cap scales to `max(concurrency * 4, result_batch * 4)` so the writer keeps ≥4 batches of headroom even when `result_batch >> concurrency`.
+- 6 new integration tests in `chasquimq/tests/result_backend.rs`: batch-fill, idle-flush, mid-pipeline `NOSCRIPT`, partial Lua `0`/`-1`, per-job `JobOutcome` cardinality, shutdown drain.
+- Bench: `worker-concurrent-store-results` 8,291 → 69,813 jobs/s (8.4×) same-host A/B vs the 1.0 baseline; opt-in/opt-out ratio 7.1% → 72.3%, clearing issue #92's ≥5× acceptance gate. Full numbers in [`benchmarks/store-results-opt-in.md`](../benchmarks/store-results-opt-in.md).
+
+Doc-surface note: this entry, the `docs/engine.md` result-backends section (batched-writer description + the new knobs), and the `reference/options.md` result row were added in the v1.3.0 release sync — PR #92's own commit claimed these surfaces were updated but only `benchmarks/store-results-opt-in.md` actually landed. The default `store_results = false` zero-overhead path is unchanged.
+
 ## Cross-FFI credential provider (slice-11 follow-up)
 
 **Date:** 2026-05-15. **Branch:** merged via PRs #133 (Node) and #132 (Python); docs synced on `docs/credential-provider-shim-sync`.

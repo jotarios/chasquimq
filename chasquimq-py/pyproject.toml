@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "chasquimq"
-version = "1.2.0"
+version = "1.3.0"
 description = "The fastest open-source message broker for Redis."
 readme = "README.md"
 license = { text = "MIT" }
