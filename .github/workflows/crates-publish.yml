@@ -1,0 +1,122 @@
+# Publishes the two crates.io-facing crates (`chasquimq` engine, then
+# `chasquimq-cli`) on a release tag. Standalone — NOT part of release.yml,
+# which cargo-dist regenerates (`dist generate` would clobber any edit there;
+# see dist-workspace.toml). cargo-dist handles the GitHub Release + binaries;
+# this fills the crates.io gap that was previously a manual `cargo publish`.
+#
+# Idempotent: queries the crates.io sparse index per crate and skips any crate
+# already at the tag version, so a re-run after a partial failure only
+# publishes what's missing. Order is enforced (engine before CLI) with an
+# index-propagation wait between them — the lag is real, the CLI's verify step
+# downloads the just-published engine from crates.io.
+#
+# Requires repo secret CRATES_IO_TOKEN (crates.io API token with publish-update
+# scope for both crates). The publish only runs on the v* tag, never on PRs.
+
+name: Crates Publish
+
+on:
+  push:
+    tags:
+      - '**[0-9]+.[0-9]+.[0-9]+*'
+
+permissions:
+  contents: read
+
+jobs:
+  crates-publish:
+    name: publish to crates.io
+    runs-on: ubuntu-22.04
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Derive version from tag
+        id: ver
+        run: |
+          # Tag form is bare `v<semver>` (e.g. v1.3.0); strip a leading `v`.
+          raw="${GITHUB_REF_NAME}"
+          ver="${raw#v}"
+          if ! printf '%s' "$ver" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+'; then
+            echo "::error::Tag '$raw' does not contain a semver — refusing to publish."
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "Releasing crates at version $ver"
+
+      # The binstall pkg-url points at the cargo-dist GitHub Release tarball.
+      # Publishing chasquimq-cli before that Release exists would let a user
+      # who runs `cargo binstall` in the gap fall back to a source build.
+      # cargo-dist's release.yml runs on the same tag; wait for the Release.
+      - name: Wait for the GitHub Release to exist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          for i in $(seq 1 60); do
+            if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              echo "GitHub Release $tag is present."
+              exit 0
+            fi
+            echo "Release $tag not up yet (attempt $i/60); cargo-dist still building. Sleeping 30s."
+            sleep 30
+          done
+          echo "::error::GitHub Release $tag never appeared after 30 min — cargo-dist build likely failed. Not publishing to crates.io."
+          exit 1
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal --no-self-update
+
+      # publish_if_missing <crate>
+      #   - queries the crates.io sparse index for already-published versions
+      #   - no-ops if the target version is already there (idempotent re-run)
+      #   - otherwise `cargo publish` and wait for the index to reflect it
+      - name: Publish chasquimq (engine), then chasquimq-cli
+        run: |
+          set -euo pipefail
+          VER="${{ steps.ver.outputs.version }}"
+
+          index_versions() {
+            # Sparse-index path layout for a 9+ char name: first2/next2/name
+            local crate="$1" pfx
+            pfx="$(printf '%s' "$crate" | cut -c1-2)/$(printf '%s' "$crate" | cut -c3-4)"
+            curl -fsSL "https://index.crates.io/${pfx}/${crate}" 2>/dev/null \
+              | python3 -c "import sys,json;[print(json.loads(l)['vers']) for l in sys.stdin if l.strip()]" \
+              || true
+          }
+
+          wait_for_index() {
+            local crate="$1" want="$2"
+            for i in $(seq 1 40); do
+              if index_versions "$crate" | grep -qx "$want"; then
+                echo "  $crate $want is live on the crates.io index."
+                return 0
+              fi
+              echo "  waiting for $crate $want to propagate ($i/40)..."
+              sleep 15
+            done
+            echo "::error::$crate $want did not appear on the index after 10 min."
+            return 1
+          }
+
+          publish_if_missing() {
+            local crate="$1"
+            if index_versions "$crate" | grep -qx "$VER"; then
+              echo "==> $crate $VER already on crates.io — skipping (idempotent)."
+              return 0
+            fi
+            echo "==> Publishing $crate $VER"
+            cargo publish -p "$crate"
+            wait_for_index "$crate" "$VER"
+          }
+
+          # Order matters: chasquimq-cli path-deps chasquimq, and its publish
+          # verify step downloads the engine from crates.io.
+          publish_if_missing chasquimq
+          publish_if_missing chasquimq-cli
+
+          echo "crates.io: chasquimq + chasquimq-cli at $VER."
