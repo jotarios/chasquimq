@@ -130,7 +130,7 @@ async with Queue(
 Notes:
 
 - **Construction is deferred when a `credential_provider` is supplied.** The callback dispatches back to the asyncio loop that constructed the `Queue` / `Worker`, so the engine waits until the first awaited method (`queue.add`, `worker.run`, ...) to open the pool — that's the moment a running loop is guaranteed.
-- **Auth errors trigger reconnect.** The engine's default `reconnect_on_auth_error = true` means a token-fetch failure is retried on the next AUTH, with exponential backoff. Raise from your callback (or return stale credentials) and the next reconnect picks up a fresh token.
+- **Auth errors trigger reconnect.** The engine's default `reconnect_on_auth_error = true` means a token-fetch failure is retried on the next AUTH, with exponential backoff. Raise from your callback (or return stale credentials) and the next reconnect picks up a fresh token. A permanently broken provider will retry-loop inside fred until [`reconnect_max_attempts` is exposed to the Python shim](#todos--known-limitations).
 - **Same callback for both `Queue` and `Worker`.** Pass the same async function to each — the native producer and consumer each capture their own asyncio-loop reference internally.
 
 ## Power-user surface
@@ -153,6 +153,10 @@ maturin develop          # editable install
 pytest tests/            # smoke + integration tests (requires Redis 8.6+)
 maturin build --release  # wheels under target/wheels/
 ```
+
+## TODOs / known limitations
+
+- **`reconnect_max_attempts` is not yet exposed to the Python shim.** A permanently-misconfigured `credential_provider` will retry-loop inside fred indefinitely. The engine's `ConnectionTuning::reconnect_max_attempts` field needs a sibling keyword on `Queue` / `Worker` (Python) to cap retries — tracked for a follow-up slice.
 
 ## See also
 

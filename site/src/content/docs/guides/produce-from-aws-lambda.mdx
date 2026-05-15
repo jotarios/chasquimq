@@ -87,14 +87,59 @@ For ElastiCache with encryption-in-transit (the secure default; required for IAM
 
 ## Rotating IAM tokens
 
-ElastiCache IAM auth issues short-lived tokens (~15 min). The engine has a `CredentialProvider` hook that fred calls before every `AUTH` / `HELLO`, so a long-lived pool stays usable across rotations — but **the Node and Python shims do not yet expose this hook**.
+ElastiCache IAM auth issues short-lived tokens (~15 min). The engine has a `CredentialProvider` hook that fred calls before every `AUTH` / `HELLO` — initial connect **and every reconnect** — and both shims now expose it. Combined with the engine's `reconnect_on_auth_error` default, a module-scope `Queue` survives token rotation without rebuilding: fred re-invokes your callback to mint a fresh token on each reconnect.
 
-Until they do, two workarounds for Lambda Node/Python on IAM auth:
+The callback is handed the resolving host (or `null`/`None`) and returns the credentials to authenticate with. Generate the IAM auth token with the AWS SDK inside it:
 
-- **Rotate `REDIS_URL` externally.** Rebuild the `Queue` when the cached instance is older than your token TTL. Pay one cold-start-ish reconnect every ~14 minutes. Simplest path; works today.
-- **Use a sidecar that injects fresh tokens into the URL.** A separate process (cron Lambda, ECS task) writes the rotated URL to Secrets Manager / Parameter Store; the producer Lambda reads it. Same effect, less reconnect noise.
+<Tabs syncKey="binding">
+<TabItem label="Node">
 
-For Rust producers on Lambda (the rare case): plug an `Arc<dyn fred::types::config::CredentialProvider>` into `ProducerConfig::connection.credential_provider` and let fred do the rotation in-pool. See the [Rust API reference](/reference/rust-api/#connectiontuning) for the trait shape.
+```ts
+import { Queue } from "chasquimq";
+
+const queue = new Queue("emails", {
+  connection: {
+    url: process.env.REDIS_URL,
+    tls: true,
+    // Called before every AUTH/HELLO — initial connect and every reconnect.
+    credentialProvider: async (host) => ({
+      username: process.env.ELASTICACHE_USER,
+      password: await mintElastiCacheIamToken(host), // AWS SDK signer
+    }),
+  },
+});
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+import os
+from chasquimq import Queue
+
+async def fetch_credentials(host: str | None) -> tuple[str | None, str | None]:
+    # Called before every AUTH/HELLO — initial connect and every reconnect.
+    token = await mint_elasticache_iam_token(host)  # AWS SDK signer
+    return (os.environ["ELASTICACHE_USER"], token)
+
+_queue = Queue(
+    "emails",
+    redis_url=os.environ["REDIS_URL"],
+    tls=True,
+    credential_provider=fetch_credentials,
+)
+```
+
+On Python the `Producer` connects lazily on the first awaited method (a deferred-construction path that avoids an asyncio-loop deadlock when the callback is itself a coroutine); this is internal, but it means the first `await _queue.add(...)` is where the initial token fetch happens.
+
+</TabItem>
+</Tabs>
+
+**Caveat:** `reconnect_max_attempts` is not yet exposed to either shim, so a credential callback that always rejects (expired IAM role, revoked user) loops forever on reconnect rather than failing fast. Make the token mint inside the callback resilient, and alert on sustained reconnect churn.
+
+For Rust producers on Lambda (the rare case): plug an `Arc<dyn fred::types::config::CredentialProvider>` into `ProducerConfig::connection.credential_provider` directly. See the [Rust API reference](/reference/rust-api/#connectiontuning) for the trait shape, the [connection options reference](/reference/options/#connection) for the per-language surface, and [engine internals](https://github.com/jotarios/chasquimq/blob/main/docs/engine.md) for the rotation semantics.
+
+If you cannot run a token signer in-process, the pre-callback fallback still works: rotate `REDIS_URL` externally (sidecar writes a fresh URL to Secrets Manager / Parameter Store; rebuild the `Queue` when the cached instance ages past the token TTL). The callback is the better path — fewer reconnects, no rebuild — but the external-rotation pattern remains valid where an in-process signer isn't an option.
 
 ## Result-back patterns
 

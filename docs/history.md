@@ -132,8 +132,21 @@ Two MEDIUM fixes from the late `daster-bug` review landed in the same branch: a 
 
 Full report with raw numbers, distribution stats, and reproducibility instructions: [`benchmarks/latency-1.x.md`](../benchmarks/latency-1.x.md).
 
+## Cross-FFI credential provider (slice-11 follow-up)
+
+**Date:** 2026-05-15. **Branch:** merged via PRs #133 (Node) and #132 (Python); docs synced on `docs/credential-provider-shim-sync`.
+
+Closes the slice-11 deferred follow-up: the `CredentialProvider` hook from PR #117 was Rust-only, so Lambda Node/Python producers on ElastiCache IAM auth had to drop to the Rust API or rotate `REDIS_URL` externally. Both shims now expose the callback directly, wired through napi-rs `ThreadsafeFunction` and pyo3 async-callback machinery respectively.
+
+- **PR #133 — `feat(node): expose credentialProvider` (242139d).** New `connection.credentialProvider` option on `Queue` / `Worker` and the native `Producer` / `Consumer` / `Promoter` / `Scheduler`. Shape: `(host: string | null) => Promise<{ username?: string; password?: string }>`. The async JS callback is bridged to fred's `CredentialProvider` trait via a `ThreadsafeFunction`; callback rejections are mapped to a fred Auth error so fred's reconnect loop retries (rather than tearing down the pool). fred invokes it before every `AUTH` / `HELLO` — initial connect and every reconnect.
+- **PR #132 — `feat(py): expose credential_provider` (404db3b).** New `credential_provider` keyword arg on `Queue` / `Worker` and the native `Producer` / `Consumer` / `Scheduler`. Shape: `async def fetch(host: str | None) -> tuple[str | None, str | None]`. To avoid an asyncio-loop deadlock when the callback is itself a coroutine driven from inside the binding, the Python `Producer` uses a **deferred-construction path** — the underlying pool connects lazily on the first awaited method rather than at `Queue(...)` time. Error→Auth mapping mirrors the Node side exactly: a raised exception in `fetch` becomes a fred Auth error so reconnect retries with symmetric semantics across both shims.
+
+Combined with the engine's `reconnect_on_auth_error: true` default (slice-11 PR #115), a module-scope `Queue` now survives ElastiCache's ~15-min IAM token rotation without rebuilding on either runtime: fred re-invokes the callback to mint a fresh token on each reconnect. Doc-sync PR flips the now-false "shims do not yet expose this" caveats across `docs/engine.md`, `reference/options.md`, the AWS Lambda guide, and both shim READMEs (which gained symmetric "Rotating IAM tokens" sections).
+
+**Still deferred:** `reconnect_max_attempts` is not exposed to either shim, so a credential callback that always rejects loops forever on reconnect — needs the shim-side `ConnectionTuning` override surface that slice-11 PR #115 intentionally punted. A real ElastiCache IAM end-to-end test (against a live cluster with token rotation) is also outstanding; current coverage is unit-level (the Rust rotation primitive from PR #117 plus the FFI bridge tests).
+
 ## Deferred follow-ups for 1.x
 
 - **Opt-in result-write bench scenario.** The PR #75 bench guard locked in the no-overhead-when-off claim (`store_results=false` regresses 0%). The opt-in path (`store_results=true` under sustained load) is not yet measured.
 - **`maxmemory` eviction-behavior verification.** The result keys' TTL contract is documented but the engine-level behavior under Redis `maxmemory-policy: allkeys-lru` / `volatile-lru` eviction has not been exercised end-to-end.
-- **Cross-FFI credential-provider callback (Phase 4 follow-up).** Wire async `fetch()` callbacks through napi-rs `ThreadsafeFunction` and pyo3 async-callback machinery so Node/Python users can plug in IAM-token-fetching callbacks directly, instead of dropping to the Rust API or rotating `REDIS_URL` externally.
+- **~~Cross-FFI credential-provider callback (Phase 4 follow-up).~~** Shipped 2026-05-15 via PRs #133 (Node) / #132 (Python) — see the [Cross-FFI credential provider](#cross-ffi-credential-provider-slice-11-follow-up) slice above. Remaining: shim-side `reconnect_max_attempts` exposure (a callback that always rejects loops forever), and a real ElastiCache IAM end-to-end test.
