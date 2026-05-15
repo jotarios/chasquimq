@@ -63,6 +63,8 @@ exists.
 |---|---|---|---|---|
 | Persist handler return values | `WorkerOptions.storeResults` (**false**) | `Worker(store_results=False)` | `ConsumerConfig::store_results` (**false**) | When `true`, the engine writes each non-empty handler return to `{chasqui:<queue>}:result:<jobId>`. |
 | Result key TTL (ms / s) | `WorkerOptions.resultTtlMs` (**3_600_000**, rounded up to s) | `Worker(result_ttl_ms=3_600_000)` | `ConsumerConfig::result_ttl_secs` (**3600**) | TTL for stored results. |
+| Result-writer batch size | n/a | n/a | `ConsumerConfig::result_batch` (**64**) | Max completed jobs flushed per pipelined result-write round trip. Larger amortizes RTT; smaller lowers result-visibility latency. Only consulted when `store_results = true`. |
+| Result-writer idle flush (ms) | n/a | n/a | `ConsumerConfig::result_idle_ms` (**5**) | Idle deadline before a partial result-writer batch flushes. Caps worst-case wait for a trailing result under low concurrency. |
 | Result wait timeout | `Job.waitForResult({ timeoutMs })` (**30_000**) | `Job.wait_for_result(timeout=30.0)` | (use `Producer::get_result` directly) | Caller-side polling timeout. |
 | Result wait poll interval | `Job.waitForResult({ intervalMs })` (**100**) | `Job.wait_for_result(poll_interval=0.1)` | n/a | Polling frequency. |
 
