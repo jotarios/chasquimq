@@ -209,7 +209,9 @@ Two release models live in the same repo. The Node and Python publishes are comm
 
 ## Releasing chasquimq-cli
 
-The `chasqui` CLI ships **two ways** for the same release: as a prebuilt tarball per platform (Linux x86_64 + aarch64, macOS x86_64 + aarch64, Windows x86_64) plus shell and PowerShell installers attached to a [GitHub Release](https://github.com/jotarios/chasquimq/releases), AND as a published crate on [crates.io](https://crates.io/crates/chasquimq-cli). The binary path is built by [`cargo dist`](https://opensource.axo.dev/cargo-dist/) on git tag push; the crates.io path is a manual `cargo publish` so users can `cargo binstall chasquimq-cli` (which discovers our `[package.metadata.binstall]` config and downloads the cargo-dist tarball — no source compile).
+The `chasqui` CLI ships **two ways** for the same release: as a prebuilt tarball per platform (Linux x86_64 + aarch64, macOS x86_64 + aarch64, Windows x86_64) plus shell and PowerShell installers attached to a [GitHub Release](https://github.com/jotarios/chasquimq/releases), AND as a published crate on [crates.io](https://crates.io/crates/chasquimq-cli). The binary path is built by [`cargo dist`](https://opensource.axo.dev/cargo-dist/) on git tag push; the crates.io path is automated by [`crates-publish.yml`](.github/workflows/crates-publish.yml) on the same tag, so users can `cargo binstall chasquimq-cli` (which discovers our `[package.metadata.binstall]` config and downloads the cargo-dist tarball — no source compile).
+
+Two crates go to crates.io: `chasquimq` (the engine) and `chasquimq-cli`. The other workspace members are `publish = false`. `crates-publish.yml` publishes the engine first (the CLI path-deps it and its publish-verify step downloads the engine from crates.io), is idempotent (it skips any crate already at the tag version, so a re-run after a partial failure only publishes what's missing), and waits for the cargo-dist GitHub Release to exist before publishing so the `binstall` `pkg-url` tarball is in place. It needs the `CRATES_IO_TOKEN` repo secret (a crates.io API token scoped to publish-update on both crates).
 
 To cut a release:
 
@@ -220,11 +222,13 @@ To cut a release:
    git push origin v0.2.0
    ```
 3. The [`CLI Release`](.github/workflows/release.yml) workflow runs on the tag push, builds all five platform tarballs (plus the shell/powershell installers and a source tarball), and creates a GitHub Release with the artifacts attached.
-4. Publish to crates.io so `cargo install` and `cargo binstall` can find it:
+4. The [`Crates Publish`](.github/workflows/crates-publish.yml) workflow runs on the same tag: it waits for the GitHub Release from step 3, then publishes `chasquimq` and `chasquimq-cli` to crates.io (engine first, idempotent). No manual `cargo publish` — the workflow does it. If it fails partway (e.g. crates.io 5xx), just re-run the failed job; it skips whatever already published.
+
+   Manual fallback (only if the workflow itself is broken — requires `cargo login` once with a crates.io token):
    ```bash
-   cargo publish -p chasquimq-cli
+   cargo publish -p chasquimq      # engine first
+   cargo publish -p chasquimq-cli  # then the CLI
    ```
-   This is a manual step (one prompt, requires `cargo login` once with your crates.io token). Wait for the GitHub Release in step 3 to finish first — the `[package.metadata.binstall]` `pkg-url` template points at the tarball produced there, so users who run `cargo binstall chasquimq-cli` between steps 3 and 4 will fall back to a source build.
 
 Tag form: a bare `v<version>` tag works today because the CLI is the only `dist`-able crate in the workspace. If more bin crates land later, switch to the namespaced `chasquimq-cli-v<version>` form to scope releases unambiguously, and update the `pkg-url` template in `chasquimq-cli/Cargo.toml` to match.
 
