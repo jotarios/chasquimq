@@ -135,7 +135,7 @@ Note: `bullmq-bench`'s `package.json` says `"bullmq": "latest"` but the lockfile
 
 ## Doc surfaces — keep in sync
 
-When you ship a user-observable feature (new flag, config field, public method, behaviour change, breaking change, new dependency, performance characteristic), update **every** surface below that the change touches. Missing one is a real defect — past PRs in this repo shipped engine features that never reached the Starlight site, leaving users on docs.chasquimq.dev unaware they exist. Treat this as a checklist before opening any feature PR.
+When you ship a user-observable feature (new flag, config field, public method, behaviour change, breaking change, new dependency, performance characteristic), update **every** surface below that the change touches. Missing one is a real defect — past PRs in this repo shipped engine features that never reached the Starlight site, leaving users on chasquimq.io unaware they exist. Treat this as a checklist before opening any feature PR.
 
 | Surface | When to update | What goes here |
 |---|---|---|

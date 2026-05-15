@@ -4,7 +4,23 @@
 
 The fastest open-source message broker for Redis. Rust-native engine, MessagePack payloads, aggressive pipelining. Native Node.js and Python bindings — handlers run where you write them, the engine pulls jobs.
 
-> **Status:** 1.0 polish complete; ready for the 1.0 tag. The public API is stable in shape; small breakages may still land before tagging.
+<p align="center">
+  <a href="https://crates.io/crates/chasquimq"><img src="https://img.shields.io/crates/v/chasquimq?logo=rust&label=crates.io" alt="crates.io"></a>
+  <a href="https://www.npmjs.com/package/chasquimq"><img src="https://img.shields.io/npm/v/chasquimq?logo=npm&label=npm" alt="npm"></a>
+  <a href="https://pypi.org/project/chasquimq/"><img src="https://img.shields.io/pypi/v/chasquimq?logo=pypi&logoColor=white&label=PyPI" alt="PyPI"></a>
+  <a href="https://github.com/jotarios/chasquimq/actions/workflows/ci.yml"><img src="https://github.com/jotarios/chasquimq/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License"></a>
+</p>
+
+<p align="center">
+  <strong><a href="https://chasquimq.io">Website</a></strong> ·
+  <strong><a href="https://chasquimq.io/start/getting-started/">Getting started</a></strong> ·
+  <strong><a href="https://chasquimq.io/reference/">API reference</a></strong> ·
+  <strong><a href="https://chasquimq.io/guides/">Guides</a></strong> ·
+  <strong><a href="https://chasquimq.io/concepts/">Concepts</a></strong>
+</p>
+
+> **Status:** 1.0 shipped; 1.x cloud-Redis polish landed (TLS, connection tuning, rotating-token auth). The public API is stable in shape.
 
 Named after the *chasquis* — the relay runners of the Inca road system who carried messages across the Andes.
 
@@ -36,7 +52,7 @@ Anti-patterns avoided: blocking Lua scripts, JSON payloads, per-job round trips.
 
 ## Quickstart — Rust
 
-Requires Rust 1.85+ (2024 edition) and Redis 8.6+.
+[`chasquimq` on crates.io](https://crates.io/crates/chasquimq) · [docs.rs](https://docs.rs/chasquimq). Requires Rust 1.85+ (2024 edition) and Redis 8.6+.
 
 ```bash
 docker run -d --name chasquimq-redis -p 6379:6379 redis:8.6
@@ -78,7 +94,7 @@ Failed jobs retry with exponential backoff; exhausted ones land in the DLQ strea
 
 ## Quickstart — Node.js
 
-Single npm package, prebuilt binaries for `darwin` / `linux` / `win32` (arm64 + x64).
+[`chasquimq` on npm](https://www.npmjs.com/package/chasquimq). Single npm package, prebuilt binaries for `darwin` / `linux` / `win32` (arm64 + x64).
 
 ```bash
 npm install chasquimq
@@ -108,7 +124,7 @@ const result = await job.waitForResult({ timeoutMs: 30_000 })
 
 ## Quickstart — Python
 
-abi3 wheels for Python 3.9+ on Linux (x86_64 + aarch64), macOS (x86_64 + aarch64), Windows (x86_64).
+[`chasquimq` on PyPI](https://pypi.org/project/chasquimq/). abi3 wheels for Python 3.9+ on Linux (x86_64 + aarch64), macOS (x86_64 + aarch64), Windows (x86_64).
 
 ```bash
 pip install chasquimq
@@ -144,7 +160,13 @@ asyncio.run(main())
 
 ## CLI
 
-Install the `chasqui` binary with `cargo binstall chasquimq-cli` (prebuilt tarball, ~3s), or grab a platform-specific binary from [Releases](https://github.com/jotarios/chasquimq/releases) (`curl -LsSf https://github.com/jotarios/chasquimq/releases/latest/download/chasquimq-cli-installer.sh | sh`), or `cargo install chasquimq-cli` from source:
+Install the `chasqui` operator binary. Fastest is `cargo binstall chasquimq-cli` (prebuilt tarball, ~3s); `cargo install chasquimq-cli` builds from source. No Rust toolchain? Use the platform-specific installer (all assets on the [Releases page](https://github.com/jotarios/chasquimq/releases)):
+
+```bash
+curl -LsSf https://github.com/jotarios/chasquimq/releases/latest/download/chasquimq-cli-installer.sh | sh
+```
+
+Once installed:
 
 ```bash
 chasqui inspect emails              # one-shot: stream depth, pending, DLQ, delayed, repeatable
@@ -154,6 +176,18 @@ chasqui dlq replay emails --limit 50
 chasqui repeatable list emails
 chasqui events emails               # tail the events stream
 ```
+
+## Documentation
+
+Full docs at **[chasquimq.io](https://chasquimq.io)**:
+
+- [Getting started](https://chasquimq.io/start/getting-started/) — install, first job, retries, the CLI.
+- [Concepts](https://chasquimq.io/concepts/) — delivery semantics, Redis Streams primer, retry/backoff, the scheduler, architecture decisions.
+- [Guides](https://chasquimq.io/guides/) — configure retries, route/replay the DLQ, result storage, repeatable jobs, observe the engine, tune for throughput, produce from AWS Lambda, migrate from BullMQ / Sidekiq / Celery.
+- [Reference](https://chasquimq.io/reference/) — [Rust](https://chasquimq.io/reference/rust-api/), [Node](https://chasquimq.io/reference/node-api/), and [Python](https://chasquimq.io/reference/python-api/) APIs, [CLI](https://chasquimq.io/reference/cli/), [options](https://chasquimq.io/reference/options/), [wire format](https://chasquimq.io/reference/wire-format/), [error codes](https://chasquimq.io/reference/error-codes/).
+- [Benchmarks](https://chasquimq.io/benchmarks/) — methodology, the 1.0 numbers, regressions and floors.
+
+In-repo: [`docs/engine.md`](docs/engine.md) (engine internals), [`docs/history.md`](docs/history.md) (slice-by-slice changelog).
 
 ## Feature comparison
 
