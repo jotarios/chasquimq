@@ -141,8 +141,8 @@ pub struct Job<T> {
     ///   path re-encodes with the original name on the prefix).
     /// - Repeatable-spec scheduler-fire (`RepeatableSpec::job_name` is
     ///   threaded onto each fired job's `n` field).
-    /// - DLQ relocate (`xadd_dlq_args` carries `n` verbatim from the source
-    ///   entry).
+    /// - DLQ relocate (`RELOCATE_DLQ_SCRIPT` carries `n` verbatim from the
+    ///   source entry).
     /// - DLQ peek (`Producer::peek_dlq` returns `DlqEntry::name`).
     /// - DLQ replay (`Producer::replay_dlq` re-emits `n` on the new XADD).
     #[serde(default, skip)]

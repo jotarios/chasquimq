@@ -90,6 +90,70 @@ end
 return 0
 "#;
 
+/// Atomically relocate a poisoned stream entry into the DLQ. `XACKDEL`s the
+/// source entry from the consumer group's pending list first, then — only if
+/// the ack actually removed the entry — `XADD`s it into the DLQ stream. The
+/// move runs as one Lua invocation so the two writes can never be split by a
+/// crash or a dropped connection: Redis either runs both or neither.
+///
+/// **Why the gate matters (the duplicate-on-retry bug this closes).** The
+/// relocator used to issue `XADD` (re-enqueue into the DLQ) and then
+/// `XACKDEL` (remove from the main stream) as a non-atomic pipeline. If the
+/// process died after the `XADD` committed but before the `XACKDEL`, the
+/// entry was *both* in the DLQ *and* still pending on the main stream — the
+/// next CLAIM tick re-claimed it and routed a duplicate into the DLQ. The
+/// `IDMP` argument only papered over this while its dedup marker survived DLQ
+/// trimming. Gate-first + single-script atomicity is the real fix; `IDMP` is
+/// now belt-and-suspenders.
+///
+/// **Idempotent under client retry.** If the script committed server-side but
+/// its reply was lost and the relocator retried, the retry's `XACKDEL` finds
+/// nothing to ack (`-1`/`0`) and the `XADD` is skipped — no duplicate. This
+/// mirrors `RETRY_RESCHEDULE_SCRIPT`'s contract for the retry-reschedule path.
+///
+/// KEYS[1] = stream_key, KEYS[2] = dlq_key
+/// ARGV[1] = group, ARGV[2] = entry_id, ARGV[3] = producer_id (IDMP scope),
+/// ARGV[4] = source_id (IDMP id + `source_id` field), ARGV[5] = payload bytes,
+/// ARGV[6] = reason, ARGV[7] = max_stream_len (XADD MAXLEN ~),
+/// ARGV[8] = name ('' = omit the `n` field), ARGV[9] = detail ('' = omit the
+/// `detail` field)
+///
+/// The re-emitted `XADD` field order is the DLQ entry contract:
+/// `IDMP <producer_id> <source_id> MAXLEN ~ <max> * d <payload> [n <name>]
+/// source_id <source_id> reason <reason> [detail <detail>]`. `peek_dlq` /
+/// `replay_dlq` parse against exactly this shape, so it must stay in lockstep
+/// with `parse_dlq_entry` in `producer/dlq.rs`.
+///
+/// Returns 1 (relocated) or 0 (gate lost — a concurrent CLAIM/manual ack
+/// already removed the entry, so no DLQ write happened).
+pub(crate) const RELOCATE_DLQ_SCRIPT: &str = r#"
+local result = redis.call('XACKDEL', KEYS[1], ARGV[1], 'IDS', 1, ARGV[2])
+local first
+if type(result) == 'table' then
+  first = tonumber(result[1])
+else
+  first = tonumber(result)
+end
+if first ~= 1 then
+  return 0
+end
+local args = {KEYS[2], 'IDMP', ARGV[3], ARGV[4], 'MAXLEN', '~', ARGV[7], '*', 'd', ARGV[5]}
+if ARGV[8] ~= nil and ARGV[8] ~= '' then
+  args[#args + 1] = 'n'
+  args[#args + 1] = ARGV[8]
+end
+args[#args + 1] = 'source_id'
+args[#args + 1] = ARGV[4]
+args[#args + 1] = 'reason'
+args[#args + 1] = ARGV[6]
+if ARGV[9] ~= nil and ARGV[9] ~= '' then
+  args[#args + 1] = 'detail'
+  args[#args + 1] = ARGV[9]
+end
+redis.call('XADD', unpack(args))
+return 1
+"#;
+
 /// Replays up to ARGV[1] entries from the DLQ stream (KEYS[1]) back into the
 /// main stream (KEYS[2]). For each entry, the caller has already decoded the
 /// DLQ payload, reset Job::attempt to 0, re-encoded, and read the source
@@ -494,48 +558,6 @@ pub(crate) fn xackdel_args(stream_key: &str, group: &str, ids: &[impl AsRef<str>
     args
 }
 
-/// XADD args for relocating a stream entry into the DLQ.
-/// Carries the original payload plus source_id/reason/optional detail metadata,
-/// and the optional `n` field if the source entry had one — preserved verbatim
-/// so DLQ inspectors and the future replay path can route by name.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn xadd_dlq_args(
-    dlq_key: &str,
-    producer_id: &str,
-    source_id: &str,
-    payload: Bytes,
-    reason: &str,
-    detail: Option<&str>,
-    max_stream_len: u64,
-    name: &str,
-) -> Vec<Value> {
-    let mut args: Vec<Value> =
-        Vec::with_capacity(16 + (detail.is_some() as usize + !name.is_empty() as usize) * 2);
-    args.push(Value::from(dlq_key));
-    args.push(Value::from("IDMP"));
-    args.push(Value::from(producer_id));
-    args.push(Value::from(source_id));
-    args.push(Value::from("MAXLEN"));
-    args.push(Value::from("~"));
-    args.push(Value::from(max_stream_len as i64));
-    args.push(Value::from("*"));
-    args.push(Value::from(PAYLOAD_FIELD));
-    args.push(Value::Bytes(payload));
-    if !name.is_empty() {
-        args.push(Value::from(NAME_FIELD));
-        args.push(Value::from(name));
-    }
-    args.push(Value::from("source_id"));
-    args.push(Value::from(source_id));
-    args.push(Value::from("reason"));
-    args.push(Value::from(reason));
-    if let Some(d) = detail {
-        args.push(Value::from("detail"));
-        args.push(Value::from(d));
-    }
-    args
-}
-
 pub(crate) fn zadd_delayed_args(delayed_key: &str, run_at_ms: i64, bytes: Bytes) -> Vec<Value> {
     vec![
         Value::from(delayed_key),
@@ -673,6 +695,78 @@ pub(crate) fn eval_retry_args(
         Value::from(entry_id),
         Value::from(run_at_ms),
         Value::Bytes(bytes),
+    ]
+}
+
+/// EVALSHA argument vector for [`RELOCATE_DLQ_SCRIPT`]. `name` and `detail`
+/// are passed as empty strings when absent; the script omits the matching
+/// field so a relocated entry's shape matches the DLQ entry contract
+/// documented on [`RELOCATE_DLQ_SCRIPT`] exactly.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn evalsha_relocate_dlq_args(
+    sha: &str,
+    stream_key: &str,
+    dlq_key: &str,
+    group: &str,
+    entry_id: &str,
+    producer_id: &str,
+    source_id: &str,
+    payload: Bytes,
+    reason: &str,
+    max_stream_len: u64,
+    name: &str,
+    detail: Option<&str>,
+) -> Vec<Value> {
+    vec![
+        Value::from(sha),
+        Value::from(2_i64),
+        Value::from(stream_key),
+        Value::from(dlq_key),
+        Value::from(group),
+        Value::from(entry_id),
+        Value::from(producer_id),
+        Value::from(source_id),
+        Value::Bytes(payload),
+        Value::from(reason),
+        Value::from(max_stream_len as i64),
+        Value::from(name),
+        Value::from(detail.unwrap_or("")),
+    ]
+}
+
+/// EVAL fallback for [`RELOCATE_DLQ_SCRIPT`] when the cached SHA is unknown
+/// to the server (`NOSCRIPT`). Identical to [`evalsha_relocate_dlq_args`]
+/// apart from passing the script body in place of the SHA — the same
+/// two-builder convention used by the retry and replay paths.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn eval_relocate_dlq_args(
+    script: &str,
+    stream_key: &str,
+    dlq_key: &str,
+    group: &str,
+    entry_id: &str,
+    producer_id: &str,
+    source_id: &str,
+    payload: Bytes,
+    reason: &str,
+    max_stream_len: u64,
+    name: &str,
+    detail: Option<&str>,
+) -> Vec<Value> {
+    vec![
+        Value::from(script),
+        Value::from(2_i64),
+        Value::from(stream_key),
+        Value::from(dlq_key),
+        Value::from(group),
+        Value::from(entry_id),
+        Value::from(producer_id),
+        Value::from(source_id),
+        Value::Bytes(payload),
+        Value::from(reason),
+        Value::from(max_stream_len as i64),
+        Value::from(name),
+        Value::from(detail.unwrap_or("")),
     ]
 }
 
