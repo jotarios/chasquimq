@@ -1,7 +1,9 @@
 use crate::error::{Error, Result};
 use crate::events::EventsWriter;
 use crate::metrics::{self, DlqRouted, MetricsSink};
-use crate::redis::commands::{xackdel_args, xadd_dlq_args};
+use crate::redis::commands::{
+    RELOCATE_DLQ_SCRIPT, eval_relocate_dlq_args, evalsha_relocate_dlq_args, script_load_args,
+};
 use crate::redis::parse::StreamEntryId;
 use bytes::Bytes;
 use fred::clients::Client;
@@ -80,9 +82,16 @@ pub(crate) async fn run_relocator(
     cfg: DlqRelocatorConfig,
     mut rx: mpsc::Receiver<DlqRelocate>,
 ) {
+    let mut sha = match load_script(&client).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(error = %e, "dlq relocator: SCRIPT LOAD failed; entries will reclaim via CLAIM");
+            return;
+        }
+    };
     while let Some(relocate) = rx.recv().await {
-        match relocate_with_retry(&client, &cfg, &relocate).await {
-            Ok(()) => {
+        match relocate_with_retry(&client, &cfg, &relocate, &mut sha).await {
+            Ok(true) => {
                 let event = DlqRouted {
                     reason: relocate.reason,
                     attempt: relocate.attempt,
@@ -112,6 +121,15 @@ pub(crate) async fn run_relocator(
                         .await;
                 }
             }
+            Ok(false) => {
+                // Script returned 0: the XACKDEL gate found nothing to ack —
+                // a concurrent CLAIM or manual ack already removed the entry,
+                // so no DLQ write happened. The gate did its job; emitting
+                // `DlqRouted` here would over-count a relocation that this
+                // task did not perform. Mirrors the retry relocator's
+                // `Ok(false)` no-op branch.
+                tracing::trace!(entry_id = %relocate.entry_id, "dlq relocation gated: entry already removed");
+            }
             Err(e) => {
                 tracing::error!(entry_id = %relocate.entry_id, reason = %relocate.reason.as_str(), error = %e, "DLQ relocation failed permanently; entry remains pending and will be retried on next CLAIM tick");
             }
@@ -119,15 +137,19 @@ pub(crate) async fn run_relocator(
     }
 }
 
+/// Returns `Ok(true)` when the entry was relocated into the DLQ, `Ok(false)`
+/// when the XACKDEL gate found nothing to ack (a concurrent path already
+/// removed it — no DLQ write happened).
 async fn relocate_with_retry(
     client: &Client,
     cfg: &DlqRelocatorConfig,
     relocate: &DlqRelocate,
-) -> Result<()> {
+    sha: &mut String,
+) -> Result<bool> {
     let mut last_err: Option<Error> = None;
     for attempt in 0..DLQ_RETRY_ATTEMPTS {
-        match relocate_once(client, cfg, relocate).await {
-            Ok(()) => return Ok(()),
+        match relocate_once(client, cfg, relocate, sha).await {
+            Ok(relocated) => return Ok(relocated),
             Err(e) => {
                 let backoff = DLQ_RETRY_BASE_MS << attempt;
                 tracing::warn!(entry_id = %relocate.entry_id, attempt = attempt + 1, error = %e, backoff_ms = backoff, "DLQ relocation failed; retrying");
@@ -139,41 +161,86 @@ async fn relocate_with_retry(
     Err(last_err.unwrap_or_else(|| Error::Config("DLQ relocation exhausted retries".into())))
 }
 
+/// Runs [`RELOCATE_DLQ_SCRIPT`] via EVALSHA with a cached SHA, falling back to
+/// EVAL (and refreshing the cache) on `NOSCRIPT`. The script does the
+/// XACKDEL-gate-then-XADD move atomically, so a crash or dropped connection
+/// can never leave the entry both in the DLQ and pending on the main stream.
 async fn relocate_once(
     client: &Client,
     cfg: &DlqRelocatorConfig,
     relocate: &DlqRelocate,
-) -> Result<()> {
-    let pipeline = client.pipeline();
-    let xadd = CustomCommand::new_static("XADD", ClusterHash::FirstKey, false);
-    let xackdel = CustomCommand::new_static("XACKDEL", ClusterHash::FirstKey, false);
-
-    let xadd_args = xadd_dlq_args(
+    sha: &mut String,
+) -> Result<bool> {
+    let cmd = CustomCommand::new_static("EVALSHA", ClusterHash::FirstKey, false);
+    let args = evalsha_relocate_dlq_args(
+        sha,
+        &cfg.stream_key,
         &cfg.dlq_key,
+        &cfg.group,
+        relocate.entry_id.as_ref(),
         &cfg.producer_id,
         relocate.entry_id.as_ref(),
         relocate.payload.clone(),
         relocate.reason.as_str(),
-        relocate.reason.detail(),
         cfg.max_stream_len,
         &relocate.name,
+        relocate.reason.detail(),
     );
-    let xackdel_args = xackdel_args(
-        &cfg.stream_key,
-        &cfg.group,
-        std::slice::from_ref(&relocate.entry_id),
-    );
+    let res: std::result::Result<Value, fred::error::Error> = client.custom(cmd, args).await;
+    match res {
+        Ok(v) => Ok(script_returned_one(&v)),
+        Err(e) if format!("{e}").contains("NOSCRIPT") => {
+            *sha = load_script(client).await?;
+            let cmd = CustomCommand::new_static("EVAL", ClusterHash::FirstKey, false);
+            let args = eval_relocate_dlq_args(
+                RELOCATE_DLQ_SCRIPT,
+                &cfg.stream_key,
+                &cfg.dlq_key,
+                &cfg.group,
+                relocate.entry_id.as_ref(),
+                &cfg.producer_id,
+                relocate.entry_id.as_ref(),
+                relocate.payload.clone(),
+                relocate.reason.as_str(),
+                cfg.max_stream_len,
+                &relocate.name,
+                relocate.reason.detail(),
+            );
+            let v: Value = client.custom(cmd, args).await.map_err(Error::Redis)?;
+            Ok(script_returned_one(&v))
+        }
+        Err(e) => Err(Error::Redis(e)),
+    }
+}
 
-    let _: () = pipeline
-        .custom(xadd, xadd_args)
+/// [`RELOCATE_DLQ_SCRIPT`] returns Lua `1` (relocated) or `0` (gate lost).
+/// `fred` may shape the integer as `Integer`, `String`, or `Bytes` depending
+/// on protocol version; anything not matching `1` is treated as "did not
+/// relocate" — the safe default (we'd rather miss the metric than over-count).
+fn script_returned_one(v: &Value) -> bool {
+    match v {
+        Value::Integer(n) => *n == 1,
+        Value::String(s) => s.as_bytes() == b"1",
+        Value::Bytes(b) => b.as_ref() == b"1",
+        _ => false,
+    }
+}
+
+async fn load_script(client: &Client) -> Result<String> {
+    let cmd = CustomCommand::new_static("SCRIPT", ClusterHash::FirstKey, false);
+    let res: Value = client
+        .custom(cmd, script_load_args(RELOCATE_DLQ_SCRIPT))
         .await
         .map_err(Error::Redis)?;
-    let _: () = pipeline
-        .custom(xackdel, xackdel_args)
-        .await
-        .map_err(Error::Redis)?;
-    let _: Vec<Value> = pipeline.all().await.map_err(Error::Redis)?;
-    Ok(())
+    match res {
+        Value::String(s) => Ok(s.to_string()),
+        Value::Bytes(b) => std::str::from_utf8(&b)
+            .map(|s| s.to_string())
+            .map_err(|_| Error::Config("SCRIPT LOAD returned non-utf8 sha".into())),
+        other => Err(Error::Config(format!(
+            "SCRIPT LOAD returned unexpected: {other:?}"
+        ))),
+    }
 }
 
 #[cfg(test)]
