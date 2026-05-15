@@ -135,13 +135,15 @@ impl Producer {
             let delayed_key = format!("{{chasqui:{}}}:delayed", cfg.queue_name);
             let dlq_key = format!("{{chasqui:{}}}:dlq", cfg.queue_name);
             // The engine assigns a fresh UUID per `EngineProducer::connect`
-            // call (see `chasquimq::producer::Producer::connect`). On the
-            // deferred path we report a placeholder UUID with the same
-            // shape so callers can rely on `producer_id().len() > 0`
-            // even before first connect; the engine's id won't match this
-            // value, but `producer_id()` is informational only and no
-            // engine-internal logic compares against it.
-            let producer_id = uuid::Uuid::new_v4().to_string();
+            // call (see `chasquimq::producer::Producer::connect`), which on
+            // the deferred path hasn't happened yet. Report a self-describing
+            // sentinel rather than a random v4 UUID: a fake UUID would look
+            // like a real engine id while never matching one, so anyone
+            // logging it pre-connect and correlating against Redis consumer-
+            // group introspection post-connect would chase a phantom. The
+            // sentinel still satisfies `producer_id().len() > 0` and makes
+            // the not-yet-connected state legible at a glance.
+            let producer_id = format!("deferred-{}-pending", cfg.queue_name);
             return Ok(Producer {
                 state: Arc::new(ProducerState::Deferred(Box::new(DeferredState {
                     cell: OnceCell::new(),
