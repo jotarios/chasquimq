@@ -27,9 +27,11 @@ jobs:
   crates-publish:
     name: publish to crates.io
     runs-on: ubuntu-22.04
+    # CRATES_IO_TOKEN is deliberately NOT set at job scope — it would then be
+    # in the environment of checkout/rustup/gh, none of which should see a
+    # publish token. It is scoped to the single publish step below instead.
     env:
       CARGO_TERM_COLOR: always
-      CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -76,6 +78,9 @@ jobs:
       #   - no-ops if the target version is already there (idempotent re-run)
       #   - otherwise `cargo publish` and wait for the index to reflect it
       - name: Publish chasquimq (engine), then chasquimq-cli
+        env:
+          # Token scoped to this step only — the sole place it is needed.
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
         run: |
           set -euo pipefail
           VER="${{ steps.ver.outputs.version }}"
