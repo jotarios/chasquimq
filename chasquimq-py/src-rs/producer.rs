@@ -5,6 +5,7 @@
 //! are the same. Every async method returns a Python awaitable via
 //! `pyo3_async_runtimes::tokio::future_into_py`.
 
+use crate::credential_provider::PyCredentialProvider;
 use crate::payload::RawBytes;
 use bytes::Bytes;
 use chasquimq::config::ProducerConfig;
@@ -16,10 +17,67 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::sync::OnceCell;
+
+/// Producer state — either already-connected (eager path: legacy
+/// behaviour for callers without a `credential_provider`) or deferred,
+/// holding the config plus URL until the first async method connects
+/// on the tokio runtime. The deferred path matters when a
+/// `credential_provider` is set: connecting requires fred's router task
+/// to dispatch the Python callable back to the asyncio loop, which is
+/// only running when *this* call frame is awaiting (not blocking inside
+/// `__new__`). See `credential_provider.rs` for the full rationale.
+struct DeferredState {
+    cell: OnceCell<Arc<EngineProducer<RawBytes>>>,
+    redis_url: String,
+    cfg: ProducerConfig,
+    // Derived once at construction so `stream_key`/`delayed_key`/
+    // `dlq_key`/`producer_id` accessors stay sync — they used to read
+    // from the live `EngineProducer`, but on the deferred path those
+    // names are deterministic from the queue name, so we can compute
+    // them up front without round-tripping through Redis.
+    stream_key: String,
+    delayed_key: String,
+    dlq_key: String,
+    producer_id: String,
+}
+
+enum ProducerState {
+    Eager(Arc<EngineProducer<RawBytes>>),
+    // Boxed to keep the enum compact; the deferred variant carries a
+    // full `ProducerConfig` (~300 bytes) and `OnceCell`, so without
+    // boxing every `Eager` clone would also drag the deferred payload
+    // size through the Arc.
+    Deferred(Box<DeferredState>),
+}
 
 #[pyclass(name = "Producer", module = "chasquimq._native")]
 pub struct Producer {
-    inner: Arc<EngineProducer<RawBytes>>,
+    state: Arc<ProducerState>,
+}
+
+impl Producer {
+    /// Get or initialize the underlying engine producer. Returns the
+    /// shared `Arc` clone — never re-connects after the first success.
+    async fn ensure_connected(
+        state: Arc<ProducerState>,
+    ) -> PyResult<Arc<EngineProducer<RawBytes>>> {
+        match &*state {
+            ProducerState::Eager(inner) => Ok(inner.clone()),
+            ProducerState::Deferred(d) => {
+                let inner = d
+                    .cell
+                    .get_or_try_init(|| async {
+                        EngineProducer::<RawBytes>::connect(&d.redis_url, d.cfg.clone())
+                            .await
+                            .map(Arc::new)
+                            .map_err(map_engine_err)
+                    })
+                    .await?;
+                Ok(inner.clone())
+            }
+        }
+    }
 }
 
 #[pymethods]
@@ -32,6 +90,7 @@ impl Producer {
         pool_size = None,
         max_stream_len = None,
         max_delay_secs = None,
+        credential_provider = None,
     ))]
     fn new(
         py: Python<'_>,
@@ -40,6 +99,7 @@ impl Producer {
         pool_size: Option<u64>,
         max_stream_len: Option<u64>,
         max_delay_secs: Option<u64>,
+        credential_provider: Option<Py<PyAny>>,
     ) -> PyResult<Self> {
         let mut cfg = ProducerConfig {
             queue_name,
@@ -54,6 +114,50 @@ impl Producer {
         if let Some(d) = max_delay_secs {
             cfg.max_delay_secs = d;
         }
+        if let Some(cb) = credential_provider {
+            // Deferred construction. Capture TaskLocals NOW (we are
+            // still on the calling thread with a live asyncio loop) and
+            // forward into ConnectionTuning. Skip the
+            // `block_on(connect)` step entirely — connecting eagerly
+            // here would deadlock: fred's router task would call back
+            // into Python via the provider's `fetch`, but the asyncio
+            // loop is parked behind us in `block_on`. Instead the first
+            // awaited method (`add`, `shutdown`, ...) calls
+            // `ensure_connected`, which runs `EngineProducer::connect`
+            // on the tokio runtime *while* the asyncio loop is free to
+            // schedule the provider coroutine.
+            let provider = PyCredentialProvider::new(py, cb)?;
+            cfg.connection.credential_provider = Some(Arc::new(provider));
+            // Key formats are part of the engine's stable wire layout
+            // (see `chasquimq::redis::keys`). Pre-compute synchronously
+            // so the sync accessors don't have to wait for connect.
+            let stream_key = format!("{{chasqui:{}}}:stream", cfg.queue_name);
+            let delayed_key = format!("{{chasqui:{}}}:delayed", cfg.queue_name);
+            let dlq_key = format!("{{chasqui:{}}}:dlq", cfg.queue_name);
+            // The engine assigns a fresh UUID per `EngineProducer::connect`
+            // call (see `chasquimq::producer::Producer::connect`), which on
+            // the deferred path hasn't happened yet. Report a self-describing
+            // sentinel rather than a random v4 UUID: a fake UUID would look
+            // like a real engine id while never matching one, so anyone
+            // logging it pre-connect and correlating against Redis consumer-
+            // group introspection post-connect would chase a phantom. The
+            // sentinel still satisfies `producer_id().len() > 0` and makes
+            // the not-yet-connected state legible at a glance.
+            let producer_id = format!("deferred-{}-pending", cfg.queue_name);
+            return Ok(Producer {
+                state: Arc::new(ProducerState::Deferred(Box::new(DeferredState {
+                    cell: OnceCell::new(),
+                    redis_url,
+                    cfg,
+                    stream_key,
+                    delayed_key,
+                    dlq_key,
+                    producer_id,
+                }))),
+            });
+        }
+        // Legacy eager path: no callback → connect synchronously, same
+        // observable behaviour as before this slice.
         let runtime = pyo3_async_runtimes::tokio::get_runtime();
         let inner = py
             .detach(|| {
@@ -63,29 +167,50 @@ impl Producer {
             })
             .map_err(map_engine_err)?;
         Ok(Producer {
-            inner: Arc::new(inner),
+            state: Arc::new(ProducerState::Eager(Arc::new(inner))),
         })
     }
 
     fn stream_key(&self) -> String {
-        self.inner.stream_key().to_string()
+        match &*self.state {
+            ProducerState::Eager(inner) => inner.stream_key().to_string(),
+            ProducerState::Deferred(d) => d.stream_key.clone(),
+        }
     }
 
     fn delayed_key(&self) -> String {
-        self.inner.delayed_key().to_string()
+        match &*self.state {
+            ProducerState::Eager(inner) => inner.delayed_key().to_string(),
+            ProducerState::Deferred(d) => d.delayed_key.clone(),
+        }
     }
 
     fn dlq_key(&self) -> String {
-        self.inner.dlq_key().to_string()
+        match &*self.state {
+            ProducerState::Eager(inner) => inner.dlq_key().to_string(),
+            ProducerState::Deferred(d) => d.dlq_key.clone(),
+        }
     }
 
     fn producer_id(&self) -> String {
-        self.inner.producer_id().to_string()
+        match &*self.state {
+            ProducerState::Eager(inner) => inner.producer_id().to_string(),
+            ProducerState::Deferred(d) => d.producer_id.clone(),
+        }
     }
 
     fn shutdown<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let inner = self.inner.clone();
+        let state = self.state.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            // Deferred + never-connected: nothing to drain. Skip the
+            // implicit connect so a Queue that was constructed-then-
+            // closed without enqueuing anything doesn't pay a round trip.
+            if let ProducerState::Deferred(d) = &*state
+                && d.cell.get().is_none()
+            {
+                return Ok(());
+            }
+            let inner = Producer::ensure_connected(state).await?;
             inner.shutdown().await.map_err(map_engine_err)
         })
     }
@@ -96,8 +221,9 @@ impl Producer {
         payload: &Bound<'py, PyBytes>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let bytes = pybytes_to_bytes(payload);
-        let inner = self.inner.clone();
+        let state = self.state.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let inner = Producer::ensure_connected(state).await?;
             inner.add(RawBytes(bytes)).await.map_err(map_engine_err)
         })
     }
@@ -110,8 +236,9 @@ impl Producer {
     ) -> PyResult<Bound<'py, PyAny>> {
         let bytes = pybytes_to_bytes(payload);
         let engine_opts = dict_to_add_options(opts)?;
-        let inner = self.inner.clone();
+        let state = self.state.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let inner = Producer::ensure_connected(state).await?;
             inner
                 .add_with_options(RawBytes(bytes), engine_opts)
                 .await
@@ -127,8 +254,9 @@ impl Producer {
     ) -> PyResult<Bound<'py, PyAny>> {
         let dur = ms_to_duration(delay_ms)?;
         let bytes = pybytes_to_bytes(payload);
-        let inner = self.inner.clone();
+        let state = self.state.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let inner = Producer::ensure_connected(state).await?;
             inner
                 .add_in(dur, RawBytes(bytes))
                 .await
@@ -146,8 +274,9 @@ impl Producer {
         let dur = ms_to_duration(delay_ms)?;
         let bytes = pybytes_to_bytes(payload);
         let engine_opts = dict_to_add_options(opts)?;
-        let inner = self.inner.clone();
+        let state = self.state.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let inner = Producer::ensure_connected(state).await?;
             inner
                 .add_in_with_options(dur, RawBytes(bytes), engine_opts)
                 .await
@@ -163,8 +292,9 @@ impl Producer {
     ) -> PyResult<Bound<'py, PyAny>> {
         let when = ms_to_systemtime(when_ms)?;
         let bytes = pybytes_to_bytes(payload);
-        let inner = self.inner.clone();
+        let state = self.state.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let inner = Producer::ensure_connected(state).await?;
             inner
                 .add_at(when, RawBytes(bytes))
                 .await
@@ -182,8 +312,9 @@ impl Producer {
         let when = ms_to_systemtime(when_ms)?;
         let bytes = pybytes_to_bytes(payload);
         let engine_opts = dict_to_add_options(opts)?;
-        let inner = self.inner.clone();
+        let state = self.state.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let inner = Producer::ensure_connected(state).await?;
             inner
                 .add_at_with_options(when, RawBytes(bytes), engine_opts)
                 .await
@@ -197,8 +328,9 @@ impl Producer {
         payloads: &Bound<'py, PyList>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let raw = pylist_of_bytes_to_raw(payloads)?;
-        let inner = self.inner.clone();
+        let state = self.state.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let inner = Producer::ensure_connected(state).await?;
             inner.add_bulk(raw).await.map_err(map_engine_err)
         })
     }
@@ -211,8 +343,9 @@ impl Producer {
     ) -> PyResult<Bound<'py, PyAny>> {
         let raw = pylist_of_bytes_to_raw(payloads)?;
         let engine_opts = dict_to_add_options(opts)?;
-        let inner = self.inner.clone();
+        let state = self.state.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let inner = Producer::ensure_connected(state).await?;
             inner
                 .add_bulk_with_options(raw, engine_opts)
                 .await
@@ -226,8 +359,9 @@ impl Producer {
         items: &Bound<'py, PyList>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let pairs = pylist_of_named_payloads(items)?;
-        let inner = self.inner.clone();
+        let state = self.state.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let inner = Producer::ensure_connected(state).await?;
             inner.add_bulk_named(pairs).await.map_err(map_engine_err)
         })
     }
@@ -240,15 +374,17 @@ impl Producer {
     ) -> PyResult<Bound<'py, PyAny>> {
         let dur = ms_to_duration(delay_ms)?;
         let raw = pylist_of_bytes_to_raw(payloads)?;
-        let inner = self.inner.clone();
+        let state = self.state.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let inner = Producer::ensure_connected(state).await?;
             inner.add_in_bulk(dur, raw).await.map_err(map_engine_err)
         })
     }
 
     fn cancel_delayed<'py>(&self, py: Python<'py>, job_id: String) -> PyResult<Bound<'py, PyAny>> {
-        let inner = self.inner.clone();
+        let state = self.state.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let inner = Producer::ensure_connected(state).await?;
             inner.cancel_delayed(&job_id).await.map_err(map_engine_err)
         })
     }
@@ -258,8 +394,9 @@ impl Producer {
         py: Python<'py>,
         job_ids: Vec<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let inner = self.inner.clone();
+        let state = self.state.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let inner = Producer::ensure_connected(state).await?;
             inner
                 .cancel_delayed_bulk(&job_ids)
                 .await
@@ -268,9 +405,10 @@ impl Producer {
     }
 
     fn peek_dlq<'py>(&self, py: Python<'py>, limit: u64) -> PyResult<Bound<'py, PyAny>> {
-        let inner = self.inner.clone();
+        let state = self.state.clone();
         let lim = limit as usize;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let inner = Producer::ensure_connected(state).await?;
             let entries = inner.peek_dlq(lim).await.map_err(map_engine_err)?;
             Python::attach(|py| {
                 let out = PyList::empty(py);
@@ -290,9 +428,10 @@ impl Producer {
     }
 
     fn replay_dlq<'py>(&self, py: Python<'py>, limit: u64) -> PyResult<Bound<'py, PyAny>> {
-        let inner = self.inner.clone();
+        let state = self.state.clone();
         let lim = limit as usize;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let inner = Producer::ensure_connected(state).await?;
             let n = inner.replay_dlq(lim).await.map_err(map_engine_err)?;
             Ok(n as u64)
         })
@@ -304,8 +443,9 @@ impl Producer {
         spec: &Bound<'py, PyDict>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let engine_spec = dict_to_repeatable_spec(spec)?;
-        let inner = self.inner.clone();
+        let state = self.state.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let inner = Producer::ensure_connected(state).await?;
             inner
                 .upsert_repeatable(engine_spec)
                 .await
@@ -314,9 +454,10 @@ impl Producer {
     }
 
     fn list_repeatable<'py>(&self, py: Python<'py>, limit: u64) -> PyResult<Bound<'py, PyAny>> {
-        let inner = self.inner.clone();
+        let state = self.state.clone();
         let lim = limit as usize;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let inner = Producer::ensure_connected(state).await?;
             let metas = inner.list_repeatable(lim).await.map_err(map_engine_err)?;
             Python::attach(|py| {
                 let out = PyList::empty(py);
@@ -333,15 +474,17 @@ impl Producer {
         py: Python<'py>,
         key: String,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let inner = self.inner.clone();
+        let state = self.state.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let inner = Producer::ensure_connected(state).await?;
             inner.remove_repeatable(&key).await.map_err(map_engine_err)
         })
     }
 
     fn get_result<'py>(&self, py: Python<'py>, id: String) -> PyResult<Bound<'py, PyAny>> {
-        let inner = self.inner.clone();
+        let state = self.state.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let inner = Producer::ensure_connected(state).await?;
             let opt = inner.get_result(&id).await.map_err(map_engine_err)?;
             Python::attach(|py| match opt {
                 Some(b) => Ok::<_, PyErr>(Some(PyBytes::new(py, b.as_ref()).unbind())),
@@ -355,8 +498,9 @@ impl Producer {
         py: Python<'py>,
         ids: Vec<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let inner = self.inner.clone();
+        let state = self.state.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let inner = Producer::ensure_connected(state).await?;
             let results = inner.get_result_bulk(&ids).await.map_err(map_engine_err)?;
             Python::attach(|py| {
                 let out = PyList::empty(py);

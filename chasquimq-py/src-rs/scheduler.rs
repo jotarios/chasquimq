@@ -14,6 +14,7 @@
 //! process. Multiple workers cooperate via Redis `SET NX EX` leader
 //! election on `{chasqui:<queue>}:scheduler:lock`.
 
+use crate::credential_provider::PyCredentialProvider;
 use crate::payload::RawBytes;
 use chasquimq::Scheduler as EngineScheduler;
 use chasquimq::config::SchedulerConfig;
@@ -41,8 +42,11 @@ impl Scheduler {
         max_stream_len = None,
         lock_ttl_secs = None,
         holder_id = None,
+        credential_provider = None,
     ))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
+        py: Python<'_>,
         redis_url: String,
         queue_name: String,
         tick_interval_ms: Option<i64>,
@@ -50,6 +54,7 @@ impl Scheduler {
         max_stream_len: Option<i64>,
         lock_ttl_secs: Option<i64>,
         holder_id: Option<String>,
+        credential_provider: Option<Py<PyAny>>,
     ) -> PyResult<Self> {
         let mut cfg = SchedulerConfig {
             queue_name,
@@ -84,6 +89,10 @@ impl Scheduler {
         }
         if let Some(v) = holder_id {
             cfg.holder_id = v;
+        }
+        if let Some(cb) = credential_provider {
+            let provider = PyCredentialProvider::new(py, cb)?;
+            cfg.connection.credential_provider = Some(Arc::new(provider));
         }
 
         Ok(Self {

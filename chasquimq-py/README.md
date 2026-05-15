@@ -87,6 +87,52 @@ async with Queue("emails", redis_url="rediss://my-cluster.cache.amazonaws.com:63
 
 Trust roots come from the platform store via `rustls-native-certs`: keychain on macOS, the OS CA bundle on Linux (probed by `openssl-probe`), system store on Windows — so AWS Trust CA-signed endpoints work out of the box. For private CAs, point `SSL_CERT_FILE` at a PEM bundle before launching Python; that env var takes precedence over the platform store.
 
+### Rotating IAM tokens / `credential_provider`
+
+For Redis deployments that use short-lived auth tokens — most notably **AWS ElastiCache IAM auth**, where tokens expire roughly every 15 minutes — pass an async `credential_provider` callback. The engine calls it before every `AUTH` / `HELLO` command (initial connect and every reconnect), so a long-lived `Queue` / `Worker` stays authenticated through token rotation without rebuilding.
+
+```python
+from typing import Optional, Tuple
+
+import aioboto3  # or your preferred async AWS SDK
+
+from chasquimq import Queue, Worker
+
+
+async def elasticache_credentials(
+    host: Optional[str],
+) -> Tuple[Optional[str], Optional[str]]:
+    """Called by the engine before every AUTH/HELLO.
+
+    ``host`` is the target server as ``"hostname:port"`` (or ``None`` when
+    fred has no specific endpoint to report — e.g. cluster bootstrap).
+    Returns ``(username, password)``; either side may be ``None``.
+    """
+    session = aioboto3.Session()
+    async with session.client("elasticache") as ec:
+        token = await ec.generate_iam_auth_token(...)
+    return ("my-iam-user", token)
+
+
+async with Queue(
+    "emails",
+    redis_url="rediss://my-cluster.cache.amazonaws.com:6379",
+    credential_provider=elasticache_credentials,
+) as queue, Worker(
+    "emails",
+    send_email,
+    redis_url="rediss://my-cluster.cache.amazonaws.com:6379",
+    credential_provider=elasticache_credentials,
+) as worker:
+    ...
+```
+
+Notes:
+
+- **Construction is deferred when a `credential_provider` is supplied.** The callback dispatches back to the asyncio loop that constructed the `Queue` / `Worker`, so the engine waits until the first awaited method (`queue.add`, `worker.run`, ...) to open the pool — that's the moment a running loop is guaranteed.
+- **Auth errors trigger reconnect.** The engine's default `reconnect_on_auth_error = true` means a token-fetch failure is retried on the next AUTH, with exponential backoff. Raise from your callback (or return stale credentials) and the next reconnect picks up a fresh token.
+- **Same callback for both `Queue` and `Worker`.** Pass the same async function to each — the native producer and consumer each capture their own asyncio-loop reference internally.
+
 ## Power-user surface
 
 The native engine handles ship from the same top-level package:

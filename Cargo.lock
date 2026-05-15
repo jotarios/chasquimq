@@ -304,8 +304,10 @@ dependencies = [
 name = "chasquimq-py"
 version = "1.2.0"
 dependencies = [
+ "async-trait",
  "bytes",
  "chasquimq",
+ "fred",
  "pyo3",
  "pyo3-async-runtimes",
  "serde",

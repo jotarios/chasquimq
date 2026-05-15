@@ -13,6 +13,7 @@
 //! engine's drain (workers, ack flusher, DLQ relocator, retry relocator,
 //! optional in-process promoter) all settle.
 
+use crate::credential_provider::PyCredentialProvider;
 use crate::job::Job;
 use crate::payload::RawBytes;
 use chasquimq::config::ConsumerConfig;
@@ -55,6 +56,7 @@ impl Consumer {
         scheduler_tick_ms = None,
         store_results = false,
         result_ttl_ms = None,
+        credential_provider = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -76,6 +78,7 @@ impl Consumer {
         scheduler_tick_ms: Option<i64>,
         store_results: bool,
         result_ttl_ms: Option<i64>,
+        credential_provider: Option<Py<PyAny>>,
     ) -> PyResult<Self> {
         let mut cfg = ConsumerConfig {
             queue_name,
@@ -136,6 +139,14 @@ impl Consumer {
                 )));
             }
             cfg.dlq_max_stream_len = v as u64;
+        }
+        // The engine's embedded promoter and scheduler clone
+        // `cfg.connection` when spawned (see `Consumer::spawn_*`), so
+        // setting the provider once here propagates to every sub-task
+        // that opens its own fred client.
+        if let Some(cb) = credential_provider {
+            let provider = PyCredentialProvider::new(py, cb)?;
+            cfg.connection.credential_provider = Some(Arc::new(provider));
         }
 
         let unrecoverable_cls = py

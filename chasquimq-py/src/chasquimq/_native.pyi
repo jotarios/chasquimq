@@ -1,6 +1,10 @@
-from typing import Any, Awaitable, Callable, Optional, Sequence
+from typing import Any, Awaitable, Callable, Optional, Sequence, Tuple
 
 def version() -> str: ...
+
+CredentialProvider = Callable[
+    [Optional[str]], Awaitable[Tuple[Optional[str], Optional[str]]]
+]
 
 class _Job:
     @property
@@ -23,6 +27,7 @@ class Producer:
         pool_size: Optional[int] = ...,
         max_stream_len: Optional[int] = ...,
         max_delay_secs: Optional[int] = ...,
+        credential_provider: Optional[CredentialProvider] = ...,
     ) -> None: ...
     def stream_key(self) -> str: ...
     def delayed_key(self) -> str: ...
@@ -87,6 +92,7 @@ class Consumer:
         scheduler_tick_ms: Optional[int] = None,
         store_results: bool = False,
         result_ttl_ms: Optional[int] = None,
+        credential_provider: Optional[CredentialProvider] = None,
     ) -> None: ...
     def run(
         self, handler: Callable[[_Job], Awaitable[Any]]
@@ -104,6 +110,7 @@ class Scheduler:
         max_stream_len: Optional[int] = None,
         lock_ttl_secs: Optional[int] = None,
         holder_id: Optional[str] = None,
+        credential_provider: Optional[CredentialProvider] = None,
     ) -> None: ...
     def run(self) -> Awaitable[None]: ...
     def shutdown(self) -> None: ...
