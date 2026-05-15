@@ -33,6 +33,14 @@ The engine writes a `reason` field on every DLQ entry. Five values, three of whi
 
 Reader-side reasons (`decode_fail` / `malformed` / `oversize`) carry `attempt: 0` because the handler never ran. Useful when triaging a backlog — a high `decode_fail` rate means a producer is writing in a different schema, not a handler bug.
 
+## Routing into the DLQ is atomic
+
+Moving an entry *into* the DLQ is one Lua script, not a two-step pipeline. The script `XACKDEL`s the source entry from the consumer group's pending list, then `XADD`s it into the DLQ — but only if the ack actually removed the entry. Both writes commit together server-side or not at all.
+
+This matters under failure. If the move were a non-atomic pair (re-enqueue, then ack), a process crash between the two steps would leave the entry **both** in the DLQ **and** still pending on the main stream. The next idle-claim tick would re-deliver it and route a *second* copy into the DLQ. The single-script move closes that window: a relocate that gets interrupted either fully happened or never started, and a relocate retried after a lost reply finds nothing left to ack and writes nothing the second time. So an entry routes into the DLQ exactly once, even across crashes, reconnects, and concurrent consumers racing the same poisoned entry.
+
+This is the same per-entry atomicity guarantee replay gives in the other direction — see below.
+
 ## Replay
 
 `Producer::replay_dlq(limit)` (Rust), `Queue.replayDlq` (Node), `Queue.replay_dlq` (Python), and `chasqui dlq replay` are all the same primitive: a single Lua script that, for each entry up to `limit`:

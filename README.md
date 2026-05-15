@@ -28,7 +28,8 @@ Apple M3, Redis 8.6 (loopback Docker), `bullmq-bench` vs `chasquimq-bench` on th
 - **MessagePack payloads** via `rmp-serde`. Binary, smaller, faster to encode than JSON on every hop.
 - **Batched, pipelined `XACK`.** Acks accumulate in a bounded channel and flush as a single round trip — the silent killer in naive Streams consumers.
 - **`XACKDEL` (Redis 8.2)** — atomic ack-and-delete, no ack-then-delete dance.
-- **`IDMP` idempotent `XADD` (Redis 8.6)** — DLQ relocation and producer retries are wire-safe.
+- **Atomic DLQ relocation.** Routing a poisoned entry into the DLQ is one Lua script (ack-gate then re-enqueue), so a crash can't leave it both in the DLQ and pending — no duplicate on the next claim.
+- **`IDMP` idempotent `XADD` (Redis 8.6)** — producer retries after network blips don't double-publish; also belt-and-suspenders on the DLQ relocate.
 - **Tokio multi-receiver dispatch.** Per-job work stays off the reader's hot path; DLQ moves run on a dedicated relocator task.
 
 Anti-patterns avoided: blocking Lua scripts, JSON payloads, per-job round trips.
