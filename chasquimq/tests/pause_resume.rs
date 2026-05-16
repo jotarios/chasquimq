@@ -203,7 +203,11 @@ async fn in_flight_job_completes_on_pause() {
 
     // Wait for the handler to start, then pause mid-flight.
     tokio::time::sleep(Duration::from_millis(150)).await;
-    assert_eq!(started.load(Ordering::SeqCst), 1, "handler should be running");
+    assert_eq!(
+        started.load(Ordering::SeqCst),
+        1,
+        "handler should be running"
+    );
     assert_eq!(finished.load(Ordering::SeqCst), 0, "handler not done yet");
     pause.pause();
 
@@ -267,7 +271,10 @@ async fn redis_key_pause_is_observed_and_durable() {
     let producer = producer(queue).await;
 
     // --- Part 1: key set before the consumer starts → parks before any dispatch.
-    let _: () = admin.set(&paused_key, "1", None, None, false).await.expect("SET");
+    let _: () = admin
+        .set(&paused_key, "1", None, None, false)
+        .await
+        .expect("SET");
     producer
         .add_bulk((0..10).map(|n| Sample { n }).collect::<Vec<_>>())
         .await
@@ -310,7 +317,10 @@ async fn redis_key_pause_is_observed_and_durable() {
     );
 
     // --- Part 3: set the key again on the running consumer → parks again.
-    let _: () = admin.set(&paused_key, "1", None, None, false).await.expect("SET");
+    let _: () = admin
+        .set(&paused_key, "1", None, None, false)
+        .await
+        .expect("SET");
     tokio::time::sleep(Duration::from_millis(200)).await;
     let baseline = processed.load(Ordering::SeqCst);
     producer

@@ -231,11 +231,7 @@ impl PauseGate {
     /// Block until the reader may issue its next XREADGROUP. Returns
     /// `true` when runnable, `false` when shutdown was observed while
     /// parked (caller breaks to drain).
-    async fn wait_until_runnable(
-        &mut self,
-        reader: &Client,
-        shutdown: &CancellationToken,
-    ) -> bool {
+    async fn wait_until_runnable(&mut self, reader: &Client, shutdown: &CancellationToken) -> bool {
         loop {
             let in_proc_paused = *self.pause_rx.borrow();
             let redis_paused = self.refresh_redis(reader).await;
@@ -247,13 +243,12 @@ impl PauseGate {
                 _ = shutdown.cancelled() => return false,
                 changed = self.pause_rx.changed() => {
                     // All PauseControl senders dropped: no further
-                    // in-process pause signals are possible. Fall through
-                    // to re-evaluate (the Redis key may still pause us);
-                    // never busy-loop on the closed channel.
-                    if changed.is_err() {
-                        if !self.refresh_redis(reader).await {
-                            return true;
-                        }
+                    // in-process pause signals are possible. Re-evaluate
+                    // against the Redis key (which may still pause us) and
+                    // proceed if it doesn't — never busy-loop on the
+                    // closed channel.
+                    if changed.is_err() && !self.refresh_redis(reader).await {
+                        return true;
                     }
                 }
                 _ = tokio::time::sleep(self.poll) => {
