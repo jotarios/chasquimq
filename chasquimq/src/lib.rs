@@ -15,7 +15,7 @@ pub use bytes::Bytes;
 pub use config::{
     ConnectionTuning, ConsumerConfig, ProducerConfig, PromoterConfig, RetryConfig, SchedulerConfig,
 };
-pub use consumer::Consumer;
+pub use consumer::{Consumer, PauseControl};
 pub use error::{Error, HandlerError, Result};
 pub use job::{BackoffKind, BackoffSpec, Job, JobId, JobRetryOverride};
 pub use metrics::{

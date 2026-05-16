@@ -1,7 +1,10 @@
 mod dlq;
+mod pause;
 mod reader;
 mod retry;
 mod worker;
+
+pub use pause::PauseControl;
 
 use crate::ack::{
     AckFlusherConfig, JobOk, OkResultWriterConfig, run_ack_flusher, run_ok_result_writer,
@@ -13,7 +16,7 @@ use crate::job::Job;
 use crate::promoter::Promoter;
 use crate::redis::conn::connect;
 use crate::redis::group::ensure_group;
-use crate::redis::keys::{delayed_key, dlq_key, stream_key};
+use crate::redis::keys::{delayed_key, dlq_key, paused_key, stream_key};
 use crate::redis::parse::StreamEntryId;
 use crate::scheduler::Scheduler;
 use bytes::Bytes;
@@ -35,6 +38,8 @@ pub struct Consumer<T> {
     stream_key: String,
     delayed_key: String,
     dlq_key: String,
+    paused_key: String,
+    pause: Arc<PauseControl>,
     _marker: PhantomData<fn() -> T>,
 }
 
@@ -48,9 +53,25 @@ where
             stream_key: stream_key(&cfg.queue_name),
             delayed_key: delayed_key(&cfg.queue_name),
             dlq_key: dlq_key(&cfg.queue_name),
+            paused_key: paused_key(&cfg.queue_name),
+            pause: Arc::new(PauseControl::new()),
             cfg,
             _marker: PhantomData,
         }
+    }
+
+    /// Shared handle to this consumer's in-process pause switch. Clone it
+    /// before `run()` (or from another task) to pause/resume the reader
+    /// without tearing the consumer down. Mirrors the shutdown-token
+    /// sharing pattern: the returned `Arc` stays valid for the consumer's
+    /// lifetime and `pause()` / `resume()` are safe from any thread.
+    ///
+    /// This is the *process-local* control (`Worker.pause()`). The
+    /// *cross-process* durable pause (`chasqui pause` / `Queue.pause()`)
+    /// is the `{chasqui:<queue>}:paused` Redis key, which this same reader
+    /// also honours independently.
+    pub fn pause_control(&self) -> Arc<PauseControl> {
+        self.pause.clone()
     }
 
     pub async fn run<H, Fut>(self, handler: H, shutdown: CancellationToken) -> Result<()>
@@ -186,10 +207,12 @@ where
         let read_state = ReadState {
             reader,
             stream_key: Arc::<str>::from(self.stream_key.clone()),
+            paused_key: Arc::<str>::from(self.paused_key.clone()),
             cfg: self.cfg.clone(),
             job_tx,
             dlq_tx,
             shutdown: shutdown.clone(),
+            pause_rx: self.pause.subscribe(),
             metrics: self.cfg.metrics.clone(),
             events: (*events).clone(),
         };
