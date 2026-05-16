@@ -93,6 +93,7 @@ impl Producer {
         reconnect_max_attempts = None,
         credential_provider = None,
     ))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
         redis_url: String,
