@@ -206,6 +206,7 @@ export class Worker<
       schedulerTickMs: opts.schedulerTickMs,
       storeResults: opts.storeResults,
       resultTtlMs: opts.resultTtlMs,
+      reconnectMaxAttempts: opts.connection.reconnectMaxAttempts,
     }
     // Plumb the optional credentialProvider through to the native
     // Consumer constructor. `undefined` (the common path) collapses to

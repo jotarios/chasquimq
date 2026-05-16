@@ -34,6 +34,11 @@ pub struct ProducerOpts {
     /// Reject `addIn` / `addAt` calls whose delay exceeds this many seconds.
     /// Default matches the engine: 30 days.
     pub max_delay_secs: Option<i64>,
+    /// Cap on fred's exponential reconnect attempts. `0` (the engine
+    /// default) = retry forever. Set a positive value so a permanently
+    /// rejecting `credentialProvider` gives up instead of looping
+    /// forever on reconnect. Maps to `ConnectionTuning::reconnect_max_attempts`.
+    pub reconnect_max_attempts: Option<u32>,
 }
 
 #[napi(object)]
@@ -477,6 +482,9 @@ fn build_producer_config(opts: Option<ProducerOpts>) -> ProducerConfig {
             if d >= 0 {
                 cfg.max_delay_secs = d as u64;
             }
+        }
+        if let Some(n) = o.reconnect_max_attempts {
+            cfg.connection.reconnect_max_attempts = n;
         }
     }
     cfg

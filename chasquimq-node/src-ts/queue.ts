@@ -60,7 +60,10 @@ export class Queue<
   private async producer(): Promise<NativeProducer> {
     if (!this.producerPromise) {
       const url = buildRedisUrl(this.opts.connection);
-      const native: NativeProducerOpts = { queueName: this.name };
+      const native: NativeProducerOpts = {
+        queueName: this.name,
+        reconnectMaxAttempts: this.opts.connection.reconnectMaxAttempts,
+      };
       // `connection.credentialProvider` is optional; passing `undefined`
       // through to the native binding routes to the
       // `Option<ThreadsafeFunction<...>>` -> `None` branch, leaving the
