@@ -412,6 +412,35 @@ impl Producer {
         })
     }
 
+    /// Durably pause every consumer of this queue (cross-process). Sets
+    /// the `{chasqui:<queue>}:paused` key; survives consumer restarts
+    /// until `resume()`. Idempotent.
+    fn pause<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let state = self.state.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let inner = Producer::ensure_connected(state).await?;
+            inner.pause().await.map_err(map_engine_err)
+        })
+    }
+
+    /// Lift a durable pause set by `pause()`. Idempotent.
+    fn resume<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let state = self.state.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let inner = Producer::ensure_connected(state).await?;
+            inner.resume().await.map_err(map_engine_err)
+        })
+    }
+
+    /// Whether this queue is durably paused via the cross-process key.
+    fn is_paused<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let state = self.state.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let inner = Producer::ensure_connected(state).await?;
+            inner.is_paused().await.map_err(map_engine_err)
+        })
+    }
+
     fn peek_dlq<'py>(&self, py: Python<'py>, limit: u64) -> PyResult<Bound<'py, PyAny>> {
         let state = self.state.clone();
         let lim = limit as usize;

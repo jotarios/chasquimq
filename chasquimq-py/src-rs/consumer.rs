@@ -18,7 +18,7 @@ use crate::job::Job;
 use crate::payload::RawBytes;
 use chasquimq::config::ConsumerConfig;
 use chasquimq::consumer::Consumer as EngineConsumer;
-use chasquimq::{HandlerError, Job as EngineJob};
+use chasquimq::{HandlerError, Job as EngineJob, PauseControl};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyType};
@@ -31,6 +31,10 @@ pub struct Consumer {
     redis_url: String,
     cfg: ConsumerConfig,
     shutdown: Arc<CancellationToken>,
+    // Constructed at `__init__` so `pause()` / `resume()` are callable
+    // from any asyncio task before `run()` is awaited, mirroring the
+    // shutdown token's sharing model.
+    pause: Arc<PauseControl>,
     unrecoverable_cls: Py<PyType>,
 }
 
@@ -168,6 +172,7 @@ impl Consumer {
             redis_url,
             cfg,
             shutdown: Arc::new(CancellationToken::new()),
+            pause: Arc::new(PauseControl::new()),
             unrecoverable_cls,
         })
     }
@@ -189,6 +194,7 @@ impl Consumer {
         let redis_url = self.redis_url.clone();
         let cfg = self.cfg.clone();
         let shutdown = (*self.shutdown).clone();
+        let pause = self.pause.clone();
         let handler = Arc::new(handler);
         // GIL-free fast path: clone_ref needs the GIL; Arc::clone in the per-job closure does not.
         let unrecoverable_cls = Arc::new(self.unrecoverable_cls.clone_ref(py));
@@ -210,7 +216,7 @@ impl Consumer {
                 delayed_enabled = trace_delayed,
                 "py consumer entering engine run"
             );
-            let consumer = EngineConsumer::<RawBytes>::new(redis_url, cfg);
+            let consumer = EngineConsumer::<RawBytes>::with_pause_control(redis_url, cfg, pause);
             let engine_handler = move |job: EngineJob<RawBytes>| {
                 let h = handler.clone();
                 let locals = task_locals.clone();
@@ -272,6 +278,27 @@ impl Consumer {
     /// engine drains.
     fn shutdown(&self) {
         self.shutdown.cancel();
+    }
+
+    /// Pause this consumer's reader at the next batch boundary. In-flight
+    /// jobs already handed to handlers run to completion; no new jobs are
+    /// dispatched until `resume()`. Process-local (the `Worker.pause()`
+    /// path) — does not write the cross-process Redis pause key.
+    /// Idempotent; safe from any thread or asyncio task.
+    fn pause(&self) {
+        self.pause.pause();
+    }
+
+    /// Resume a paused reader. The parked reader wakes immediately (no
+    /// poll-interval latency for the in-process path). Idempotent.
+    fn resume(&self) {
+        self.pause.resume();
+    }
+
+    /// Current in-process pause state. Does not reflect a cross-process
+    /// pause set via `chasqui pause` / `Queue.pause()`.
+    fn is_paused(&self) -> bool {
+        self.pause.is_paused()
     }
 }
 
