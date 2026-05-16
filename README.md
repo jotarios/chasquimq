@@ -175,6 +175,8 @@ chasqui dlq peek emails             # render DLQ entries with their failure reas
 chasqui dlq replay emails --limit 50
 chasqui repeatable list emails
 chasqui events emails               # tail the events stream
+chasqui pause emails                # durably pause every consumer of the queue
+chasqui resume emails               # lift the pause
 ```
 
 ## Documentation
@@ -215,7 +217,7 @@ In-repo: [`docs/engine.md`](docs/engine.md) (engine internals), [`docs/history.m
 | CLI dashboard | ✓ (`chasqui`) | 3rd-party | 3rd-party | — |
 | Priorities | Future | ✓ | ✓ | — |
 | Rate limiter | Future | ✓ | ✓ | — |
-| Pause / Resume | Future | ✓ | ✓ | — |
+| Pause / Resume | ✓ | ✓ | ✓ | — |
 | Parent / child dependencies | Future | ✓ | — | — |
 | Web UI | Future | ✓ | ✓ | — |
 | Optimized for | Throughput | Jobs | Jobs | Messages |
@@ -241,7 +243,7 @@ Phases 1–4 shipped (engine, delayed jobs + retries, Node bindings, Python bind
 
 1.x cloud-Redis polish (May 2026) added TLS (`rediss://`), TCP keepalive + reconnect-policy tuning, `Producer::shutdown` clean disconnect, and a `CredentialProvider` hook for rotating-token auth (ElastiCache IAM) — see [`docs/history.md`](docs/history.md#slice-11--aws-lambda-prerequisites-cloud-redis-polish) for the slice writeup.
 
-Future v1.x candidates: priorities, rate limiter, pause/resume, parent/child dependencies, fair queues, web UI. Cross-FFI credential-provider callbacks for the Node and Python shims (today the hook is Rust-only).
+Future v1.x candidates: priorities, rate limiter, parent/child dependencies, fair queues, web UI.
 
 ## Contributing
 

@@ -68,6 +68,14 @@ exists.
 | Result wait timeout | `Job.waitForResult({ timeoutMs })` (**30_000**) | `Job.wait_for_result(timeout=30.0)` | (use `Producer::get_result` directly) | Caller-side polling timeout. |
 | Result wait poll interval | `Job.waitForResult({ intervalMs })` (**100**) | `Job.wait_for_result(poll_interval=0.1)` | n/a | Polling frequency. |
 
+## Pause / resume
+
+| Option | Node | Python | Rust | Controls |
+|---|---|---|---|---|
+| Process-local pause | `Worker.pause()` / `.resume()` / `.isPaused()` | `Worker.pause()` / `.resume()` / `.is_paused()` | `Consumer::pause_control()` → `PauseControl::{pause,resume,is_paused}` | In-memory stop-dispatch for one worker. Resume is instant (edge-triggered). Idempotent. Does not survive process restart. |
+| Durable cross-process pause | `Queue.pause()` / `.resume()` / `.isPaused()` | `Queue.pause()` / `.resume()` / `.is_paused()` | `Producer::{pause,resume,is_paused}` | Sets/clears `{chasqui:<queue>}:paused` (no TTL). Every consumer of the queue parks; survives consumer restarts until `resume`. Also via `chasqui pause <queue>` / `chasqui resume <queue>`. |
+| Cross-process pause poll (ms) | n/a | n/a | `ConsumerConfig::pause_poll_ms` (**250**) | How often a consumer re-checks the durable pause key, and the worst-case latency for a cross-process pause/resume to be observed. Not on the per-job hot path: when not paused the reader pays one atomic load + one time comparison per batch, no Redis round trip. |
+
 ## Scheduler
 
 | Option | Node | Python | Rust | Controls |

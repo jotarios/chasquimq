@@ -191,6 +191,23 @@ Best-effort cancel of a delayed job. Returns `1` if the entry was
 removed from the delayed ZSET, throws `NotSupportedError` otherwise
 (in-stream entries can't be removed by id alone).
 
+### `queue.pause()`, `queue.resume()`, `queue.isPaused()`
+
+```ts
+async pause(): Promise<void>
+async resume(): Promise<void>
+async isPaused(): Promise<boolean>
+```
+
+Durable, cross-process pause. `pause()` sets the
+`{chasqui:<queue>}:paused` key (no TTL); every consumer of the queue
+parks its reader at the next batch boundary while in-flight jobs
+drain and producers keep enqueueing. Survives consumer restarts until
+`resume()` clears the key. Idempotent. This is the queue-wide
+analogue of [`worker.pause()`](#workerpause-workerresume-workerispaused);
+the same key is toggled by `chasqui pause` / `chasqui resume`. See the
+[Pause and resume concept](/concepts/pause-and-resume/).
+
 ### `queue.close()`
 
 ```ts
@@ -228,7 +245,7 @@ get isClosed(): boolean
 These throw [`NotSupportedError`](/reference/error-codes/#cmq-100--node-feature-not-supported)
 in v1: `getJob`, `getJobs`, `getJobCounts`, `getWaitingCount`,
 `getActiveCount`, `getDelayedCount`, `getFailedCount`, `count`,
-`pause`, `resume`, `drain`, `obliterate`, `clean`. Some pure-stat
+`drain`, `obliterate`, `clean`. Some pure-stat
 methods return `0` or `'unknown'` instead. See the [options
 index](/reference/options/) and [Thinking in
 ChasquiMQ](/concepts/thinking-in-chasquimq/) for the engine semantics that
@@ -286,16 +303,32 @@ configured deadline, then resolves. Idempotent; calling `close()`
 more than once awaits the in-flight drain. The `force` parameter
 is currently a no-op — engine-side hard-cancel is reserved.
 
-### `worker.isClosed`, `worker.isRunning`, `worker.isPaused`
+### `worker.pause()`, `worker.resume()`, `worker.isPaused()`
+
+```ts
+async pause(doNotWaitActive?: boolean): Promise<void>
+resume(): void
+isPaused(): boolean
+```
+
+Process-local pause for this worker instance. `pause()` stops the
+reader at the next batch boundary; jobs already in a handler run to
+completion; producers keep enqueueing. `resume()` wakes the parked
+reader immediately (edge-triggered, no poll latency). In-memory only —
+does not write the cross-process flag and does not survive a process
+restart; for queue-wide durable pause use
+[`queue.pause()`](#queuepause-queueresume-queueispaused). Idempotent.
+`doNotWaitActive` is accepted for BullMQ call-shape parity but is a
+no-op (in-flight jobs always drain in the background).
+
+### `worker.isClosed`, `worker.isRunning`
 
 ```ts
 get isClosed(): boolean
 isRunning(): boolean
-isPaused(): boolean  // always false in v1
 ```
 
-State predicates. `pause()` and `resume()` throw `NotSupportedError`
-in v1 — close and re-create instead.
+State predicates.
 
 ### `worker.rateLimit(expireTimeMs)`
 

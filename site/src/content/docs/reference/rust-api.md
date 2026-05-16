@@ -85,6 +85,7 @@ pub struct ConsumerConfig {
     pub scheduler: SchedulerConfig,
     pub store_results: bool,
     pub result_ttl_secs: u64,
+    pub pause_poll_ms: u64,
     pub metrics: Arc<dyn MetricsSink>,
     pub connection: ConnectionTuning,
 }
@@ -117,6 +118,7 @@ pub struct ConsumerConfig {
 - `scheduler` — embedded scheduler config when `run_scheduler == true`. The `queue_name` field is overridden at spawn time. **Default `SchedulerConfig::default()`.**
 - `store_results` — opt-in result backend. **Default `false`.**
 - `result_ttl_secs` — TTL for stored results when `store_results == true`. **Default `3600` (1h).**
+- `pause_poll_ms` — how often a consumer re-checks the durable cross-process pause key (`{chasqui:<queue>}:paused`), and the worst-case latency for a cross-process pause/resume to be observed. Not on the per-job hot path: when not paused the reader pays one atomic load + one time comparison per batch, no Redis round trip. **Default `250`.**
 - `metrics` — `Arc<dyn MetricsSink>` for the embedded promoter / scheduler / hot-path subsystems. **Default `crate::metrics::noop_sink()`.**
 - `connection` — TCP keepalive, reconnect policy, and credential-rotation hook. The embedded promoter and scheduler inherit this through their parent `ConsumerConfig`. See [`ConnectionTuning`](#connectiontuning).
 
@@ -414,6 +416,23 @@ expired, or no result was written. The shims call this from
 `Queue.getJobResult` / `Queue.get_job_result` and from
 `Job.waitForResult` / `Job.wait_for_result`.
 
+### `Producer::pause` / `resume` / `is_paused`
+
+```rust
+pub async fn pause(&self) -> Result<()>;
+pub async fn resume(&self) -> Result<()>;
+pub async fn is_paused(&self) -> Result<bool>;
+```
+
+Durable, cross-process pause. `pause` `SET`s `{chasqui:<queue>}:paused`
+(no TTL); `resume` `DEL`s it. Every consumer of the queue parks its
+reader at the next batch boundary while paused — in-flight jobs drain,
+producers keep enqueueing. Survives consumer restarts. Idempotent.
+This is the engine surface behind `Queue.pause()` and
+`chasqui pause <queue>`. For process-local pause of a single consumer
+without touching Redis, use [`Consumer::pause_control`](#consumer).
+See the [Pause and resume concept](/concepts/pause-and-resume/).
+
 ### `Producer::shutdown`
 
 ```rust
@@ -448,10 +467,25 @@ pub struct Consumer<T>;
 
 impl<T: Serialize + DeserializeOwned + Clone + Send + 'static> Consumer<T> {
     pub fn new(redis_url: impl Into<String>, cfg: ConsumerConfig) -> Self;
+    pub fn with_pause_control(
+        redis_url: impl Into<String>,
+        cfg: ConsumerConfig,
+        pause: Arc<PauseControl>,
+    ) -> Self;
+    pub fn pause_control(&self) -> Arc<PauseControl>;
     pub async fn run<H, Fut>(self, handler: H, shutdown: CancellationToken) -> Result<()>
     where
         H: Fn(Job<T>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = std::result::Result<Bytes, HandlerError>> + Send + 'static;
+}
+
+pub struct PauseControl;
+
+impl PauseControl {
+    pub fn new() -> Self;
+    pub fn pause(&self);
+    pub fn resume(&self);
+    pub fn is_paused(&self) -> bool;
 }
 ```
 
@@ -470,6 +504,20 @@ gated on the same `XACKDEL` round trip.
 `shutdown` is a `tokio_util::sync::CancellationToken`; firing it
 trips the engine's drain path. `run` resolves once the engine
 finishes draining (up to `cfg.shutdown_deadline_secs`).
+
+`pause_control()` returns a shared `Arc<PauseControl>` (same sharing
+model as the shutdown token — clone it before `run()` or hand it to
+another task). `PauseControl::pause()` parks the reader at its next
+batch boundary; in-flight handlers run to completion, producers and
+the embedded promoter/scheduler are unaffected. `resume()` wakes the
+parked reader immediately (edge-triggered, backed by a `tokio::sync::
+watch` channel). `pause()`/`resume()` are idempotent. This is
+process-local and never touches Redis — distinct from the durable
+`{chasqui:<queue>}:paused` key (`Producer::pause`), which the reader
+*also* honours independently. `with_pause_control` lets a caller own
+the `Arc` (the FFI bindings construct it at their wrapper's `new()`
+so `pause()` is callable before `run()`); `new` creates one
+internally. See the [Pause and resume concept](/concepts/pause-and-resume/).
 
 ## Promoter
 
