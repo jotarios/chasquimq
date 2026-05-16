@@ -1,9 +1,18 @@
 name: Docs Deploy
 
 # Builds the Astro Starlight site under /site and deploys it to Cloudflare
-# Pages on push to main. PRs touching the site get a build-only smoke test
-# (no secrets, no deploy) so contributors and forks can verify the site
-# compiles without needing access to the CF account.
+# Pages.
+#
+# The live deploy fires only on a release version tag — the same
+# '**[0-9]+.[0-9]+.[0-9]+*' signal crates-publish.yml and release.yml key
+# on — so chasquimq.io republishes in lockstep with the npm / PyPI / crates
+# packages. This prevents the live site advertising a shim option that the
+# currently-published package does not have yet (the doc source on main can
+# be accurate-as-of-main; publication is release-gated).
+#
+# PRs and pushes to main run the build-only smoke test (no secrets, no
+# deploy) so contributors and forks can verify the site still compiles
+# without needing access to the CF account.
 #
 # Per-PR live previews (wrangler pages deploy --branch=PR-N) are deferred
 # to v1.1 — see site/DEPLOYMENT.md.
@@ -14,6 +23,8 @@ on:
     paths:
       - 'site/**'
       - '.github/workflows/docs-deploy.yml'
+    tags:
+      - '**[0-9]+.[0-9]+.[0-9]+*'
   pull_request:
     paths:
       - 'site/**'
@@ -62,12 +73,14 @@ jobs:
     name: Deploy to Cloudflare Pages
     needs: build
     runs-on: ubuntu-latest
-    # Only deploy from the canonical repo's main branch on push (or manual
-    # dispatch from main). PRs and forks get the build-only smoke above.
+    # Only deploy from the canonical repo on a release version tag push (the
+    # release signal the publish workflows share) or a manual dispatch. PRs,
+    # forks, and ordinary pushes to main get the build-only smoke above so
+    # the live site never runs ahead of the published package.
     if: |
       github.repository == 'jotarios/chasquimq' &&
-      github.ref == 'refs/heads/main' &&
-      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) ||
+       github.event_name == 'workflow_dispatch')
     steps:
       - uses: actions/checkout@v6
 
