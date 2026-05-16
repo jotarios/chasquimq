@@ -130,8 +130,31 @@ async with Queue(
 Notes:
 
 - **Construction is deferred when a `credential_provider` is supplied.** The callback dispatches back to the asyncio loop that constructed the `Queue` / `Worker`, so the engine waits until the first awaited method (`queue.add`, `worker.run`, ...) to open the pool — that's the moment a running loop is guaranteed.
-- **Auth errors trigger reconnect.** The engine's default `reconnect_on_auth_error = true` means a token-fetch failure is retried on the next AUTH, with exponential backoff. Raise from your callback (or return stale credentials) and the next reconnect picks up a fresh token. A permanently broken provider will retry-loop inside fred until [`reconnect_max_attempts` is exposed to the Python shim](#todos--known-limitations).
+- **Auth errors trigger reconnect.** The engine's default `reconnect_on_auth_error = true` means a token-fetch failure is retried on the next AUTH, with exponential backoff. Raise from your callback (or return stale credentials) and the next reconnect picks up a fresh token. By default a permanently broken provider retry-loops inside fred forever; bound it with [`reconnect_max_attempts`](#bounding-reconnect-attempts) so it gives up after N attempts instead.
 - **Same callback for both `Queue` and `Worker`.** Pass the same async function to each — the native producer and consumer each capture their own asyncio-loop reference internally.
+
+### Bounding reconnect attempts
+
+By default the engine reconnects forever (`reconnect_max_attempts=0`). That's the right behaviour for a transient network blip, but a permanently rejecting `credential_provider` — a revoked IAM user, an expired role — will loop on reconnect indefinitely instead of surfacing the failure. Cap it with the `reconnect_max_attempts` keyword:
+
+```python
+async with Queue(
+    "emails",
+    redis_url="rediss://my-cluster.cache.amazonaws.com:6379",
+    credential_provider=elasticache_credentials,
+    # Give up after 10 failed reconnects instead of looping forever.
+    reconnect_max_attempts=10,
+) as queue, Worker(
+    "emails",
+    send_email,
+    redis_url="rediss://my-cluster.cache.amazonaws.com:6379",
+    credential_provider=elasticache_credentials,
+    reconnect_max_attempts=10,
+) as worker:
+    ...
+```
+
+Available on both `Queue` (producer pool) and `Worker` (consumer). `0` or `None` (the default) keeps the unbounded behaviour. Pair a positive cap with alerting on reconnect churn so a bounded failure is loud, not silent.
 
 ## Power-user surface
 
@@ -153,10 +176,6 @@ maturin develop          # editable install
 pytest tests/            # smoke + integration tests (requires Redis 8.6+)
 maturin build --release  # wheels under target/wheels/
 ```
-
-## TODOs / known limitations
-
-- **`reconnect_max_attempts` is not yet exposed to the Python shim.** A permanently-misconfigured `credential_provider` will retry-loop inside fred indefinitely. The engine's `ConnectionTuning::reconnect_max_attempts` field needs a sibling keyword on `Queue` / `Worker` (Python) to cap retries — tracked for a follow-up slice.
 
 ## See also
 

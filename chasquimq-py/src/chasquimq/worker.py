@@ -64,6 +64,7 @@ class Worker:
         scheduler_tick_ms: Optional[int] = None,
         store_results: bool = False,
         result_ttl_ms: Optional[int] = None,
+        reconnect_max_attempts: Optional[int] = None,
         credential_provider: Optional[CredentialProvider] = None,
     ) -> None:
         self._queue_name = queue_name
@@ -96,6 +97,11 @@ class Worker:
             consumer_kwargs["dlq_max_stream_len"] = dlq_max_stream_len
         if scheduler_tick_ms is not None:
             consumer_kwargs["scheduler_tick_ms"] = scheduler_tick_ms
+        # ``0`` (the engine default) = retry forever. A positive value
+        # bounds fred's reconnect loop so a permanently rejecting
+        # ``credential_provider`` gives up instead of looping forever.
+        if reconnect_max_attempts is not None:
+            consumer_kwargs["reconnect_max_attempts"] = reconnect_max_attempts
 
         if credential_provider is not None:
             # The native consumer captures the running asyncio loop at

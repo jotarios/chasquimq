@@ -56,6 +56,7 @@ impl Consumer {
         scheduler_tick_ms = None,
         store_results = false,
         result_ttl_ms = None,
+        reconnect_max_attempts = None,
         credential_provider = None,
     ))]
     #[allow(clippy::too_many_arguments)]
@@ -78,6 +79,7 @@ impl Consumer {
         scheduler_tick_ms: Option<i64>,
         store_results: bool,
         result_ttl_ms: Option<i64>,
+        reconnect_max_attempts: Option<u32>,
         credential_provider: Option<Py<PyAny>>,
     ) -> PyResult<Self> {
         let mut cfg = ConsumerConfig {
@@ -139,6 +141,12 @@ impl Consumer {
                 )));
             }
             cfg.dlq_max_stream_len = v as u64;
+        }
+        // `0` (engine default) = retry forever. Set on `cfg.connection`
+        // alongside the provider so it propagates to every sub-task
+        // that clones it (see `Consumer::spawn_*`).
+        if let Some(n) = reconnect_max_attempts {
+            cfg.connection.reconnect_max_attempts = n;
         }
         // The engine's embedded promoter and scheduler clone
         // `cfg.connection` when spawned (see `Consumer::spawn_*`), so

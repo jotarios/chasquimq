@@ -90,8 +90,10 @@ impl Producer {
         pool_size = None,
         max_stream_len = None,
         max_delay_secs = None,
+        reconnect_max_attempts = None,
         credential_provider = None,
     ))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
         redis_url: String,
@@ -99,6 +101,7 @@ impl Producer {
         pool_size: Option<u64>,
         max_stream_len: Option<u64>,
         max_delay_secs: Option<u64>,
+        reconnect_max_attempts: Option<u32>,
         credential_provider: Option<Py<PyAny>>,
     ) -> PyResult<Self> {
         let mut cfg = ProducerConfig {
@@ -113,6 +116,11 @@ impl Producer {
         }
         if let Some(d) = max_delay_secs {
             cfg.max_delay_secs = d;
+        }
+        // Set before the deferred-vs-eager branch so it lands on both
+        // construction paths. `0` (engine default) = retry forever.
+        if let Some(n) = reconnect_max_attempts {
+            cfg.connection.reconnect_max_attempts = n;
         }
         if let Some(cb) = credential_provider {
             // Deferred construction. Capture TaskLocals NOW (we are

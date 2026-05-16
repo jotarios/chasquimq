@@ -135,7 +135,7 @@ On Python the `Producer` connects lazily on the first awaited method (a deferred
 </TabItem>
 </Tabs>
 
-**Caveat:** `reconnect_max_attempts` is not yet exposed to either shim, so a credential callback that always rejects (expired IAM role, revoked user) loops forever on reconnect rather than failing fast. Make the token mint inside the callback resilient, and alert on sustained reconnect churn.
+**Bounding a broken provider:** by default a credential callback that always rejects (expired IAM role, revoked user) loops forever on reconnect rather than failing fast. Cap it: pass `connection.reconnectMaxAttempts` (Node) or `reconnect_max_attempts=` (Python) — a positive value makes fred give up after N attempts and surface the failure instead of churning silently. `0` (the default) keeps the unbounded behaviour. Still make the token mint inside the callback resilient, and alert on sustained reconnect churn.
 
 For Rust producers on Lambda (the rare case): plug an `Arc<dyn fred::types::config::CredentialProvider>` into `ProducerConfig::connection.credential_provider` directly. See the [Rust API reference](/reference/rust-api/#connectiontuning) for the trait shape, the [connection options reference](/reference/options/#connection) for the per-language surface, and [engine internals](https://github.com/jotarios/chasquimq/blob/main/docs/engine.md) for the rotation semantics.
 

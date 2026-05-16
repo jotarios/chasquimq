@@ -68,6 +68,16 @@ export interface ConnectionOptions {
    * See {@link CredentialProvider} for the callback shape.
    */
   credentialProvider?: CredentialProvider
+  /**
+   * Cap on the engine's exponential reconnect attempts. `0` (the
+   * default) means retry forever. Set a positive value so a
+   * permanently rejecting {@link credentialProvider} (revoked IAM
+   * user, expired role) eventually gives up instead of looping on
+   * reconnect indefinitely. Pair it with monitoring on reconnect
+   * churn — a low cap turns a silent infinite retry into a loud,
+   * surfaced failure.
+   */
+  reconnectMaxAttempts?: number
   // Other connection-shaped fields are accepted and silently ignored;
   // chasquimq's native producer manages its own pool.
   [key: string]: unknown

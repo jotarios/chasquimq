@@ -59,6 +59,11 @@ pub struct ConsumerOpts {
     /// Result-key TTL in milliseconds when `storeResults = true`.
     /// Default 3,600,000 (1h). Internally rounded to whole seconds.
     pub result_ttl_ms: Option<i64>,
+    /// Cap on fred's exponential reconnect attempts. `0` (the engine
+    /// default) = retry forever. Set a positive value so a permanently
+    /// rejecting `credentialProvider` gives up instead of looping
+    /// forever on reconnect. Maps to `ConnectionTuning::reconnect_max_attempts`.
+    pub reconnect_max_attempts: Option<u32>,
 }
 
 #[napi(object)]
@@ -316,6 +321,9 @@ fn build_consumer_config(opts: Option<ConsumerOpts>) -> napi::Result<ConsumerCon
                 }
             }
             cfg.retry = rc;
+        }
+        if let Some(n) = o.reconnect_max_attempts {
+            cfg.connection.reconnect_max_attempts = n;
         }
     }
     Ok(cfg)
