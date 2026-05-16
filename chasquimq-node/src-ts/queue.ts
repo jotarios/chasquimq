@@ -427,14 +427,30 @@ export class Queue<
     throw new NotSupportedError("not implemented");
   }
 
+  /**
+   * Durably pause every consumer of this queue. Sets a cross-process
+   * Redis flag (`{chasqui:<queue>}:paused`); each worker stops dispatching
+   * new jobs at its next batch boundary while in-flight jobs drain and
+   * producers keep enqueueing. The pause survives worker restarts until
+   * {@link Queue.resume}. Idempotent. This is the queue-wide analogue of
+   * BullMQ's `Queue.pause()`; for a single in-process worker use
+   * {@link Worker.pause} instead.
+   */
   async pause(): Promise<void> {
-    throw new NotSupportedError("Queue.pause not implemented in v1");
+    const producer = await this.producer();
+    await producer.pause();
   }
+
+  /** Lift a durable pause set by {@link Queue.pause}. Idempotent. */
   async resume(): Promise<void> {
-    throw new NotSupportedError("Queue.resume not implemented in v1");
+    const producer = await this.producer();
+    await producer.resume();
   }
+
+  /** Whether this queue is durably paused via the cross-process flag. */
   async isPaused(): Promise<boolean> {
-    return false;
+    const producer = await this.producer();
+    return producer.isPaused();
   }
 
   async remove(jobId: string): Promise<number> {

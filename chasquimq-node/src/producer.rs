@@ -335,6 +335,26 @@ impl Producer {
             .map_err(map_engine_err)
     }
 
+    /// Durably pause every consumer of this queue (cross-process). Sets
+    /// the `{chasqui:<queue>}:paused` key; survives consumer restarts
+    /// until `resume()`. Idempotent.
+    #[napi]
+    pub async fn pause(&self) -> napi::Result<()> {
+        self.inner.pause().await.map_err(map_engine_err)
+    }
+
+    /// Lift a durable pause set by `pause()`. Idempotent.
+    #[napi]
+    pub async fn resume(&self) -> napi::Result<()> {
+        self.inner.resume().await.map_err(map_engine_err)
+    }
+
+    /// Whether this queue is durably paused via the cross-process key.
+    #[napi]
+    pub async fn is_paused(&self) -> napi::Result<bool> {
+        self.inner.is_paused().await.map_err(map_engine_err)
+    }
+
     #[napi]
     pub async fn cancel_delayed(&self, id: String) -> napi::Result<bool> {
         self.inner.cancel_delayed(&id).await.map_err(map_engine_err)

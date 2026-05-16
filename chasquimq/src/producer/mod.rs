@@ -25,8 +25,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub use crate::redis::keys::{
-    dedup_marker_key, delayed_index_key, delayed_key, dlq_key, events_key, promoter_lock_key,
-    repeat_key, repeat_spec_key, result_key, scheduler_lock_key, stream_key,
+    dedup_marker_key, delayed_index_key, delayed_key, dlq_key, events_key, paused_key,
+    promoter_lock_key, repeat_key, repeat_spec_key, result_key, scheduler_lock_key, stream_key,
 };
 
 #[derive(Debug, Clone)]
@@ -347,6 +347,53 @@ impl<T> Producer<T> {
         }
         let values: Vec<Value> = pipeline.all().await.map_err(Error::Redis)?;
         Ok(values.iter().map(value_as_bytes).collect())
+    }
+
+    /// Durably pause every consumer of this queue (the cross-process
+    /// `Queue.pause()` / `chasqui pause` path). Sets the
+    /// `{chasqui:<queue>}:paused` key with no TTL: each consumer's reader
+    /// observes it at its next batch boundary and parks until
+    /// [`Producer::resume`] removes the key. In-flight jobs drain;
+    /// producers (including this one) keep enqueueing. The pause survives
+    /// consumer restarts — a fresh consumer parks before its first read.
+    /// Idempotent (`SET` over an existing key is a no-op).
+    pub async fn pause(&self) -> Result<()> {
+        let key = paused_key(self.queue_name.as_ref());
+        let client = self.pool.next_connected();
+        let cmd = CustomCommand::new_static("SET", ClusterHash::FirstKey, false);
+        let _: Value = client
+            .custom(cmd, vec![Value::from(key), Value::from("1")])
+            .await
+            .map_err(Error::Redis)?;
+        Ok(())
+    }
+
+    /// Lift a durable pause set by [`Producer::pause`]. Deletes the
+    /// `{chasqui:<queue>}:paused` key; each consumer resumes within its
+    /// `pause_poll_ms` window. Idempotent (`DEL` of an absent key is a
+    /// no-op).
+    pub async fn resume(&self) -> Result<()> {
+        let key = paused_key(self.queue_name.as_ref());
+        let client = self.pool.next_connected();
+        let cmd = CustomCommand::new_static("DEL", ClusterHash::FirstKey, false);
+        let _: Value = client
+            .custom(cmd, vec![Value::from(key)])
+            .await
+            .map_err(Error::Redis)?;
+        Ok(())
+    }
+
+    /// Whether this queue is durably paused via the cross-process key.
+    /// Does not reflect any per-process `Worker.pause()` in-memory state.
+    pub async fn is_paused(&self) -> Result<bool> {
+        let key = paused_key(self.queue_name.as_ref());
+        let client = self.pool.next_connected();
+        let cmd = CustomCommand::new_static("EXISTS", ClusterHash::FirstKey, false);
+        let v: Value = client
+            .custom(cmd, vec![Value::from(key)])
+            .await
+            .map_err(Error::Redis)?;
+        Ok(matches!(v, Value::Integer(n) if n > 0))
     }
 
     /// Remove a repeatable spec by key. Returns `true` if a spec was

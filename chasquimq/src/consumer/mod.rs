@@ -48,13 +48,29 @@ where
     T: Serialize + DeserializeOwned + Clone + Send + 'static,
 {
     pub fn new(redis_url: impl Into<String>, cfg: ConsumerConfig) -> Self {
+        Self::with_pause_control(redis_url, cfg, Arc::new(PauseControl::new()))
+    }
+
+    /// Like [`Consumer::new`] but with a caller-owned [`PauseControl`].
+    ///
+    /// The FFI bindings construct the `Arc<PauseControl>` at the wrapper's
+    /// own `new()` (so `pause()` / `resume()` are callable before `run()`
+    /// is awaited) and hand the same `Arc` to the engine here — exactly
+    /// the pattern `run()` already uses for the external shutdown
+    /// `CancellationToken`. Pure-Rust callers use [`Consumer::new`] +
+    /// [`Consumer::pause_control`] instead.
+    pub fn with_pause_control(
+        redis_url: impl Into<String>,
+        cfg: ConsumerConfig,
+        pause: Arc<PauseControl>,
+    ) -> Self {
         Self {
             redis_url: redis_url.into(),
             stream_key: stream_key(&cfg.queue_name),
             delayed_key: delayed_key(&cfg.queue_name),
             dlq_key: dlq_key(&cfg.queue_name),
             paused_key: paused_key(&cfg.queue_name),
-            pause: Arc::new(PauseControl::new()),
+            pause,
             cfg,
             _marker: PhantomData,
         }

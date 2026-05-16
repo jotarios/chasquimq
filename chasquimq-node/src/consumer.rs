@@ -17,7 +17,7 @@ use crate::producer::map_engine_err;
 use bytes::Bytes;
 use chasquimq::config::{ConsumerConfig, RetryConfig};
 use chasquimq::consumer::Consumer as EngineConsumer;
-use chasquimq::{HandlerError, Job as EngineJob};
+use chasquimq::{HandlerError, Job as EngineJob, PauseControl};
 use napi::bindgen_prelude::*;
 use napi::sys;
 use napi::threadsafe_function::{ErrorStrategy, ThreadsafeFunction};
@@ -87,6 +87,10 @@ pub struct Consumer {
     redis_url: String,
     cfg: ConsumerConfig,
     shutdown: Arc<CancellationToken>,
+    // Constructed here (not in `run`) so `pause()` / `resume()` are
+    // callable on the JS handle before the run future is awaited and from
+    // any thread, mirroring the `shutdown` token's sharing model.
+    pause: Arc<PauseControl>,
 }
 
 #[napi]
@@ -115,6 +119,7 @@ impl Consumer {
             redis_url,
             cfg,
             shutdown: Arc::new(CancellationToken::new()),
+            pause: Arc::new(PauseControl::new()),
         })
     }
 
@@ -155,7 +160,11 @@ impl Consumer {
         // binding is designed around.
         handler: ThreadsafeFunction<Job, ErrorStrategy::Fatal>,
     ) -> napi::Result<()> {
-        let consumer = EngineConsumer::<RawBytes>::new(self.redis_url.clone(), self.cfg.clone());
+        let consumer = EngineConsumer::<RawBytes>::with_pause_control(
+            self.redis_url.clone(),
+            self.cfg.clone(),
+            self.pause.clone(),
+        );
         let shutdown = (*self.shutdown).clone();
         let tsfn = Arc::new(handler);
 
@@ -223,6 +232,32 @@ impl Consumer {
     pub fn shutdown(&self) -> napi::Result<()> {
         self.shutdown.cancel();
         Ok(())
+    }
+
+    /// Pause this consumer's reader at the next batch boundary. In-flight
+    /// jobs already handed to handlers run to completion; no new jobs are
+    /// dispatched until `resume()`. Process-local (the `Worker.pause()`
+    /// path) — does not write the cross-process Redis pause key.
+    /// Idempotent; safe from any thread.
+    #[napi]
+    pub fn pause(&self) -> napi::Result<()> {
+        self.pause.pause();
+        Ok(())
+    }
+
+    /// Resume a paused reader. The parked reader wakes immediately (no
+    /// poll-interval latency for the in-process path). Idempotent.
+    #[napi]
+    pub fn resume(&self) -> napi::Result<()> {
+        self.pause.resume();
+        Ok(())
+    }
+
+    /// Current in-process pause state. Does not reflect a cross-process
+    /// pause set via `chasqui pause` / `Queue.pause()`.
+    #[napi]
+    pub fn is_paused(&self) -> napi::Result<bool> {
+        Ok(self.pause.is_paused())
     }
 }
 
