@@ -89,12 +89,17 @@ class Queue:
         tls: bool = False,
         max_stream_len: Optional[int] = None,
         max_delay_secs: Optional[int] = None,
+        reconnect_max_attempts: Optional[int] = None,
         credential_provider: Optional[CredentialProvider] = None,
     ) -> None:
         self._name = name
         self._redis_url = apply_tls(redis_url, tls)
         self._max_stream_len = max_stream_len
         self._max_delay_secs = max_delay_secs
+        # ``0`` (the engine default) = retry forever. Set a positive
+        # value so a permanently rejecting ``credential_provider``
+        # gives up instead of looping on reconnect indefinitely.
+        self._reconnect_max_attempts = reconnect_max_attempts
         # The native producer captures the running asyncio loop at
         # construction time (needed because fred dispatches the AUTH
         # callback from its router thread, which has no loop of its
@@ -120,6 +125,8 @@ class Queue:
                 kwargs["max_stream_len"] = self._max_stream_len
             if self._max_delay_secs is not None:
                 kwargs["max_delay_secs"] = self._max_delay_secs
+            if self._reconnect_max_attempts is not None:
+                kwargs["reconnect_max_attempts"] = self._reconnect_max_attempts
             if self._credential_provider is not None:
                 kwargs["credential_provider"] = self._credential_provider
             self._producer = _native.Producer(
