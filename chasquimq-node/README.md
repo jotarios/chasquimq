@@ -116,7 +116,22 @@ const conn = {
 }
 ```
 
-A thrown error or rejected Promise from the callback maps to a fred auth error. On the **initial connect** (the first `Queue.add` / `Worker.run`), an auth failure surfaces as a hard rejection on the caller — useful for fail-loud startup of a misconfigured deployment. After the pool is up, the default `reconnect_on_auth_error` policy treats subsequent auth failures as transient and retries on the next reconnect attempt, so a brief blip in your secrets backend doesn't take the worker down. Permanently broken providers post-startup will retry-loop inside fred until [`reconnect_max_attempts` is exposed to the Node shim](#todos--known-limitations).
+A thrown error or rejected Promise from the callback maps to a fred auth error. On the **initial connect** (the first `Queue.add` / `Worker.run`), an auth failure surfaces as a hard rejection on the caller — useful for fail-loud startup of a misconfigured deployment. After the pool is up, the default `reconnect_on_auth_error` policy treats subsequent auth failures as transient and retries on the next reconnect attempt, so a brief blip in your secrets backend doesn't take the worker down. By default a permanently broken provider post-startup retry-loops inside fred forever; bound it with [`reconnectMaxAttempts`](#bounding-reconnect-attempts) so it gives up after N attempts instead.
+
+### Bounding reconnect attempts
+
+By default the engine reconnects forever (`reconnectMaxAttempts: 0`). That's the right behaviour for a transient network blip, but a permanently rejecting `credentialProvider` — a revoked IAM user, an expired role — will loop on reconnect indefinitely instead of surfacing the failure. Cap it with `connection.reconnectMaxAttempts`:
+
+```ts
+const conn = {
+  url: "rediss://my-cluster.cache.amazonaws.com:6379",
+  credentialProvider: fetchIamToken,
+  // Give up after 10 failed reconnects instead of looping forever.
+  reconnectMaxAttempts: 10,
+}
+```
+
+Applies to both `Queue` (producer pool) and `Worker` (consumer). `0` (the default) keeps the unbounded behaviour. Pair a positive cap with alerting on reconnect churn so a bounded failure is loud, not silent.
 
 ## Power-user surface
 
@@ -127,10 +142,6 @@ import { Producer, Consumer, Scheduler } from "chasquimq"
 ```
 
 There is one user-facing `Job` — the high-level class returned by `Queue.add` and passed to your `Worker` processor. The native binding's `Job` value-type is internal-only and not re-exported (mirrors the Python shim).
-
-## TODOs / known limitations
-
-- **`reconnect_max_attempts` is not yet exposed to the Node shim.** A permanently-misconfigured `credentialProvider` will retry-loop inside fred indefinitely. The engine's `ConnectionTuning::reconnect_max_attempts` field needs a sibling option on `ConnectionOptions` (Node) to cap retries — tracked for a follow-up slice.
 
 ## See also
 
