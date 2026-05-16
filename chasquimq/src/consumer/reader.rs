@@ -179,11 +179,14 @@ struct PauseGate {
     pause_rx: watch::Receiver<bool>,
     paused_key: Arc<str>,
     poll: Duration,
-    /// Last time the cross-process Redis key was queried. Seeded one full
-    /// poll interval in the past so the first batch boundary always does a
-    /// real check (a consumer started against an already-paused queue
-    /// parks before its first XREADGROUP).
-    last_redis_check: Instant,
+    /// Last time the cross-process Redis key was queried. `None` means
+    /// "never probed" — the first batch boundary always does a real
+    /// `EXISTS` so a consumer started against an already-paused queue
+    /// parks before its first XREADGROUP, with no dependence on how far
+    /// `Instant::now()` is from the process's monotonic-clock epoch
+    /// (a `now - poll` seed is unreliable in the first few hundred ms
+    /// after boot on platforms where the epoch is near zero).
+    last_redis_check: Option<Instant>,
     /// Cached result of the last `EXISTS`. Retained verbatim on a Redis
     /// error so a transient connection blip neither crashes the reader nor
     /// spuriously unpauses it.
@@ -196,9 +199,7 @@ impl PauseGate {
             pause_rx,
             paused_key,
             poll,
-            last_redis_check: Instant::now()
-                .checked_sub(poll)
-                .unwrap_or_else(Instant::now),
+            last_redis_check: None,
             redis_paused: false,
         }
     }
@@ -209,10 +210,12 @@ impl PauseGate {
     /// value is retained (debug-logged, never flipped) — the in-process
     /// switch is unaffected because it never touches Redis.
     async fn refresh_redis(&mut self, reader: &Client) -> bool {
-        if self.last_redis_check.elapsed() < self.poll {
+        if let Some(last) = self.last_redis_check
+            && last.elapsed() < self.poll
+        {
             return self.redis_paused;
         }
-        self.last_redis_check = Instant::now();
+        self.last_redis_check = Some(Instant::now());
         match reader.exists::<bool, _>(&*self.paused_key).await {
             Ok(exists) => {
                 self.redis_paused = exists;
@@ -255,9 +258,7 @@ impl PauseGate {
                     // Force a fresh probe on the next refresh_redis call
                     // so a cross-process resume (key DEL) is observed
                     // within `poll` even while parked.
-                    self.last_redis_check = Instant::now()
-                        .checked_sub(self.poll)
-                        .unwrap_or_else(Instant::now);
+                    self.last_redis_check = None;
                 }
             }
         }
