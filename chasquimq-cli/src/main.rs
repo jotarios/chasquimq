@@ -1,6 +1,7 @@
 mod dlq;
 mod events;
 mod inspect;
+mod pause;
 mod repeatable;
 mod watch;
 
@@ -72,6 +73,20 @@ enum Command {
         #[arg(long, default_value = "$")]
         from: String,
     },
+    /// Durably pause every consumer of a queue. Sets a cross-process
+    /// flag; consumers stop dispatching new jobs at their next batch
+    /// boundary while in-flight jobs drain and producers keep enqueueing.
+    /// Persists across consumer restarts until `resume`.
+    Pause {
+        /// Queue name (without the `{chasqui:...}` hash-tag wrapping).
+        queue: String,
+    },
+    /// Resume a queue paused with `pause`. Removes the cross-process
+    /// flag; each consumer resumes within its pause-poll window.
+    Resume {
+        /// Queue name (without the `{chasqui:...}` hash-tag wrapping).
+        queue: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -130,5 +145,7 @@ async fn main() -> anyhow::Result<()> {
             group,
         } => watch::run(redis_url, &queue, &group, interval_ms).await,
         Command::Events { queue, from } => events::run(redis_url, &queue, &from).await,
+        Command::Pause { queue } => pause::pause(redis_url, &queue).await,
+        Command::Resume { queue } => pause::resume(redis_url, &queue).await,
     }
 }
