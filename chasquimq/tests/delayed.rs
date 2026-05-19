@@ -798,3 +798,115 @@ async fn promoter_does_not_release_lock_owned_by_other() {
 
     let _: () = admin.quit().await.unwrap();
 }
+
+/// Regression: a malformed delayed-ZSET member must not permanently wedge
+/// promotion. Pre-fix, the promote Lua did `string.byte(member, 1, 4)` with
+/// no bounds check; a member shorter than the 4-byte length prefix made
+/// `string.byte` return nil, the `name_len` arithmetic erred on nil, and the
+/// whole EVAL aborted *before* the per-member `ZREM` — so the poison member
+/// was never removed and every subsequent promote tick re-read it and
+/// re-errored. Delayed-job promotion for the queue was stuck forever, and
+/// valid jobs scored at/after the poison never moved.
+///
+/// This test ZADDs two poison members (a 2-byte runt and one whose declared
+/// name_len overruns the buffer) alongside a real delayed job, runs the
+/// promoter, and asserts: the valid job is promoted and consumed, both poison
+/// members are cleansed from the ZSET, and the ZSET drains to empty (proving
+/// repeated ticks keep working, i.e. no permanent wedge).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires REDIS_URL"]
+async fn poison_member_does_not_wedge_promotion() {
+    let admin = admin().await;
+    let queue = "delayed_e18_poison";
+    flush_all(&admin, queue).await;
+
+    let dkey = delayed_key(queue);
+    let past_score: i64 = 1; // epoch-ish, always due
+
+    // Poison #1: 2 bytes — shorter than the 4-byte u32_le name-length prefix.
+    let _: Value = admin
+        .custom(
+            CustomCommand::new_static("ZADD", ClusterHash::FirstKey, false),
+            vec![
+                Value::from(dkey.as_str()),
+                Value::from(past_score),
+                Value::Bytes(vec![0xDE, 0xAD].into()),
+            ],
+        )
+        .await
+        .expect("ZADD poison runt");
+
+    // Poison #2: valid-looking 4-byte prefix declaring name_len = 9999, but
+    // the member only has 2 trailing bytes — name_len overruns the buffer.
+    let _: Value = admin
+        .custom(
+            CustomCommand::new_static("ZADD", ClusterHash::FirstKey, false),
+            vec![
+                Value::from(dkey.as_str()),
+                Value::from(past_score),
+                Value::Bytes(vec![0x0F, 0x27, 0x00, 0x00, 0x41, 0x42].into()),
+            ],
+        )
+        .await
+        .expect("ZADD poison oversized name_len");
+
+    assert_eq!(
+        zcard(&admin, &dkey).await,
+        2,
+        "two poison members planted into the delayed ZSET"
+    );
+
+    // A real delayed job alongside the poison, via the normal producer path.
+    let producer: Producer<Sample> = Producer::connect(&redis_url(), producer_cfg(queue))
+        .await
+        .expect("connect producer");
+
+    let counter = Arc::new(AtomicUsize::new(0));
+    let shutdown_consumer = CancellationToken::new();
+    let h_consumer = spawn_consumer(
+        queue,
+        "c1",
+        false,
+        counter.clone(),
+        shutdown_consumer.clone(),
+    );
+
+    let shutdown_promoter = CancellationToken::new();
+    let promoter = Promoter::new(redis_url(), promoter_cfg(queue, "p1"));
+    let h_promoter = tokio::spawn(promoter.run(shutdown_promoter.clone()));
+
+    producer
+        .add_in(Duration::from_millis(50), Sample { n: 7 })
+        .await
+        .expect("add_in");
+
+    // The valid job must still flow through despite the poison members.
+    wait_until(Duration::from_secs(5), || {
+        let counter = counter.clone();
+        async move { counter.load(Ordering::SeqCst) == 1 }
+    })
+    .await;
+
+    // The poison members must be cleansed (ZREM'd) by the promoter, not
+    // wedge it. The ZSET drains fully — proving repeated ticks keep working.
+    let dkey2 = dkey.clone();
+    wait_until(Duration::from_secs(5), || {
+        let admin = admin.clone();
+        let dkey2 = dkey2.clone();
+        async move { zcard(&admin, &dkey2).await == 0 }
+    })
+    .await;
+
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        1,
+        "exactly the one valid job should have been consumed (poison members \
+         are dropped, not dispatched)"
+    );
+
+    shutdown_promoter.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), h_promoter).await;
+    shutdown_consumer.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), h_consumer).await;
+    let _: () = admin.quit().await.unwrap();
+}

@@ -28,25 +28,51 @@ use fred::types::Value;
 /// prefix in Lua and re-emits the name as the stream entry's `n` field
 /// when non-empty (matching `xadd_args`'s shape on the immediate path).
 /// See `chasquimq/src/redis/delayed_member.rs` for the encoder.
+///
+/// **Malformed members are cleansed, not fatal.** A member shorter than the
+/// 4-byte length prefix, or whose declared `name_len` runs past the buffer,
+/// is `ZREM`'d and skipped instead of aborting the EVAL — matching the bounds
+/// checks in `decode_delayed_member`. Without this guard a single poison
+/// member permanently wedges promotion for the whole queue (every tick
+/// re-reads it and re-errors before the per-member cleanup runs).
 pub(crate) const PROMOTE_SCRIPT: &str = r#"
 local time = redis.call('TIME')
 local now_ms = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
 local due = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', now_ms, 'LIMIT', 0, tonumber(ARGV[1]))
 local payloads = {}
+local np = 0
 for i, member in ipairs(due) do
   -- Parse the slice-3 length-prefixed member:
   --   [u32_le name_len][name utf8][msgpack payload]
-  local b1, b2, b3, b4 = string.byte(member, 1, 4)
-  local name_len = b1 + (b2 * 256) + (b3 * 65536) + (b4 * 16777216)
-  local name = name_len > 0 and string.sub(member, 5, 4 + name_len) or ''
-  local payload = string.sub(member, 5 + name_len)
-  if name ~= '' then
-    redis.call('XADD', KEYS[2], 'MAXLEN', '~', tonumber(ARGV[2]), '*', 'd', payload, 'n', name)
+  -- A malformed/short member must NOT abort the whole EVAL: string.byte on a
+  -- <4-byte member returns nil, and arithmetic on nil errors out before the
+  -- per-member ZREM below, so the poison member is never removed and every
+  -- subsequent promote tick re-reads + re-errors -> promotion permanently
+  -- wedged for this queue. Mirror the Rust decoder (delayed_member.rs:
+  -- decode_delayed_member): bounds-check first, and on a bad member cleanse
+  -- it with ZREM and skip emitting a job. payloads stays a dense array (own
+  -- counter np, not the loop index i) so a skipped member can't punch a nil
+  -- hole that truncates the reply for valid members after it.
+  if #member < 4 then
+    redis.call('ZREM', KEYS[1], member)
   else
-    redis.call('XADD', KEYS[2], 'MAXLEN', '~', tonumber(ARGV[2]), '*', 'd', payload)
+    local b1, b2, b3, b4 = string.byte(member, 1, 4)
+    local name_len = b1 + (b2 * 256) + (b3 * 65536) + (b4 * 16777216)
+    if name_len > #member - 4 then
+      redis.call('ZREM', KEYS[1], member)
+    else
+      local name = name_len > 0 and string.sub(member, 5, 4 + name_len) or ''
+      local payload = string.sub(member, 5 + name_len)
+      if name ~= '' then
+        redis.call('XADD', KEYS[2], 'MAXLEN', '~', tonumber(ARGV[2]), '*', 'd', payload, 'n', name)
+      else
+        redis.call('XADD', KEYS[2], 'MAXLEN', '~', tonumber(ARGV[2]), '*', 'd', payload)
+      end
+      redis.call('ZREM', KEYS[1], member)
+      np = np + 1
+      payloads[np] = payload
+    end
   end
-  redis.call('ZREM', KEYS[1], member)
-  payloads[i] = payload
 end
 local depth = redis.call('ZCARD', KEYS[1])
 local lag_ms = 0
@@ -450,20 +476,39 @@ while i < fire_count do
   if fire_at_ms <= now_ms then
     -- Split the slice-3 length-prefixed member:
     --   [u32_le name_len][name utf8][msgpack payload]
-    local b1, b2, b3, b4 = string.byte(member, 1, 4)
-    local name_len = b1 + (b2 * 256) + (b3 * 65536) + (b4 * 16777216)
-    local name = name_len > 0 and string.sub(member, 5, 4 + name_len) or ''
-    local payload = string.sub(member, 5 + name_len)
-    if name ~= '' then
-      redis.call('XADD', KEYS[1], 'MAXLEN', '~', max_stream_len, '*', 'd', payload, 'n', name)
-    else
-      redis.call('XADD', KEYS[1], 'MAXLEN', '~', max_stream_len, '*', 'd', payload)
+    -- Bounds-check before string.byte so a malformed/short member can't abort
+    -- the whole EVAL (string.byte on a <4-byte member returns nil; arithmetic
+    -- on nil errors and the whole fire batch aborts). Mirror the Rust decoder
+    -- (delayed_member.rs: decode_delayed_member). A poison member is dropped
+    -- (it can't be dispatched), so it must NOT count toward fired / fired_now
+    -- -- counting it would burn a fire slot against the repeatable limit and
+    -- could prematurely retire the spec. The rest of the batch fires normally.
+    local valid = false
+    local name = ''
+    local payload = nil
+    if #member >= 4 then
+      local b1, b2, b3, b4 = string.byte(member, 1, 4)
+      local name_len = b1 + (b2 * 256) + (b3 * 65536) + (b4 * 16777216)
+      if name_len <= #member - 4 then
+        valid = true
+        name = name_len > 0 and string.sub(member, 5, 4 + name_len) or ''
+        payload = string.sub(member, 5 + name_len)
+      end
+    end
+    if valid then
+      if name ~= '' then
+        redis.call('XADD', KEYS[1], 'MAXLEN', '~', max_stream_len, '*', 'd', payload, 'n', name)
+      else
+        redis.call('XADD', KEYS[1], 'MAXLEN', '~', max_stream_len, '*', 'd', payload)
+      end
+      redis.call('HINCRBY', KEYS[4], 'fired', 1)
+      fired_now = fired_now + 1
     end
   else
     redis.call('ZADD', KEYS[2], fire_at_ms, member)
+    redis.call('HINCRBY', KEYS[4], 'fired', 1)
+    fired_now = fired_now + 1
   end
-  redis.call('HINCRBY', KEYS[4], 'fired', 1)
-  fired_now = fired_now + 1
   i = i + 1
 end
 
@@ -1061,4 +1106,54 @@ pub(crate) fn evalsha_acquire_lock_args(
         Value::from(holder_id),
         Value::from(ttl_secs as i64),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Structural regression guard. Both delayed-member decoders previously
+    /// did `string.byte(member, 1, 4)` immediately followed by `name_len`
+    /// arithmetic with no bounds check; a member shorter than the 4-byte
+    /// prefix made `string.byte` return nil, the arithmetic erred on nil, and
+    /// the whole EVAL aborted before any per-member cleanup ran — permanently
+    /// wedging promotion. The end-to-end proof lives in
+    /// `tests/delayed.rs::poison_member_does_not_wedge_promotion` (live
+    /// Redis). This cheap unit check makes sure a future edit can't silently
+    /// strip the guard back out of either script.
+    ///
+    /// The guard mirrors `delayed_member::decode_delayed_member`: reject a
+    /// member shorter than the prefix (`#member < 4` / `#member >= 4`) and
+    /// reject a declared name length that overruns the buffer
+    /// (`name_len > #member - 4` / `name_len <= #member - 4`).
+    fn asserts_bounds_guard(script: &str, what: &str) {
+        assert!(
+            script.contains("string.byte(member, 1, 4)"),
+            "{what}: expected the length-prefixed member decode to still exist"
+        );
+        let has_short_guard = script.contains("#member < 4") || script.contains("#member >= 4");
+        assert!(
+            has_short_guard,
+            "{what}: missing the short-member bounds guard (#member vs 4) — \
+             a <4-byte member will abort the EVAL and wedge promotion"
+        );
+        let has_overrun_guard =
+            script.contains("name_len > #member - 4") || script.contains("name_len <= #member - 4");
+        assert!(
+            has_overrun_guard,
+            "{what}: missing the oversized-name_len guard (name_len vs \
+             #member - 4) — a member whose declared name length overruns \
+             the buffer will mis-slice the payload"
+        );
+    }
+
+    #[test]
+    fn promote_script_guards_malformed_members() {
+        asserts_bounds_guard(PROMOTE_SCRIPT, "PROMOTE_SCRIPT");
+    }
+
+    #[test]
+    fn schedule_repeatable_script_guards_malformed_members() {
+        asserts_bounds_guard(SCHEDULE_REPEATABLE_SCRIPT, "SCHEDULE_REPEATABLE_SCRIPT");
+    }
 }
