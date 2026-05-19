@@ -58,6 +58,15 @@ pub struct ProducerConfig {
     pub pool_size: usize,
     pub max_stream_len: u64,
     pub max_delay_secs: u64,
+    /// Producer-side ingress cap on the encoded (MessagePack) byte length
+    /// of a single job payload. Any `add*` / `upsert_repeatable` call whose
+    /// encoded payload exceeds this is rejected with [`crate::Error::Config`]
+    /// *before* anything is written to Redis. Mirrors
+    /// [`ConsumerConfig::max_payload_bytes`] (the consumer-side egress cap
+    /// that routes oversize-on-read to the DLQ) so an operator setting both
+    /// to the same value gets symmetric produce/consume semantics. Default
+    /// `1_048_576` (1 MiB), identical to the consumer default.
+    pub max_payload_bytes: usize,
     pub connection: ConnectionTuning,
 }
 
@@ -68,6 +77,7 @@ impl Default for ProducerConfig {
             pool_size: 8,
             max_stream_len: 1_000_000,
             max_delay_secs: 30 * 24 * 3600,
+            max_payload_bytes: 1_048_576,
             connection: ConnectionTuning::default(),
         }
     }
