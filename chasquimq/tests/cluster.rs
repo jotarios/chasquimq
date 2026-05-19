@@ -32,9 +32,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-fn cluster_url() -> String {
-    std::env::var("REDIS_CLUSTER_URL")
-        .expect("REDIS_CLUSTER_URL (a redis-cluster:// seed URL) must be set")
+fn cluster_url_opt() -> Option<String> {
+    std::env::var("REDIS_CLUSTER_URL").ok()
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -121,9 +120,13 @@ fn init_tracing() {
 #[ignore = "requires REDIS_CLUSTER_URL"]
 async fn cluster_produce_consume_ack() {
     init_tracing();
+    let Some(url) = cluster_url_opt() else {
+        eprintln!("skipping: REDIS_CLUSTER_URL not set (see scripts/test-cluster.sh)");
+        return;
+    };
     let queue = "cl_happy";
 
-    let producer: Producer<Sample> = Producer::connect(&cluster_url(), producer_cfg(queue))
+    let producer: Producer<Sample> = Producer::connect(&url, producer_cfg(queue))
         .await
         .expect("connect producer to cluster");
     let payloads: Vec<Sample> = (0..1_000).map(|n| Sample { n }).collect();
@@ -131,7 +134,7 @@ async fn cluster_produce_consume_ack() {
 
     let counter = Arc::new(AtomicUsize::new(0));
     let counter_h = counter.clone();
-    let consumer: Consumer<Sample> = Consumer::new(cluster_url(), consumer_cfg(queue, "cl1"));
+    let consumer: Consumer<Sample> = Consumer::new(url.clone(), consumer_cfg(queue, "cl1"));
     let shutdown = CancellationToken::new();
     let shutdown_clone = shutdown.clone();
     let join = tokio::spawn(async move {
@@ -167,9 +170,13 @@ async fn cluster_produce_consume_ack() {
 #[ignore = "requires REDIS_CLUSTER_URL"]
 async fn cluster_delayed_promote() {
     init_tracing();
+    let Some(url) = cluster_url_opt() else {
+        eprintln!("skipping: REDIS_CLUSTER_URL not set (see scripts/test-cluster.sh)");
+        return;
+    };
     let queue = "cl_delayed";
 
-    let producer: Producer<Sample> = Producer::connect(&cluster_url(), producer_cfg(queue))
+    let producer: Producer<Sample> = Producer::connect(&url, producer_cfg(queue))
         .await
         .expect("connect producer to cluster");
     for n in 0..50 {
@@ -181,7 +188,7 @@ async fn cluster_delayed_promote() {
 
     let counter = Arc::new(AtomicUsize::new(0));
     let counter_h = counter.clone();
-    let consumer: Consumer<Sample> = Consumer::new(cluster_url(), consumer_cfg(queue, "cld"));
+    let consumer: Consumer<Sample> = Consumer::new(url.clone(), consumer_cfg(queue, "cld"));
     let shutdown = CancellationToken::new();
     let shutdown_clone = shutdown.clone();
     let join = tokio::spawn(async move {
@@ -217,9 +224,13 @@ async fn cluster_delayed_promote() {
 #[ignore = "requires REDIS_CLUSTER_URL"]
 async fn cluster_dlq_relocate() {
     init_tracing();
+    let Some(url) = cluster_url_opt() else {
+        eprintln!("skipping: REDIS_CLUSTER_URL not set (see scripts/test-cluster.sh)");
+        return;
+    };
     let queue = "cl_dlq";
 
-    let producer: Producer<Sample> = Producer::connect(&cluster_url(), producer_cfg(queue))
+    let producer: Producer<Sample> = Producer::connect(&url, producer_cfg(queue))
         .await
         .expect("connect producer to cluster");
     producer.add(Sample { n: 7 }).await.expect("add");
@@ -227,7 +238,7 @@ async fn cluster_dlq_relocate() {
     // delayed_enabled stays on: a retryable error reschedules onto the
     // delayed ZSET and only reaches the DLQ once the promoter has
     // replayed it past max_attempts.
-    let consumer: Consumer<Sample> = Consumer::new(cluster_url(), consumer_cfg(queue, "cldlq"));
+    let consumer: Consumer<Sample> = Consumer::new(url.clone(), consumer_cfg(queue, "cldlq"));
     let shutdown = CancellationToken::new();
     let shutdown_clone = shutdown.clone();
     let join = tokio::spawn(async move {
@@ -243,7 +254,7 @@ async fn cluster_dlq_relocate() {
             .await
     });
 
-    let peek_producer: Producer<Sample> = Producer::connect(&cluster_url(), producer_cfg(queue))
+    let peek_producer: Producer<Sample> = Producer::connect(&url, producer_cfg(queue))
         .await
         .expect("connect peek producer");
     wait_until(Duration::from_secs(20), || {
@@ -264,9 +275,13 @@ async fn cluster_dlq_relocate() {
 #[ignore = "requires REDIS_CLUSTER_URL"]
 async fn cluster_result_backend() {
     init_tracing();
+    let Some(url) = cluster_url_opt() else {
+        eprintln!("skipping: REDIS_CLUSTER_URL not set (see scripts/test-cluster.sh)");
+        return;
+    };
     let queue = "cl_result";
 
-    let producer: Producer<Sample> = Producer::connect(&cluster_url(), producer_cfg(queue))
+    let producer: Producer<Sample> = Producer::connect(&url, producer_cfg(queue))
         .await
         .expect("connect producer to cluster");
     let id = producer.add(Sample { n: 42 }).await.expect("add");
@@ -275,7 +290,7 @@ async fn cluster_result_backend() {
     cfg.delayed_enabled = false;
     cfg.store_results = true;
     cfg.result_ttl_secs = 60;
-    let consumer: Consumer<Sample> = Consumer::new(cluster_url(), cfg);
+    let consumer: Consumer<Sample> = Consumer::new(url.clone(), cfg);
     let shutdown = CancellationToken::new();
     let shutdown_clone = shutdown.clone();
     let join = tokio::spawn(async move {
