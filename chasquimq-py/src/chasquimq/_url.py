@@ -1,4 +1,5 @@
-_PLAIN = "redis://"
+# Fallback prefix for a TLS-requested URL whose scheme is not in the
+# plain->TLS map below (most commonly a schemeless `host:port`).
 _TLS = "rediss://"
 
 # Plain -> TLS scheme map. fred routes a clustered connection by the URL
