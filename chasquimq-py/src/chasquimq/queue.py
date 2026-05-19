@@ -89,6 +89,7 @@ class Queue:
         tls: bool = False,
         max_stream_len: Optional[int] = None,
         max_delay_secs: Optional[int] = None,
+        max_payload_bytes: Optional[int] = None,
         reconnect_max_attempts: Optional[int] = None,
         credential_provider: Optional[CredentialProvider] = None,
     ) -> None:
@@ -96,6 +97,10 @@ class Queue:
         self._redis_url = apply_tls(redis_url, tls)
         self._max_stream_len = max_stream_len
         self._max_delay_secs = max_delay_secs
+        # Producer-side ingress cap on the encoded payload byte length.
+        # Oversize ``add*`` / repeatable upserts are rejected before any
+        # Redis write. ``None`` keeps the engine default (1 MiB).
+        self._max_payload_bytes = max_payload_bytes
         # ``0`` (the engine default) = retry forever. Set a positive
         # value so a permanently rejecting ``credential_provider``
         # gives up instead of looping on reconnect indefinitely.
@@ -125,6 +130,8 @@ class Queue:
                 kwargs["max_stream_len"] = self._max_stream_len
             if self._max_delay_secs is not None:
                 kwargs["max_delay_secs"] = self._max_delay_secs
+            if self._max_payload_bytes is not None:
+                kwargs["max_payload_bytes"] = self._max_payload_bytes
             if self._reconnect_max_attempts is not None:
                 kwargs["reconnect_max_attempts"] = self._reconnect_max_attempts
             if self._credential_provider is not None:

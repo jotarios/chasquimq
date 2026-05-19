@@ -27,6 +27,7 @@ class Producer:
         pool_size: Optional[int] = ...,
         max_stream_len: Optional[int] = ...,
         max_delay_secs: Optional[int] = ...,
+        max_payload_bytes: Optional[int] = ...,
         reconnect_max_attempts: Optional[int] = ...,
         credential_provider: Optional[CredentialProvider] = ...,
     ) -> None: ...
