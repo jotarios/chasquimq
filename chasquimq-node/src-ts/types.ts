@@ -56,6 +56,20 @@ export interface ConnectionOptions {
   tls?: boolean
   url?: string
   /**
+   * Connect in Redis Cluster mode. When `true`, the `host`/`port` are
+   * treated as one seed node and the rest of the topology is discovered
+   * via `CLUSTER SLOTS`. Ignored when an explicit `url` is given — pass a
+   * `redis-cluster://` (or `rediss-cluster://`) URL instead. Default
+   * `false` (single-node / replica-free).
+   *
+   * Every key for one queue shares a `{chasqui:<queue>}` hash tag, so a
+   * queue's entire keyspace lands on a single slot and the engine's
+   * multi-key Lua scripts stay atomic on a cluster. Cross-queue atomic
+   * operations are not supported on a cluster (they do not exist in the
+   * single-node engine either).
+   */
+  cluster?: boolean
+  /**
    * Opt-in async resolver for rotating-token auth. When set, the engine
    * invokes this callback on every reconnect / `AUTH` cycle and uses the
    * returned `{ username, password }` to authenticate against Redis.

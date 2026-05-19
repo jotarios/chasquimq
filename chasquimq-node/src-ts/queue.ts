@@ -499,24 +499,49 @@ export class Queue<
   }
 }
 
+// Plain -> TLS scheme map. fred routes a clustered connection by the URL
+// scheme, so the cluster schemes must keep their `-cluster` suffix when
+// TLS is layered on: `redis-cluster://` becomes `rediss-cluster://`, never
+// `rediss://redis-cluster://`. valkey schemes are fred aliases for the
+// redis ones and get the same treatment.
+const TLS_SCHEME: Record<string, string> = {
+  redis: "rediss",
+  "redis-cluster": "rediss-cluster",
+  valkey: "valkeys",
+  "valkey-cluster": "valkeys-cluster",
+}
+const ALREADY_TLS = [
+  "rediss://",
+  "rediss-cluster://",
+  "valkeys://",
+  "valkeys-cluster://",
+]
+
 function buildRedisUrl(c: ConnectionOptions): string {
-  if (c.url) return applyTls(c.url, c.tls === true);
-  const host = c.host ?? "127.0.0.1";
-  const port = c.port ?? 6379;
+  // A caller-supplied url wins over host/port + cluster, exactly as it
+  // already wins over every other discrete connection field.
+  if (c.url) return applyTls(c.url, c.tls === true)
+  const host = c.host ?? "127.0.0.1"
+  const port = c.port ?? 6379
   const auth = c.password
     ? `${c.username ?? ""}:${encodeURIComponent(c.password)}@`
-    : "";
-  const db = c.db != null ? `/${c.db}` : "";
-  const scheme = c.tls ? "rediss" : "redis";
-  return `${scheme}://${auth}${host}:${port}${db}`;
+    : ""
+  const db = c.db != null ? `/${c.db}` : ""
+  const base = c.tls ? "rediss" : "redis"
+  const scheme = c.cluster === true ? `${base}-cluster` : base
+  return `${scheme}://${auth}${host}:${port}${db}`
 }
 
 function applyTls(url: string, tls: boolean): string {
-  if (!tls) return url;
-  const lower = url.toLowerCase();
-  if (lower.startsWith("rediss://")) return url;
-  if (lower.startsWith("redis://")) return "rediss://" + url.slice("redis://".length);
-  return "rediss://" + url;
+  if (!tls) return url
+  const lower = url.toLowerCase()
+  if (ALREADY_TLS.some((p) => lower.startsWith(p))) return url
+  const sep = url.indexOf("://")
+  if (sep !== -1) {
+    const tlsScheme = TLS_SCHEME[lower.slice(0, sep)]
+    if (tlsScheme !== undefined) return tlsScheme + url.slice(sep)
+  }
+  return "rediss://" + url
 }
 
 /**
