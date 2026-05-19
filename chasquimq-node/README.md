@@ -68,8 +68,8 @@ main()
 
 | Surface | What it does |
 |---|---|
-| `Queue<DataType, ResultType, NameType>` | Producer + queue inspection. `add` / `addBulk` / `addUnique` / `getJobResult` / `peekDlq` / `replayDlq` / `cancelDelayed` / `getRepeatableJobs` / `removeRepeatableByKey`. `[Symbol.asyncDispose]`. |
-| `Worker<DataType, ResultType, NameType>` | Consumer pool. tokio-side dispatch, opt-in result storage (`storeResults: true`), `EventEmitter` events (`completed` / `failed` / `error`). `[Symbol.asyncDispose]`. |
+| `Queue<DataType, ResultType, NameType>` | Producer + queue inspection. `add` / `addBulk` / `addUnique` / `getJobResult` / `peekDlq` / `replayDlq` / `cancelDelayed` / `getRepeatableJobs` / `removeRepeatableByKey` / `pause` / `resume` / `isPaused`. `[Symbol.asyncDispose]`. |
+| `Worker<DataType, ResultType, NameType>` | Consumer pool. tokio-side dispatch, opt-in result storage (`storeResults: true`), `EventEmitter` events (`completed` / `failed` / `error`), `pause` / `resume` / `isPaused`. `[Symbol.asyncDispose]`. |
 | `Job<DataType, ResultType, NameType>` | Read-only handle. `id`, `name`, `data`, `attemptsMade`, `waitForResult({ timeoutMs, intervalMs, signal })`. |
 | `QueueEvents` | Cross-process pub/sub via the events stream. Subscribe to `completed` / `failed` / `dlq` / `retry-scheduled` / `delayed` / `drained`. `[Symbol.asyncDispose]`. |
 | `BackoffSpec` | Builders: `.fixed(delayMs)` / `.exponential(initialMs, { multiplier, maxMs, jitterMs })`. |
@@ -132,6 +132,33 @@ const conn = {
 ```
 
 Applies to both `Queue` (producer pool) and `Worker` (consumer). `0` (the default) keeps the unbounded behaviour. Pair a positive cap with alerting on reconnect churn so a bounded failure is loud, not silent.
+
+### Pausing and resuming
+
+Two levels of pause, both consumer-side: workers stop pulling new jobs, jobs already in flight finish, producers keep enqueueing.
+
+`Worker.pause()` is **process-local** — it stops just that worker instance. Resume is instant.
+
+```ts
+const worker = new Worker("emails", handler, { connection })
+void worker.run()
+
+await worker.pause()   // this worker stops dispatching new jobs
+// ...in-flight handlers still finish; queue.add() still works...
+worker.resume()        // back to processing
+worker.isPaused()      // => false
+```
+
+`Queue.pause()` is **durable and cross-process** — it sets a Redis flag every consumer of the queue honours, and it survives worker restarts until you `resume()`. Use it for queue-wide maintenance (a worker started while paused comes up paused).
+
+```ts
+const queue = new Queue("emails", { connection })
+await queue.pause()            // every worker of "emails" parks
+await queue.isPaused()         // => true
+await queue.resume()           // lift it everywhere
+```
+
+The same durable flag is what the CLI's `chasqui pause <queue>` / `chasqui resume <queue>` toggle. Both surfaces are idempotent — double-pause / double-resume are no-ops.
 
 ## Power-user surface
 

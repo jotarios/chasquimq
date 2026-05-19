@@ -2,7 +2,7 @@
 title: Performance trade-offs
 description: What we measured, what hurt, and the host-load floor that caps every consumer benchmark.
 sidebar:
-  order: 9
+  order: 10
 ---
 
 The headline numbers (3.47× on bulk produce, up to 8.78× on concurrent consume) are real, and they are also under conditions you have to recreate. This page is the honest version: what's robust, what's host-bound, and what we chose not to do.

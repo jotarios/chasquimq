@@ -91,3 +91,19 @@ pub fn result_key(queue_name: &str, job_id: &str) -> String {
 pub fn delayed_index_key(queue_name: &str, job_id: &str) -> String {
     format!("{{chasqui:{queue_name}}}:didx:{job_id}")
 }
+
+/// Per-queue cross-process pause flag. When this key exists, every
+/// consumer of the queue parks its stream reader at the next batch
+/// boundary (in-flight jobs still drain; producers are unaffected).
+/// Written by `chasqui pause` / `Queue.pause()` (SET), removed by
+/// `chasqui resume` / `Queue.resume()` (DEL). No TTL — pause is durable
+/// operator intent that persists until an explicit resume, and survives
+/// consumer restarts (a fresh consumer parks before its first
+/// `XREADGROUP` if the key is present). The reader checks this key with
+/// a single `EXISTS` only at batch boundaries, time-gated by
+/// `ConsumerConfig::pause_poll_ms`, so it is never on the per-job hot
+/// path. Same `{chasqui:<queue>}` hash tag so it co-locates on the same
+/// Cluster slot as the stream.
+pub fn paused_key(queue_name: &str) -> String {
+    format!("{{chasqui:{queue_name}}}:paused")
+}

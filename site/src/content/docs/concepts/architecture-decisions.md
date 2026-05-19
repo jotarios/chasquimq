@@ -2,7 +2,7 @@
 title: Architecture decisions
 description: Rust + tokio, Redis Streams, MessagePack, no Lua-blocking, pipelined acks. Why each, and what the alternative was.
 sidebar:
-  order: 8
+  order: 9
 ---
 
 The five load-bearing constraints. Each is a deliberate choice with a measurable consequence; each rules out a class of "obvious" alternatives.

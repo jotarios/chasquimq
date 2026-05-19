@@ -64,8 +64,8 @@ asyncio.run(main())
 
 | Surface | What it does |
 |---|---|
-| `Queue` | Producer + queue inspection. `add` / `add_bulk` / `add_unique` / `get_job_result` / `peek_dlq` / `replay_dlq` / `cancel_delayed` / `get_repeatable_jobs` / `remove_repeatable_by_key`. Async context manager. |
-| `Worker` | Consumer pool. asyncio-first dispatch, opt-in result storage (`store_results=True`), graceful shutdown. Async context manager. |
+| `Queue` | Producer + queue inspection. `add` / `add_bulk` / `add_unique` / `get_job_result` / `peek_dlq` / `replay_dlq` / `cancel_delayed` / `get_repeatable_jobs` / `remove_repeatable_by_key` / `pause` / `resume` / `is_paused`. Async context manager. |
+| `Worker` | Consumer pool. asyncio-first dispatch, opt-in result storage (`store_results=True`), graceful shutdown, `pause` / `resume` / `is_paused`. Async context manager. |
 | `Job` | Frozen dataclass returned by `Queue.add`. Has `id`, `name`, `data`, `attempts_made`, `wait_for_result(timeout=)`. |
 | `QueueEvents` | Asyncio iterator over the engine events stream. Cross-process pub/sub for `completed` / `failed` / `dlq` / `retry-scheduled` / `delayed`. |
 | `BackoffSpec` | Builders: `.fixed(delay_ms)` / `.exponential(initial_ms, multiplier, max_ms, jitter_ms)`. |
@@ -155,6 +155,33 @@ async with Queue(
 ```
 
 Available on both `Queue` (producer pool) and `Worker` (consumer). `0` or `None` (the default) keeps the unbounded behaviour. Pair a positive cap with alerting on reconnect churn so a bounded failure is loud, not silent.
+
+### Pausing and resuming
+
+Two levels of pause, both consumer-side: workers stop pulling new jobs, jobs already in flight finish, producers keep enqueueing.
+
+`Worker.pause()` is **process-local** — it stops just that worker instance. Resume is instant. (These are synchronous calls — no `await`.)
+
+```python
+worker = Worker("emails", handler, redis_url=url)
+task = asyncio.create_task(worker.run())
+
+worker.pause()        # this worker stops dispatching new jobs
+# ...in-flight handlers still finish; queue.add() still works...
+worker.resume()       # back to processing
+worker.is_paused()    # => False
+```
+
+`Queue.pause()` is **durable and cross-process** — it sets a Redis flag every consumer of the queue honours, and it survives worker restarts until you `resume()`. Use it for queue-wide maintenance (a worker started while paused comes up paused).
+
+```python
+async with Queue("emails", redis_url=url) as queue:
+    await queue.pause()           # every worker of "emails" parks
+    assert await queue.is_paused()
+    await queue.resume()          # lift it everywhere
+```
+
+The same durable flag is what the CLI's `chasqui pause <queue>` / `chasqui resume <queue>` toggle. Both surfaces are idempotent — double-pause / double-resume are no-ops.
 
 ## Power-user surface
 

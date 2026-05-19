@@ -123,6 +123,9 @@ class Worker:
         self._consumer_task: Optional[asyncio.Task[None]] = None
         self._running = False
         self._closed = False
+        # Pause intent recorded before the (deferred) native consumer
+        # exists; applied once it is constructed in ``run()``.
+        self._pending_paused = False
 
     @property
     def name(self) -> str:
@@ -150,6 +153,10 @@ class Worker:
             self._consumer = _native.Consumer(
                 self._redis_url, self._queue_name, **self._deferred_kwargs
             )
+            # Carry forward a pause requested before the deferred
+            # consumer existed so it parks before its first read.
+            if self._pending_paused:
+                self._consumer.pause()
 
         self._running = True
 
@@ -194,6 +201,39 @@ class Worker:
         # there is nothing to drain, so just flag closed.
         if self._consumer is not None:
             self._consumer.shutdown()
+
+    def pause(self) -> None:
+        """Pause this worker's reader at the next batch boundary.
+
+        Jobs already being processed run to completion; no new jobs are
+        dispatched until :meth:`resume`. Process-local (does not write
+        the cross-process Redis flag — use :meth:`Queue.pause` for
+        queue-wide durable pause). Idempotent. Safe to call before
+        :meth:`run`: a pause requested while the native consumer is
+        still deferred (``credential_provider`` path) is applied as soon
+        as the consumer is constructed, so it parks before its first
+        read.
+        """
+        if self._consumer is not None:
+            self._consumer.pause()
+        else:
+            self._pending_paused = True
+
+    def resume(self) -> None:
+        """Resume a paused worker. The reader wakes immediately (no
+        poll-interval latency for the in-process path). Idempotent.
+        """
+        self._pending_paused = False
+        if self._consumer is not None:
+            self._consumer.resume()
+
+    def is_paused(self) -> bool:
+        """Whether this worker is paused via :meth:`pause`. Does not
+        reflect a cross-process :meth:`Queue.pause`.
+        """
+        if self._consumer is not None:
+            return self._consumer.is_paused()
+        return self._pending_paused
 
     @property
     def is_running(self) -> bool:

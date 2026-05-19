@@ -169,6 +169,16 @@ pub struct ConsumerConfig {
     /// `ack_idle_ms`). Caps the worst-case wait for a single trailing
     /// `JobOk` to land in Redis under low concurrency. Default `5`.
     pub result_idle_ms: u64,
+    /// How often (ms) a paused reader re-checks the cross-process pause
+    /// key (`{chasqui:<queue>}:paused`) set by `chasqui pause` /
+    /// `Queue.pause()`. Also bounds the worst-case latency for a
+    /// cross-process pause/resume to be observed by an actively-draining
+    /// consumer. The in-process pause path (`Worker.pause()`) is
+    /// edge-triggered and observes instantly regardless of this value.
+    /// Not consulted on the per-job hot path: when not paused the reader
+    /// pays one `Instant` comparison per batch, no Redis round trip.
+    /// Default `250`.
+    pub pause_poll_ms: u64,
     /// Forwarded to the inline promoter the consumer spawns when
     /// `delayed_enabled` is true. Defaults to [`crate::metrics::NoopSink`].
     pub metrics: std::sync::Arc<dyn crate::metrics::MetricsSink>,
@@ -207,6 +217,7 @@ impl std::fmt::Debug for ConsumerConfig {
             .field("result_ttl_secs", &self.result_ttl_secs)
             .field("result_batch", &self.result_batch)
             .field("result_idle_ms", &self.result_idle_ms)
+            .field("pause_poll_ms", &self.pause_poll_ms)
             .field("metrics", &"<dyn MetricsSink>")
             .field("connection", &self.connection)
             .finish()
@@ -245,6 +256,7 @@ impl Default for ConsumerConfig {
             result_ttl_secs: 3600,
             result_batch: 64,
             result_idle_ms: 5,
+            pause_poll_ms: 250,
             metrics: crate::metrics::noop_sink(),
             connection: ConnectionTuning::default(),
         }

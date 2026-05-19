@@ -238,8 +238,59 @@ engine schema (`attempt`, `backoff_ms`, `delay_ms`, `duration_us`,
 `ts`) keep their integer rendering; everything else is printed
 verbatim.
 
+## `chasqui pause`
+
+```bash
+chasqui pause <QUEUE> [--redis-url <URL>]
+```
+
+Durably pause every consumer of `<QUEUE>`. Sets the cross-process
+`{chasqui:<queue>}:paused` key (no TTL). Each running consumer parks
+its reader at the next batch boundary: in-flight jobs drain, producers
+keep enqueueing, the stream backlog grows. The pause persists across
+consumer restarts — a worker started while the key is set comes up
+parked before its first read.
+
+**Flags:**
+
+- `--redis-url <URL>` — **default `redis://127.0.0.1:6379`**.
+
+**Example:**
+
+```bash
+chasqui pause emails
+# queue emails paused; run `chasqui resume emails` to resume
+```
+
+Idempotent — pausing an already-paused queue is a no-op.
+
+## `chasqui resume`
+
+```bash
+chasqui resume <QUEUE> [--redis-url <URL>]
+```
+
+Lift a durable pause set by `chasqui pause` (or `Queue.pause()`).
+Deletes the `{chasqui:<queue>}:paused` key; each consumer resumes
+within its `pause_poll_ms` window (default 250 ms). Idempotent —
+resuming a queue that isn't paused is a no-op. Does not affect a
+process-local `Worker.pause()`, which is in-memory and never touches
+this key.
+
+**Flags:**
+
+- `--redis-url <URL>` — **default `redis://127.0.0.1:6379`**.
+
+**Example:**
+
+```bash
+chasqui resume emails
+# queue emails resumed
+```
+
 ## See also
 
+- [Pause and resume concept](/concepts/pause-and-resume/) — process-local vs. durable pause, and what drains.
 - [DLQ and recovery concept](/concepts/dlq-and-recovery/) — when to peek vs. replay.
 - [The scheduler concept](/concepts/the-scheduler/) — what `repeatable list` is showing you.
 - [Observe the engine guide](/guides/observe-the-engine/) — how the events tail fits with metrics sinks.

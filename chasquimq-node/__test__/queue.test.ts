@@ -83,12 +83,11 @@ skipIfNoRedis('Queue integration', () => {
     await expect(queue.getJob('any')).rejects.toBeInstanceOf(NotSupportedError)
   })
 
-  it('pause() / resume() throw NotSupportedError in v1', async () => {
-    await expect(queue.pause()).rejects.toBeInstanceOf(NotSupportedError)
-    await expect(queue.resume()).rejects.toBeInstanceOf(NotSupportedError)
-  })
-
-  it('isPaused() returns false in v1', async () => {
+  it('pause() / resume() / isPaused() drive the durable cross-process flag', async () => {
+    expect(await queue.isPaused()).toBe(false)
+    await queue.pause()
+    expect(await queue.isPaused()).toBe(true)
+    await queue.resume()
     expect(await queue.isPaused()).toBe(false)
   })
 

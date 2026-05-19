@@ -230,6 +230,23 @@ async def get_job_result_bulk(self, job_ids: Sequence[str]) -> list[Any]
 Pipelined bulk variant. Returns a list aligned by index with
 `job_ids`.
 
+### `await queue.pause()`, `await queue.resume()`, `await queue.is_paused()`
+
+```python
+async def pause(self) -> None
+async def resume(self) -> None
+async def is_paused(self) -> bool
+```
+
+Durable, cross-process pause. `pause()` sets the
+`{chasqui:<queue>}:paused` key (no TTL); every consumer of the queue
+parks its reader at the next batch boundary while in-flight jobs
+drain and producers keep enqueueing. Survives consumer restarts until
+`resume()`. Idempotent. Queue-wide analogue of
+[`worker.pause()`](#workerpause-workerresume-workeris_paused); the
+same key is toggled by `chasqui pause` / `chasqui resume`. See the
+[Pause and resume concept](/concepts/pause-and-resume/).
+
 ### `await queue.close()`
 
 ```python
@@ -338,6 +355,26 @@ itself — that avoids the double-await race when a caller invokes
 async with Worker("emails", handler) as worker:
     await worker.run()
 ```
+
+### `worker.pause()`, `worker.resume()`, `worker.is_paused()`
+
+```python
+def pause(self) -> None
+def resume(self) -> None
+def is_paused(self) -> bool
+```
+
+Process-local pause for this worker instance (synchronous — no
+`await`). `pause()` stops the reader at the next batch boundary;
+jobs already in a handler run to completion; producers keep
+enqueueing. `resume()` wakes the parked reader immediately. In-memory
+only — does not write the cross-process flag and does not survive a
+process restart; for queue-wide durable pause use
+[`queue.pause()`](#await-queuepause-await-queueresume-await-queueis_paused).
+Safe to call before `run()` (a pause requested while the native
+consumer is still deferred via `credential_provider` is applied as
+soon as it is constructed, so it parks before its first read).
+Idempotent.
 
 ### Properties
 

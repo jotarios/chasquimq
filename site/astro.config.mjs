@@ -130,6 +130,7 @@ export default defineConfig({
             { label: "DLQ and recovery", slug: "concepts/dlq-and-recovery" },
             { label: "Result backends", slug: "concepts/result-backends" },
             { label: "The scheduler", slug: "concepts/the-scheduler" },
+            { label: "Pause and resume", slug: "concepts/pause-and-resume" },
             {
               label: "Architecture decisions",
               slug: "concepts/architecture-decisions",

@@ -9,20 +9,23 @@ use crate::redis::commands::xreadgroup_args;
 use crate::redis::parse::{EntryShape, parse_xreadgroup_response};
 use bytes::Bytes;
 use fred::clients::Client;
-use fred::interfaces::ClientLike;
+use fred::interfaces::{ClientLike, KeysInterface};
 use fred::types::{ClusterHash, CustomCommand, Value};
 use serde::de::DeserializeOwned;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use std::time::{Duration, Instant};
+use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 pub(crate) struct ReadState<T> {
     pub reader: Client,
     pub stream_key: Arc<str>,
+    pub paused_key: Arc<str>,
     pub cfg: ConsumerConfig,
     pub job_tx: async_channel::Sender<DispatchedJob<T>>,
     pub dlq_tx: mpsc::Sender<DlqRelocate>,
     pub shutdown: CancellationToken,
+    pub pause_rx: watch::Receiver<bool>,
     pub metrics: Arc<dyn MetricsSink>,
     pub events: EventsWriter,
 }
@@ -34,10 +37,12 @@ where
     let ReadState {
         reader,
         stream_key,
+        paused_key,
         cfg,
         job_tx,
         dlq_tx,
         shutdown,
+        pause_rx,
         metrics: metrics_sink,
         events,
     } = state;
@@ -48,8 +53,30 @@ where
     // emit `drained` on every blocking-poll timeout (which would be tens
     // per second with a 50ms `block_ms`).
     let mut last_was_non_empty = false;
+
+    // Pause gate state. `PauseGate` owns the cross-process-key bookkeeping
+    // so the not-paused hot path is one `watch::borrow()` (atomic) plus
+    // one time comparison per batch — never a Redis round trip and never
+    // per-job. `last_redis_check` is seeded in the past so a consumer
+    // started against an already-paused queue parks before its first read.
+    let mut gate = PauseGate::new(
+        pause_rx,
+        Arc::clone(&paused_key),
+        Duration::from_millis(cfg.pause_poll_ms),
+    );
+
     loop {
         if shutdown.is_cancelled() {
+            break;
+        }
+
+        // Park here (batch boundary) while either the in-process switch or
+        // the cross-process Redis key says paused. In-flight jobs from the
+        // previous XREADGROUP have already been dispatched and drain via
+        // the still-running worker/ack/relocator pipeline; producers and
+        // the promoter are unaffected. Returns `false` only when shutdown
+        // was observed while parked, in which case we break to drain.
+        if !gate.wait_until_runnable(&reader, &shutdown).await {
             break;
         }
 
@@ -123,6 +150,119 @@ where
     }
 
     Ok(())
+}
+
+/// Batch-boundary pause gate.
+///
+/// ```text
+///  every loop iteration (batch boundary, BEFORE XREADGROUP):
+///    wait_until_runnable():
+///      ┌─ in-proc paused? (watch::borrow, atomic, ~ns) ──┐
+///      │                                                  │
+///      ├─ cross-proc paused? ── time-gated EXISTS ────────┤
+///      │   (only when pause_poll_ms elapsed since last     │
+///      │    check; cached otherwise → zero round trips     │
+///      │    on the not-paused hot path)                    │
+///      │                                                  ▼
+///      └─ neither → return true (proceed to XREADGROUP) ──►
+///         either  → park:
+///            select! { shutdown      => return false (drain),
+///                      pause changed => re-evaluate,
+///                      sleep(poll)   => recheck Redis key }
+/// ```
+///
+/// The not-paused common path costs one `watch::Receiver::borrow()` and,
+/// at most once per `pause_poll_ms`, one `EXISTS`. It is never per-job and
+/// never on the produce path, satisfying the "no new hot-path round trip"
+/// constraint.
+struct PauseGate {
+    pause_rx: watch::Receiver<bool>,
+    paused_key: Arc<str>,
+    poll: Duration,
+    /// Last time the cross-process Redis key was queried. `None` means
+    /// "never probed" — the first batch boundary always does a real
+    /// `EXISTS` so a consumer started against an already-paused queue
+    /// parks before its first XREADGROUP, with no dependence on how far
+    /// `Instant::now()` is from the process's monotonic-clock epoch
+    /// (a `now - poll` seed is unreliable in the first few hundred ms
+    /// after boot on platforms where the epoch is near zero).
+    last_redis_check: Option<Instant>,
+    /// Cached result of the last `EXISTS`. Retained verbatim on a Redis
+    /// error so a transient connection blip neither crashes the reader nor
+    /// spuriously unpauses it.
+    redis_paused: bool,
+}
+
+impl PauseGate {
+    fn new(pause_rx: watch::Receiver<bool>, paused_key: Arc<str>, poll: Duration) -> Self {
+        Self {
+            pause_rx,
+            paused_key,
+            poll,
+            last_redis_check: None,
+            redis_paused: false,
+        }
+    }
+
+    /// Time-gated cross-process pause-key probe. Issues a single `EXISTS`
+    /// only when at least `poll` has elapsed since the previous probe;
+    /// otherwise returns the cached value. On a Redis error the cached
+    /// value is retained (debug-logged, never flipped) — the in-process
+    /// switch is unaffected because it never touches Redis.
+    async fn refresh_redis(&mut self, reader: &Client) -> bool {
+        if let Some(last) = self.last_redis_check
+            && last.elapsed() < self.poll
+        {
+            return self.redis_paused;
+        }
+        self.last_redis_check = Some(Instant::now());
+        match reader.exists::<bool, _>(&*self.paused_key).await {
+            Ok(exists) => {
+                self.redis_paused = exists;
+            }
+            Err(e) => {
+                tracing::debug!(
+                    error = %e,
+                    key = %self.paused_key,
+                    "pause-key EXISTS failed; retaining last known cross-process pause state"
+                );
+            }
+        }
+        self.redis_paused
+    }
+
+    /// Block until the reader may issue its next XREADGROUP. Returns
+    /// `true` when runnable, `false` when shutdown was observed while
+    /// parked (caller breaks to drain).
+    async fn wait_until_runnable(&mut self, reader: &Client, shutdown: &CancellationToken) -> bool {
+        loop {
+            let in_proc_paused = *self.pause_rx.borrow();
+            let redis_paused = self.refresh_redis(reader).await;
+            if !in_proc_paused && !redis_paused {
+                return true;
+            }
+            tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => return false,
+                changed = self.pause_rx.changed() => {
+                    // All PauseControl senders dropped: no further
+                    // in-process pause signals are possible. Re-evaluate
+                    // against the Redis key (which may still pause us) and
+                    // proceed if it doesn't — never busy-loop on the
+                    // closed channel.
+                    if changed.is_err() && !self.refresh_redis(reader).await {
+                        return true;
+                    }
+                }
+                _ = tokio::time::sleep(self.poll) => {
+                    // Force a fresh probe on the next refresh_redis call
+                    // so a cross-process resume (key DEL) is observed
+                    // within `poll` even while parked.
+                    self.last_redis_check = None;
+                }
+            }
+        }
+    }
 }
 
 enum DispatchFlow {

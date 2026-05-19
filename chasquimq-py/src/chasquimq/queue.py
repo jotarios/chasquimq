@@ -350,6 +350,29 @@ class Queue:
         producer = self._get_producer()
         return await producer.cancel_delayed(job_id)
 
+    async def pause(self) -> None:
+        """Durably pause every consumer of this queue (cross-process).
+
+        Sets a Redis flag (``{chasqui:<queue>}:paused``); each worker
+        stops dispatching new jobs at its next batch boundary while
+        in-flight jobs drain and producers keep enqueueing. The pause
+        survives worker restarts until :meth:`resume`. Idempotent. This
+        is the queue-wide control; for a single in-process worker use
+        :meth:`Worker.pause` instead.
+        """
+        producer = self._get_producer()
+        await producer.pause()
+
+    async def resume(self) -> None:
+        """Lift a durable pause set by :meth:`pause`. Idempotent."""
+        producer = self._get_producer()
+        await producer.resume()
+
+    async def is_paused(self) -> bool:
+        """Whether this queue is durably paused via the cross-process flag."""
+        producer = self._get_producer()
+        return await producer.is_paused()
+
     async def peek_dlq(self, limit: int = 20) -> list[dict]:
         """Return up to ``limit`` DLQ entries, oldest first."""
         producer = self._get_producer()

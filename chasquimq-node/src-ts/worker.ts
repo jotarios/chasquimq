@@ -336,23 +336,32 @@ export class Worker<
   }
 
   /**
-   * Not implemented in v1. Close and re-create the worker instead.
-   * See class JSDoc for the v1 scope.
+   * Pause this worker's reader at the next batch boundary. Jobs already
+   * being processed run to completion; no new jobs are dispatched until
+   * {@link Worker.resume}. Process-local (does not write the cross-process
+   * Redis flag — use {@link Queue.pause} for queue-wide durable pause).
+   * Idempotent. The `doNotWaitActive` argument is accepted for BullMQ
+   * call-shape parity but is a no-op: this method returns immediately and
+   * in-flight jobs always drain in the background.
    */
   async pause(_doNotWaitActive = false): Promise<void> {
-    throw new NotSupportedError(
-      'Worker.pause is not implemented in v1; close and re-create instead',
-    )
+    this.native.pause()
   }
 
-  /** Not implemented in v1. */
+  /**
+   * Resume a paused worker. The reader wakes immediately (no poll-interval
+   * latency for the in-process path). Idempotent.
+   */
   resume(): void {
-    throw new NotSupportedError('Worker.resume is not implemented in v1')
+    this.native.resume()
   }
 
-  /** Always `false` in v1. */
+  /**
+   * Whether this worker is paused via {@link Worker.pause}. Does not
+   * reflect a cross-process {@link Queue.pause}.
+   */
   isPaused(): boolean {
-    return false
+    return this.native.isPaused()
   }
 
   /** Whether the engine loop is currently running. */
