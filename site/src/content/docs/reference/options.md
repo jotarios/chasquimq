@@ -119,6 +119,7 @@ exists.
 |---|---|---|---|---|
 | Main stream `MAXLEN ~` | (engine default) | `Queue(max_stream_len=...)` (default engine **1_000_000**) | `ProducerConfig::max_stream_len` (**1_000_000**) | Cap on the main stream. |
 | Max scheduling delay (s) | (engine default) | `Queue(max_delay_secs=...)` (default engine **2_592_000**) | `ProducerConfig::max_delay_secs` (**30 days**) | Reject `add_in` / `add_at` whose delay exceeds this. |
+| Max payload size (bytes) | `ProducerOpts.maxPayloadBytes` (native; default engine **1_048_576**) | `Queue(max_payload_bytes=...)` (default engine **1_048_576**) | `ProducerConfig::max_payload_bytes` (**1_048_576**) | Reject any `add*` / `upsert_repeatable` whose encoded payload exceeds this, *before* the Redis write. Mirrors the consumer-side oversize-payload threshold for symmetric produce/consume semantics. |
 | Job name length (bytes) | (256, enforced at FFI) | (256, enforced at FFI) | `MAX_NAME_LEN` (**256**) | UTF-8 dispatch name cap. |
 
 ## See also
