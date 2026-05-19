@@ -357,8 +357,8 @@ class Queue:
         stops dispatching new jobs at its next batch boundary while
         in-flight jobs drain and producers keep enqueueing. The pause
         survives worker restarts until :meth:`resume`. Idempotent. This
-        is the queue-wide analogue of BullMQ's ``Queue.pause()``; for a
-        single in-process worker use :meth:`Worker.pause` instead.
+        is the queue-wide control; for a single in-process worker use
+        :meth:`Worker.pause` instead.
         """
         producer = self._get_producer()
         await producer.pause()

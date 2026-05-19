@@ -158,7 +158,7 @@ Available on both `Queue` (producer pool) and `Worker` (consumer). `0` or `None`
 
 ### Pausing and resuming
 
-Two levels of pause, both consumer-side: workers stop pulling new jobs, jobs already in flight finish, producers keep enqueueing. Modelled on BullMQ's worker pause.
+Two levels of pause, both consumer-side: workers stop pulling new jobs, jobs already in flight finish, producers keep enqueueing.
 
 `Worker.pause()` is **process-local** — it stops just that worker instance. Resume is instant. (These are synchronous calls — no `await`.)
 

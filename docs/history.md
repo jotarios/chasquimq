@@ -188,7 +188,7 @@ A behavioural "stops after exactly N attempts" assertion needs a flapping Redis 
 
 **Date:** 2026-05-16. **Branch:** `feat/pause-resume`.
 
-Consumer-side stop-dispatch pause/resume across the full stack — engine primitive + Rust API, Node shim, Python shim, `chasqui` CLI, all doc surfaces, bench regression check. Semantics mirror BullMQ's worker pause: when paused the reader stops `XREADGROUP` / stops handing jobs to the worker pool at the next batch boundary; in-flight jobs drain; producers, promoter, scheduler and relocators keep running (the stream backlog grows while paused, intentionally); resume restarts reading. The three pre-existing `NotSupportedError` / "not implemented in v1" stubs (`Queue.pause/resume`, `Worker.pause/resume`) are now real.
+Consumer-side stop-dispatch pause/resume across the full stack — engine primitive + Rust API, Node shim, Python shim, `chasqui` CLI, all doc surfaces, bench regression check. Semantics: when paused the reader stops `XREADGROUP` / stops handing jobs to the worker pool at the next batch boundary; in-flight jobs drain; producers, promoter, scheduler and relocators keep running (the stream backlog grows while paused, intentionally); resume restarts reading. The three pre-existing `NotSupportedError` / "not implemented in v1" stubs (`Queue.pause/resume`, `Worker.pause/resume`) are now real.
 
 Mechanism (locked by the engineering review before any code landed): two independent signals, both observed by the reader **only at batch boundaries** — never per-job, never on the produce path, so the "no new hot-path round trip" constraint holds.
 

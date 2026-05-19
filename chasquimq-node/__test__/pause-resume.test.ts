@@ -89,7 +89,7 @@ d('Worker.pause()/resume()/isPaused() (process-local)', () => {
     // handed to a handler still drains. Wait for the count to stabilize
     // (two consecutive equal reads) before snapshotting — racing the
     // snapshot against an in-flight drain is a test bug, not an engine
-    // bug (it IS BullMQ-equivalent semantics).
+    // bug (drain-on-pause is the documented semantics).
     let prev = -1
     while (prev !== processed) {
       prev = processed

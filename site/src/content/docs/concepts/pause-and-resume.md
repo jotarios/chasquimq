@@ -5,7 +5,7 @@ sidebar:
   order: 8
 ---
 
-Pause in ChasquiMQ is **consumer-side stop-dispatch**, the same model as BullMQ's worker pause. When a queue is paused, consumers stop reading new jobs and stop handing them to handlers. Three things keep happening:
+Pause in ChasquiMQ is **consumer-side stop-dispatch**. When a queue is paused, consumers stop reading new jobs and stop handing them to handlers. Three things keep happening:
 
 - **In-flight jobs drain.** A job already handed to a handler runs to completion. Pause stops *future* reads, it never truncates work in progress.
 - **Producers keep enqueueing.** `Queue.add()` is unaffected. The stream backlog grows while paused — that is correct and intended. Resume drains it.

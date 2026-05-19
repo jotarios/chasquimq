@@ -59,7 +59,7 @@ What the engine guarantees regardless of policy: every accepted handler delivery
 
 ## Pause / resume
 
-Consumer-side stop-dispatch, modelled on BullMQ's worker pause. When paused, the reader stops issuing `XREADGROUP` and stops handing jobs to the worker pool at the **next batch boundary**; jobs already dispatched to handlers drain to completion; producers (and the promoter/scheduler/relocators) are unaffected — the stream backlog grows while paused, by design.
+Consumer-side stop-dispatch. When paused, the reader stops issuing `XREADGROUP` and stops handing jobs to the worker pool at the **next batch boundary**; jobs already dispatched to handlers drain to completion; producers (and the promoter/scheduler/relocators) are unaffected — the stream backlog grows while paused, by design.
 
 Two independent signals, both observed by the reader only at batch boundaries — never per-job, never on the produce path:
 
