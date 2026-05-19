@@ -681,3 +681,11 @@ function buildNativeAddOptions(
   if (name) out.name = name;
   return out;
 }
+
+/**
+ * @internal Test-only surface for the URL builders. Not re-exported from
+ * `index.ts`, so it never reaches the public package API. Imported
+ * directly from `dist/queue.js` by `__test__/cluster-url.test.ts` to
+ * unit-test scheme handling without opening a Redis connection.
+ */
+export const __urlInternals = { buildRedisUrl, applyTls }
