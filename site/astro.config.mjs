@@ -99,6 +99,10 @@ export default defineConfig({
               label: "Produce from AWS Lambda",
               slug: "guides/produce-from-aws-lambda",
             },
+            {
+              label: "Connect to a Redis Cluster",
+              slug: "guides/connect-to-redis-cluster",
+            },
             { label: "Migrate from BullMQ", slug: "guides/migrate-from-bullmq" },
             {
               label: "Migrate from Sidekiq or Celery",
@@ -131,6 +135,7 @@ export default defineConfig({
             { label: "Result backends", slug: "concepts/result-backends" },
             { label: "The scheduler", slug: "concepts/the-scheduler" },
             { label: "Pause and resume", slug: "concepts/pause-and-resume" },
+            { label: "Redis Cluster", slug: "concepts/redis-cluster" },
             {
               label: "Architecture decisions",
               slug: "concepts/architecture-decisions",

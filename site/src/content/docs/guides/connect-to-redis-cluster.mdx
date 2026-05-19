@@ -1,0 +1,103 @@
+---
+title: Connect to a Redis Cluster
+description: Point a producer and worker fleet at a multi-shard Redis Cluster (ElastiCache Cluster mode, self-hosted) — the URL scheme, TLS, and what to verify.
+sidebar:
+  order: 13
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+This is the operational recipe. For *why* it works — the hash-tag invariant and slot routing — read [Redis Cluster](/concepts/redis-cluster/).
+
+## 1. Use a cluster URL scheme
+
+You change the scheme, nothing else. One seed node is enough; the rest of the topology is discovered automatically.
+
+<Tabs>
+<TabItem label="Rust">
+
+```rust
+use chasquimq::{Producer, config::ProducerConfig};
+
+let producer: Producer<MyJob> = Producer::connect(
+    "redis-cluster://seed.cache.amazonaws.com:6379",
+    ProducerConfig { queue_name: "orders".into(), ..Default::default() },
+).await?;
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+from chasquimq import Queue
+
+async with Queue("orders", redis_url="redis-cluster://seed.cache.amazonaws.com:6379") as queue:
+    await queue.add({"id": 1})
+```
+
+</TabItem>
+<TabItem label="Node">
+
+```ts
+import { Queue } from "chasquimq";
+
+const queue = new Queue("orders", {
+  connection: { host: "seed.cache.amazonaws.com", port: 6379, cluster: true },
+});
+await queue.add({ id: 1 });
+```
+
+</TabItem>
+</Tabs>
+
+Add more seed nodes with `?node=host:port` (repeatable): `redis-cluster://seed1:6379?node=seed2:6379&node=seed3:6379`.
+
+## 2. Add TLS for ElastiCache encryption-in-transit
+
+The `-cluster` part of the scheme is preserved when you layer TLS — you get `rediss-cluster://`, never a broken `rediss://redis-cluster://`.
+
+<Tabs>
+<TabItem label="Rust">
+
+```rust
+// Pass the TLS cluster scheme directly.
+Producer::connect("rediss-cluster://seed.cache.amazonaws.com:6379", cfg).await?;
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+# tls=True keeps the -cluster scheme (-> rediss-cluster://).
+Queue("orders", redis_url="redis-cluster://seed.cache.amazonaws.com:6379", tls=True)
+```
+
+</TabItem>
+<TabItem label="Node">
+
+```ts
+// cluster: true composes with tls: true.
+new Queue("orders", {
+  connection: { host: "seed.cache.amazonaws.com", port: 6379, cluster: true, tls: true },
+});
+```
+
+</TabItem>
+</Tabs>
+
+Trust roots come from the platform store; point `SSL_CERT_FILE` at a PEM bundle for private CAs. Rotating IAM tokens work on a cluster too — see [Produce jobs from AWS Lambda](/guides/produce-from-aws-lambda/) and the `credential_provider` row in the [options reference](/reference/options/).
+
+## 3. Point the whole fleet at the same seed
+
+Producer, worker, and (Python) `QueueEvents` all take the same connection. Use the same `*-cluster://` seed everywhere — they each rediscover the topology independently.
+
+## 4. Verify
+
+Two things confirm a healthy cluster connection:
+
+- **No `CROSSSLOT` errors in logs.** If you ever see one, a key escaped the `{chasqui:<queue>}` hash tag — that is a bug, file it.
+- **Jobs flow end to end.** Enqueue, consume, and (if you use them) a delayed job and a DLQ route. The engine's own cluster integration suite (`chasquimq/tests/cluster.rs`, runnable locally via `scripts/test-cluster.sh`) exercises exactly these paths against a real 3-shard cluster.
+
+## Scope notes
+
+A queue is single-slot by design (that is what keeps the multi-key Lua scripts atomic). You scale across shards by running more queues, which spread naturally. Cross-queue atomic operations are not supported on a cluster — and are not supported on single-node Redis either, so this is not a cluster-specific limitation.

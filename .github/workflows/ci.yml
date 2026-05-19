@@ -82,3 +82,55 @@ jobs:
       # service container above and must run the full suite.
       - name: cargo test
         run: cargo test --workspace -- --include-ignored
+
+  cluster:
+    name: cluster
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+
+      # Minimal 3-primary, 0-replica cluster: the smallest topology that
+      # still spreads the 16384 hash slots across multiple nodes, which is
+      # what proves the `{chasqui:<queue>}` hash tag co-locates a queue's
+      # keyspace on one slot (no CROSSSLOT on the multi-key Lua scripts).
+      # Kept as its own job so the single-node `test` job above is
+      # untouched and a cluster-infra flake can't mask a unit regression.
+      - name: Start Redis Cluster
+        run: |
+          docker run -d --name chasquimq-ci-cluster \
+            -p 7000:7000 -p 7001:7001 -p 7002:7002 \
+            redis:8.6.2 \
+            bash -c "
+              for p in 7000 7001 7002; do
+                redis-server --port \$p --cluster-enabled yes \
+                  --cluster-config-file nodes-\$p.conf \
+                  --cluster-node-timeout 5000 \
+                  --appendonly no --save '' --daemonize yes
+              done
+              sleep 1
+              yes yes | redis-cli --cluster create \
+                127.0.0.1:7000 127.0.0.1:7001 127.0.0.1:7002 \
+                --cluster-replicas 0
+              tail -f /dev/null
+            "
+          for _ in $(seq 1 60); do
+            if docker exec chasquimq-ci-cluster redis-cli -p 7000 cluster info 2>/dev/null | grep -q "cluster_state:ok"; then
+              echo "cluster ready"; exit 0
+            fi
+            sleep 1
+          done
+          echo "cluster did not reach cluster_state:ok" >&2
+          docker logs chasquimq-ci-cluster >&2 || true
+          exit 1
+
+      - name: cargo test --test cluster
+        env:
+          REDIS_CLUSTER_URL: redis-cluster://127.0.0.1:7000
+        run: cargo test --manifest-path chasquimq/Cargo.toml --test cluster -- --include-ignored

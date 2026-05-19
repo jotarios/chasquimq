@@ -18,8 +18,11 @@ Slice 11 (May 2026) added cloud-Redis prerequisites — TLS via `rediss://`, `Co
 
 - Opt-in result-write bench scenario (`store_results=true` sustained throughput).
 - `maxmemory` eviction-behavior verification (engine behavior under Redis eviction policies has not been exercised end-to-end).
+- All-primaries `SCRIPT LOAD` preload (cluster startup optimization — the `NOSCRIPT`→`EVAL` self-heal already makes cluster correct; eager preload is an optional perf nicety, see `docs/history.md`).
 
 Cross-FFI credential-provider callbacks for the Node and Python shims shipped in v1.3.0 (PRs #132–#133) — no longer deferred.
+
+Redis Cluster support shipped (May 2026) — connect with a `redis-cluster://` / `rediss-cluster://` URL (or Node `connection.cluster: true`). The engine was already cluster-correct (the `{chasqui:<queue>}` hash tag co-locates a queue's keyspace on one slot; every command uses `ClusterHash::FirstKey`); the slice fixed two shim TLS-URL bugs, added a real-cluster integration test + CI job, and synced docs. See `docs/history.md`.
 
 ## Workspace
 
@@ -72,7 +75,7 @@ These are not preferences — they're the product's reason to exist. Do not sile
 
 ### Rust client
 
-Engine uses `redis-rs` for the producer/consumer hot paths and `fred` in `chasquimq-cli` for ergonomic pipelining. Both support pipelining and Streams natively. Don't introduce a third client.
+Engine uses `fred` on the producer/consumer hot paths (and `chasquimq-cli` also uses `fred` for ergonomic pipelining). fred supports pipelining, Streams, and Redis Cluster natively. Don't introduce a second client — there is exactly one (`fred`); the only other allowed Redis client is none.
 
 ## Phased scope
 
