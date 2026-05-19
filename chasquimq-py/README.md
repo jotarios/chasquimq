@@ -87,6 +87,23 @@ async with Queue("emails", redis_url="rediss://my-cluster.cache.amazonaws.com:63
 
 Trust roots come from the platform store via `rustls-native-certs`: keychain on macOS, the OS CA bundle on Linux (probed by `openssl-probe`), system store on Windows — so AWS Trust CA-signed endpoints work out of the box. For private CAs, point `SSL_CERT_FILE` at a PEM bundle before launching Python; that env var takes precedence over the platform store.
 
+### Redis Cluster
+
+For a multi-shard Redis Cluster (ElastiCache Cluster mode enabled, self-hosted Redis Cluster), pass a `redis-cluster://` URL as `redis_url`. Layer TLS with `tls=True` (the cluster scheme is preserved, becoming `rediss-cluster://`) or pass `rediss-cluster://` directly:
+
+```python
+async with Queue("emails", redis_url="redis-cluster://seed.cache.amazonaws.com:6379") as queue:
+    ...
+# TLS + cluster (tls=True keeps the -cluster scheme):
+async with Queue("emails", redis_url="redis-cluster://seed.cache.amazonaws.com:6379", tls=True) as queue:
+    ...
+# or an explicit URL (extra seeds via ?node=):
+async with Queue("emails", redis_url="rediss-cluster://seed:6379?node=seed2:6379") as queue:
+    ...
+```
+
+One seed node is enough — the rest of the topology is discovered automatically, and `MOVED`/`ASK` redirections plus failover are handled for you. Every key for a queue shares a `{chasqui:<queue>}` hash tag, so the queue's whole keyspace (stream, delayed, DLQ, results, locks, events) lives on a single slot and the engine's atomic operations stay correct. A queue is single-slot by design; cross-queue atomic operations are not supported on a cluster (they are not supported on single-node Redis either). `Worker` and `QueueEvents` take the same `redis_url`, so point all three at the same `*-cluster://` seed.
+
 ### Rotating IAM tokens / `credential_provider`
 
 For Redis deployments that use short-lived auth tokens — most notably **AWS ElastiCache IAM auth**, where tokens expire roughly every 15 minutes — pass an async `credential_provider` callback. The engine calls it before every `AUTH` / `HELLO` command (initial connect and every reconnect), so a long-lived `Queue` / `Worker` stays authenticated through token rotation without rebuilding.

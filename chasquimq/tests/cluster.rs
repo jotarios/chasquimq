@@ -234,9 +234,9 @@ async fn cluster_dlq_relocate() {
         consumer
             .run(
                 move |_job| async move {
-                    Err::<chasquimq::Bytes, _>(chasquimq::HandlerError::new(
-                        std::io::Error::other("always fails"),
-                    ))
+                    Err::<chasquimq::Bytes, _>(chasquimq::HandlerError::new(std::io::Error::other(
+                        "always fails",
+                    )))
                 },
                 shutdown_clone,
             )

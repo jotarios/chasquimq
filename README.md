@@ -213,6 +213,7 @@ In-repo: [`docs/engine.md`](docs/engine.md) (engine internals), [`docs/history.m
 | First-class observability hooks | ✓ (`MetricsSink`) | 3rd-party | 3rd-party | — |
 | TLS (`rediss://`, ElastiCache encryption-in-transit) | ✓ | ✓ | ✓ | ✓ |
 | TCP keepalive + automatic reconnect tuning | ✓ (`ConnectionTuning`) | partial | — | — |
+| Redis Cluster (multi-shard / ElastiCache Cluster) | ✓ (`redis-cluster://`) | ✓ | ✓ | — |
 | Rotating-token credential hook (ElastiCache IAM) | ✓ (Rust) | — | — | — |
 | CLI dashboard | ✓ (`chasqui`) | 3rd-party | 3rd-party | — |
 | Priorities | Future | ✓ | ✓ | — |

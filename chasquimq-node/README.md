@@ -90,6 +90,20 @@ const conn = { url: "rediss://my-cluster.cache.amazonaws.com:6379" }
 
 Trust roots come from the platform store via `rustls-native-certs`: keychain on macOS, the OS CA bundle on Linux (probed by `openssl-probe`), system store on Windows — so AWS Trust CA-signed endpoints work out of the box. For private CAs, point `SSL_CERT_FILE` at a PEM bundle before launching Node; that env var takes precedence over the platform store.
 
+### Redis Cluster
+
+For a multi-shard Redis Cluster (ElastiCache Cluster mode enabled, self-hosted Redis Cluster), set `cluster: true` on `connection`, or pass a `redis-cluster://` URL directly:
+
+```ts
+const conn = { host: "seed.cache.amazonaws.com", port: 6379, cluster: true }
+// TLS + cluster:
+const conn = { host: "seed.cache.amazonaws.com", port: 6379, cluster: true, tls: true }
+// or an explicit URL (extra seeds via ?node=):
+const conn = { url: "redis-cluster://seed:6379?node=seed2:6379" }
+```
+
+One seed node is enough — the rest of the topology is discovered automatically, and `MOVED`/`ASK` redirections plus failover are handled for you. Every key for a queue shares a `{chasqui:<queue>}` hash tag, so the queue's whole keyspace (stream, delayed, DLQ, results, locks, events) lives on a single slot and the engine's atomic operations stay correct. A queue is single-slot by design; cross-queue atomic operations are not supported on a cluster (they are not supported on single-node Redis either). An explicit `url` wins over `cluster` / `tls`, so a `rediss-cluster://` URL connects to a TLS cluster as-is.
+
 ### Rotating IAM tokens
 
 For deployments that use short-lived auth tokens (ElastiCache IAM auth, Vault, AWS Secrets Manager, GCP Secret Manager, ...), pass an async `credentialProvider` on `connection`. The engine invokes it on every reconnect / `AUTH` cycle — never per job, so the hot path is unaffected:
