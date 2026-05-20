@@ -697,6 +697,82 @@ async fn get_jobs_paginates_delayed() {
 
 #[tokio::test]
 #[ignore = "requires REDIS_URL"]
+async fn get_jobs_paginates_delayed_with_tied_scores() {
+    // Regression: multiple delayed members sharing a single fire-ms
+    // (cron specs firing on the minute, identical add_at scores) must
+    // not be dropped at the page boundary. The cursor encodes
+    // score:offset_into_score so a tied tail resumes cleanly.
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let admin = admin().await;
+    let queue = "iq_page_delayed_ties";
+    flush_all(&admin, queue).await;
+
+    let producer: Producer<Sample> = Producer::connect(&redis_url(), producer_cfg(queue))
+        .await
+        .expect("connect");
+    // Five tied-score jobs scheduled for a fixed absolute time far in
+    // the future, then five with distinct later scores.
+    let tied_at = SystemTime::now() + Duration::from_secs(7200);
+    let tied_ms = tied_at
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_millis();
+    let tied_at = UNIX_EPOCH + Duration::from_millis(tied_ms as u64);
+    for n in 0..5_u32 {
+        producer
+            .add_at(
+                tied_at,
+                Sample {
+                    n,
+                    s: "tied".into(),
+                },
+            )
+            .await
+            .expect("add_at tied");
+    }
+    for n in 0..5_u32 {
+        producer
+            .add_in(
+                Duration::from_secs(7300 + n as u64),
+                Sample {
+                    n,
+                    s: "distinct".into(),
+                },
+            )
+            .await
+            .expect("add_in distinct");
+    }
+
+    let insp = introspector(queue).await;
+    let mut total = 0;
+    let mut cursor: Option<String> = None;
+    let mut pages = 0;
+    // Page size 3 forces a boundary mid-tied-cluster: page 1 emits 3 of
+    // the 5 tied members; page 2 must emit the other 2 (not skip
+    // them).
+    loop {
+        let page = insp
+            .get_jobs(JobState::Delayed, 0, 3, cursor.clone())
+            .await
+            .expect("page");
+        total += page.jobs.len();
+        pages += 1;
+        if page.next_cursor.is_none() {
+            break;
+        }
+        cursor = page.next_cursor;
+        assert!(pages < 20, "runaway pagination");
+    }
+    assert_eq!(total, 10, "all 10 delayed jobs must page out");
+
+    producer.shutdown().await.ok();
+    insp.shutdown().await.ok();
+    admin.quit().await.ok();
+}
+
+#[tokio::test]
+#[ignore = "requires REDIS_URL"]
 async fn get_jobs_paginates_failed() {
     let admin = admin().await;
     let queue = "iq_page_failed";

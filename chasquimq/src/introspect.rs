@@ -574,16 +574,33 @@ impl Introspector {
         limit: u64,
         cursor: Option<String>,
     ) -> Result<JobsPage> {
-        let lo = match cursor.as_deref() {
-            Some(c) if !c.is_empty() => format!("({c}"),
-            _ => "0".to_string(),
+        // Cursor encoding: `<score>:<offset_into_score>` so we can resume
+        // mid-score when multiple delayed members share a fire-ms (cron
+        // specs firing on the minute, or `add_in` calls with identical
+        // delays). The plain `(score` cursor would skip every tied
+        // member at that score — silent data loss.
+        let (lo, score_skip) = match cursor.as_deref() {
+            Some(c) if !c.is_empty() => match parse_delayed_cursor(c) {
+                // Inclusive lower bound on ZRANGEBYSCORE is a plain
+                // number (no `[` prefix — that's ZRANGEBYLEX syntax).
+                Some((score, skip)) => (format!("{score}"), skip),
+                None => {
+                    // Backward-compat: a legacy bare-score cursor is
+                    // honored as exclusive (same as before this fix).
+                    (format!("({c}"), 0)
+                }
+            },
+            _ => ("0".to_string(), 0),
         };
-        // ZRANGEBYSCORE with WITHSCORES so we can record the cursor.
         let client = self.pool.next_connected();
         let cmd = CustomCommand::new_static("ZRANGEBYSCORE", ClusterHash::FirstKey, false);
-        // First page honors offset; later pages get offset 0 since the
-        // exclusive `(` cursor already skipped what we've emitted.
-        let zoffset = if cursor.is_none() { offset as i64 } else { 0 };
+        // First page honors offset; later pages use `score_skip` to step
+        // past members at the boundary score we've already emitted.
+        let zoffset = if cursor.is_none() {
+            offset as i64
+        } else {
+            score_skip as i64
+        };
         let take_hint = limit.saturating_add(1) as i64;
         let args = vec![
             Value::from(self.delayed_key.as_ref()),
@@ -598,6 +615,10 @@ impl Introspector {
         let pairs = parse_zrange_withscores(&v);
         let mut jobs = Vec::with_capacity(limit as usize);
         let mut last_score: Option<i64> = None;
+        // Count of consecutive same-score entries we've emitted at the
+        // tail of this page — drives the `score_skip` in the next
+        // cursor so a tied-score boundary doesn't drop members.
+        let mut tail_same_score_count: u64 = 0;
         let mut over_by_one = false;
         for (idx, (member, score)) in pairs.into_iter().enumerate() {
             if idx >= limit as usize {
@@ -637,10 +658,26 @@ impl Introspector {
                 failure_detail: None,
                 decode_failed: false,
             });
+            match last_score {
+                Some(prev) if prev == score => {
+                    tail_same_score_count = tail_same_score_count.saturating_add(1);
+                }
+                _ => {
+                    // Score boundary: reset the consecutive same-score
+                    // counter. score_skip carried over from the cursor
+                    // only applies to entries with that exact score.
+                    let inherited = if last_score.is_none() {
+                        score_skip
+                    } else {
+                        0
+                    };
+                    tail_same_score_count = inherited.saturating_add(1);
+                }
+            }
             last_score = Some(score);
         }
         let next_cursor = if over_by_one {
-            last_score.map(|s| s.to_string())
+            last_score.map(|s| format!("{}:{}", s, tail_same_score_count))
         } else {
             None
         };
@@ -1053,6 +1090,16 @@ fn stream_id_ms(id: &str) -> Option<u64> {
         .and_then(|(ms, _)| ms.parse::<u64>().ok())
 }
 
+/// Parse a delayed-page cursor of the form `<score>:<offset_into_score>`.
+/// Returns `(score, offset)` on success; `None` for legacy bare-score
+/// cursors so callers can fall back to the old exclusive-bound shape.
+fn parse_delayed_cursor(s: &str) -> Option<(i64, u64)> {
+    let (score, off) = s.split_once(':')?;
+    let score = score.parse::<i64>().ok()?;
+    let off = off.parse::<u64>().ok()?;
+    Some((score, off))
+}
+
 fn parse_zrange_withscores(v: &Value) -> Vec<(Bytes, i64)> {
     let items = match v {
         Value::Array(items) => items,
@@ -1258,5 +1305,19 @@ mod tests {
             clamp_limit(STREAM_SCAN_PAGE_MAX + 100),
             STREAM_SCAN_PAGE_MAX
         );
+    }
+
+    #[test]
+    fn delayed_cursor_parser_round_trips() {
+        assert_eq!(parse_delayed_cursor("12345:3"), Some((12345, 3)));
+        assert_eq!(parse_delayed_cursor("-1:0"), Some((-1, 0)));
+        // Legacy bare-score cursors do not parse — the production
+        // code falls back to the exclusive-bound interpretation.
+        assert_eq!(parse_delayed_cursor("12345"), None);
+        assert_eq!(parse_delayed_cursor(""), None);
+        assert_eq!(parse_delayed_cursor(":3"), None);
+        assert_eq!(parse_delayed_cursor("12345:"), None);
+        assert_eq!(parse_delayed_cursor("abc:3"), None);
+        assert_eq!(parse_delayed_cursor("12345:abc"), None);
     }
 }
