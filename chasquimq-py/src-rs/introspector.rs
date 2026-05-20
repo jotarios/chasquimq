@@ -11,10 +11,10 @@ use chasquimq::{
     ConnectionTuning, Introspector as EngineIntrospector, JobInfo as EngineJobInfo,
     JobState as EngineJobState,
 };
+use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
-use pyo3::IntoPyObjectExt;
 use std::sync::Arc;
 
 #[pyclass(name = "Introspector", module = "chasquimq._native")]
@@ -60,13 +60,8 @@ impl Introspector {
         let inner = py
             .detach(|| {
                 runtime.block_on(async move {
-                    EngineIntrospector::connect(
-                        &redis_url,
-                        &queue_name,
-                        &tuning,
-                        group.as_deref(),
-                    )
-                    .await
+                    EngineIntrospector::connect(&redis_url, &queue_name, &tuning, group.as_deref())
+                        .await
                 })
             })
             .map_err(map_engine_err)?;
@@ -100,11 +95,7 @@ impl Introspector {
         })
     }
 
-    fn get_job_state<'py>(
-        &self,
-        py: Python<'py>,
-        job_id: String,
-    ) -> PyResult<Bound<'py, PyAny>> {
+    fn get_job_state<'py>(&self, py: Python<'py>, job_id: String) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let state = inner.get_job_state(&job_id).await.map_err(map_engine_err)?;
@@ -112,11 +103,7 @@ impl Introspector {
         })
     }
 
-    fn get_job<'py>(
-        &self,
-        py: Python<'py>,
-        job_id: String,
-    ) -> PyResult<Bound<'py, PyAny>> {
+    fn get_job<'py>(&self, py: Python<'py>, job_id: String) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let opt = inner.get_job(&job_id).await.map_err(map_engine_err)?;
@@ -168,10 +155,7 @@ impl Introspector {
     }
 }
 
-fn job_info_to_dict<'py>(
-    py: Python<'py>,
-    info: &EngineJobInfo,
-) -> PyResult<Bound<'py, PyDict>> {
+fn job_info_to_dict<'py>(py: Python<'py>, info: &EngineJobInfo) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     d.set_item("id", &info.id)?;
     d.set_item("name", &info.name)?;

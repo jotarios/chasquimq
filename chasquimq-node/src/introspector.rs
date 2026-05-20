@@ -6,9 +6,7 @@
 
 use crate::credential_provider::{CredentialProviderTsfn, build_js_credential_provider};
 use crate::producer::map_engine_err;
-use chasquimq::{
-    ConnectionTuning, Introspector as EngineIntrospector, JobState as EngineJobState,
-};
+use chasquimq::{ConnectionTuning, Introspector as EngineIntrospector, JobState as EngineJobState};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use std::sync::Arc;

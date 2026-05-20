@@ -666,11 +666,7 @@ impl Introspector {
                     // Score boundary: reset the consecutive same-score
                     // counter. score_skip carried over from the cursor
                     // only applies to entries with that exact score.
-                    let inherited = if last_score.is_none() {
-                        score_skip
-                    } else {
-                        0
-                    };
+                    let inherited = if last_score.is_none() { score_skip } else { 0 };
                     tail_same_score_count = inherited.saturating_add(1);
                 }
             }
