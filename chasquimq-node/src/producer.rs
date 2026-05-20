@@ -34,6 +34,12 @@ pub struct ProducerOpts {
     /// Reject `addIn` / `addAt` calls whose delay exceeds this many seconds.
     /// Default matches the engine: 30 days.
     pub max_delay_secs: Option<i64>,
+    /// Producer-side ingress cap on the encoded (MessagePack) byte length
+    /// of a single job payload. Any `add*` / repeatable upsert whose
+    /// encoded payload exceeds this is rejected before anything is written
+    /// to Redis. Default matches the engine: 1_048_576 (1 MiB). Negative
+    /// values are ignored (the engine default stands).
+    pub max_payload_bytes: Option<i64>,
     /// Cap on fred's exponential reconnect attempts. `0` (the engine
     /// default) = retry forever. Set a positive value so a permanently
     /// rejecting `credentialProvider` gives up instead of looping
@@ -501,6 +507,11 @@ fn build_producer_config(opts: Option<ProducerOpts>) -> ProducerConfig {
         if let Some(d) = o.max_delay_secs {
             if d >= 0 {
                 cfg.max_delay_secs = d as u64;
+            }
+        }
+        if let Some(b) = o.max_payload_bytes {
+            if b >= 0 {
+                cfg.max_payload_bytes = b as usize;
             }
         }
         if let Some(n) = o.reconnect_max_attempts {

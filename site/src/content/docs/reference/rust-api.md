@@ -44,6 +44,7 @@ pub struct ProducerConfig {
     pub pool_size: usize,
     pub max_stream_len: u64,
     pub max_delay_secs: u64,
+    pub max_payload_bytes: usize,
     pub connection: ConnectionTuning,
 }
 ```
@@ -52,6 +53,7 @@ pub struct ProducerConfig {
 - `pool_size` — `fred` connection pool size. **Default `8`.**
 - `max_stream_len` — `XADD MAXLEN ~` cap on the main stream. **Default `1_000_000`.**
 - `max_delay_secs` — reject `add_in` / `add_at` calls whose delay exceeds this. **Default `30 * 24 * 3600` (30 days).**
+- `max_payload_bytes` — reject any `add*` / `upsert_repeatable` whose encoded (MessagePack) payload exceeds this, with `Error::Config`, *before* any Redis write. Mirrors [`ConsumerConfig::max_payload_bytes`](#consumerconfig) (the consumer-side oversize-on-read → DLQ cap) so produce and consume agree. **Default `1_048_576` (1 MiB).**
 - `connection` — TCP keepalive, reconnect policy, and credential-rotation hook. See [`ConnectionTuning`](#connectiontuning).
 
 ### `ConsumerConfig`

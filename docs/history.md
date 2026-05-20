@@ -207,6 +207,26 @@ Bench (same-session A/B, `main` `f4a0abd` vs branch, settled host load ~2.5): `q
 
 Doc surfaces synced: this slice, `docs/engine.md` (new "Pause / resume" section + an operational-notes bullet on the no-TTL durable semantics), `reference/options.md` (`pause_poll_ms`), `reference/{node-api,python-api,rust-api,cli}.md`, a new `concepts/pause-and-resume.md` registered in `site/astro.config.mjs`, both shim READMEs (symmetric "Pausing and resuming" sections), and the root `README.md` feature table.
 
+## Producer-side `max_payload_bytes` ingress cap
+
+**Date:** 2026-05-20. **Branch:** `feat/producer-max-payload-bytes`.
+
+Closes a produce/consume asymmetry surfaced during review: `max_payload_bytes` existed only on `ConsumerConfig` (enforced at read time in `reader.rs` — oversize-on-read routes to the DLQ), while `ProducerConfig` had no size guard at all. A 64 MiB spec was accepted by `upsert_repeatable` and persisted as ~160 MiB in the repeat hash, which the scheduler then re-`HGET`s and double-decodes every tick for the spec's lifetime. The producer could write payloads the consumer would only ever reject.
+
+New `ProducerConfig::max_payload_bytes: usize` (default `1_048_576`, identical to the consumer default, so an operator setting both gets symmetric semantics). Enforcement is a single private `Producer::check_payload_size(len)` returning `Error::Config` when the **encoded** (MessagePack) byte length exceeds the cap — same unit and `>` boundary as the consumer-side `entry.payload.len() > cfg.max_payload_bytes` check, so produce and consume agree. A thin `Producer::encode_checked(&value)` wraps `rmp_serde::to_vec` + the size check + `Bytes::from` in one call so every produce path routes through it and no call site can forget the guard.
+
+All 13 producer ingress encode sites are covered: the 7 immediate `XADD` paths (`add`, `add_with_id`, `add_with_options`, `add_bulk`, `add_bulk_with_options`, `add_bulk_named`, `add_bulk_with_ids_immediate`) via `encode_checked`, the 4 delayed-ZSET member paths via an explicit `check_payload_size` on the encoded bytes (they feed `encode_delayed_member`, not `Bytes`), and `upsert_repeatable` twice — once on the user `spec.payload` (so the error names the input the caller controls) and once on the larger `stored` envelope (the blob that actually amplifies in Redis). In the bulk paths the check runs inside the encode loop before the pipeline executes, so an oversize job in a batch fails the whole call atomically with zero Redis writes — preserving the existing atomic-encode posture.
+
+The eng-review locked: helper over 13 inline checks (DRY), cap on encoded-bytes length (matches consumer), check both `spec.payload` and `stored` in `upsert_repeatable` (clearer attributable error), and mark the change `BREAKING` — `ProducerConfig` is `#[derive(Debug, Clone)]` with no `#[non_exhaustive]`, so adding a `pub` field breaks any exhaustive struct literal that omits `..Default::default()`. In-repo blast radius is zero (every construction site uses `..Default::default()` or `ProducerConfig::default()` + field assignment), but downstream Rust users constructing the struct exhaustively must add the field.
+
+Cross-FFI surface (symmetric, same shape as the `reconnect_max_attempts` slice): native Node `ProducerOpts.maxPayloadBytes: Option<i64>` (guarded `>= 0`, mirrors `maxStreamLen`), native Python `max_payload_bytes: Option<u64>` kwarg on the `Producer` constructor, and the high-level Python `Queue(max_payload_bytes=...)` plumbed through `_get_producer`. High-level Node `queue.ts` stays native-only for this knob exactly as it already is for `maxStreamLen` / `maxDelaySecs` — kept symmetric, not regressed.
+
+Tests: `chasquimq/tests/producer_payload_cap.rs` — one pure `#[test]` asserting `ProducerConfig::default().max_payload_bytes == 1_048_576 == ConsumerConfig` default (runs in normal CI), plus 4 REDIS_URL-gated cases: oversize `add()` → `Err(Config)` with `XLEN == 0`, under-cap `add()` succeeds with `XLEN == 1`, oversize `upsert_repeatable` → `Err(Config)` with the repeat ZSET empty, under-cap spec persists. Full workspace suite green: 293 Rust tests across 35 suites.
+
+Bench gate (same-host, baseline `benchmarks/chasquimq-1.0.md`): `queue-add-bulk` 188,775 → 188,171 jobs/s (-0.3%, well inside the ±2,911 stddev), `queue-add` 15,366 → 16,703 jobs/s. The single `usize` comparison per encoded payload is noise as predicted; the 3.47× bulk-produce ratio holds.
+
+Doc surfaces synced: this slice, `docs/engine.md` (one operational-notes bullet on the symmetric cap + the lowered-cap-vs-stored-spec gotcha), `reference/options.md` (producer-caps row with Node/Python/Rust columns), `reference/rust-api.md` (`ProducerConfig` field + default bullet), and both shim READMEs (symmetric producer-options entries).
+
 ## Hardened delayed-member Lua decode against malformed members
 
 **Date:** 2026-05-19. **Branch:** `fix/harden-delayed-member-lua-decode`. **PR #143.**

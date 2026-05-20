@@ -139,6 +139,7 @@ pub struct Producer<T> {
     repeat_key: Arc<str>,
     max_stream_len: u64,
     max_delay_secs: u64,
+    max_payload_bytes: usize,
     _marker: PhantomData<fn(T)>,
 }
 
@@ -154,6 +155,7 @@ impl<T> Clone for Producer<T> {
             repeat_key: self.repeat_key.clone(),
             max_stream_len: self.max_stream_len,
             max_delay_secs: self.max_delay_secs,
+            max_payload_bytes: self.max_payload_bytes,
             _marker: PhantomData,
         }
     }
@@ -178,8 +180,39 @@ impl<T: Serialize> Producer<T> {
             repeat_key,
             max_stream_len: config.max_stream_len,
             max_delay_secs: config.max_delay_secs,
+            max_payload_bytes: config.max_payload_bytes,
             _marker: PhantomData,
         })
+    }
+
+    /// Producer-side ingress guard: reject any payload whose **encoded**
+    /// (MessagePack) byte length exceeds [`ProducerConfig::max_payload_bytes`].
+    /// Called once per encoded blob, *before* the Redis write, on every
+    /// produce path (immediate `XADD`, delayed `ZADD`, repeatable hash
+    /// upsert). Symmetric with the consumer-side egress cap enforced at
+    /// read time (oversize-on-read routes to the DLQ); enforcing it here
+    /// stops an oversize job before it ever reaches Redis. Mirrors the
+    /// private [`Self::check_delay_secs`] validation style.
+    fn check_payload_size(&self, len: usize) -> Result<()> {
+        if len > self.max_payload_bytes {
+            return Err(Error::Config(format!(
+                "payload {len} bytes exceeds max_payload_bytes {}",
+                self.max_payload_bytes
+            )));
+        }
+        Ok(())
+    }
+
+    /// Encode `value` with MessagePack and enforce
+    /// [`Self::check_payload_size`] on the encoded length in one step,
+    /// returning the bytes ready for the Redis write. Every produce path
+    /// routes its `rmp_serde::to_vec` through here so the ingress cap is
+    /// applied uniformly and exactly once per encoded blob, with no
+    /// chance of a call site forgetting the check.
+    fn encode_checked<S: Serialize>(&self, value: &S) -> Result<Bytes> {
+        let encoded = rmp_serde::to_vec(value)?;
+        self.check_payload_size(encoded.len())?;
+        Ok(Bytes::from(encoded))
     }
 
     pub fn producer_id(&self) -> &str {
@@ -532,6 +565,10 @@ impl<T: Serialize> Producer<T> {
         }
 
         let payload_bytes = rmp_serde::to_vec(&spec.payload)?;
+        // Check the user payload first so the error names the input the
+        // caller actually controls. The `stored` envelope below is a
+        // strict superset; checking both keeps the message attributable.
+        self.check_payload_size(payload_bytes.len())?;
         let stored = StoredSpec {
             key: resolved_key.clone(),
             job_name: spec.job_name.clone(),
@@ -543,7 +580,10 @@ impl<T: Serialize> Producer<T> {
             fired: 0,
             missed_fires: spec.missed_fires,
         };
-        let stored_bytes = Bytes::from(rmp_serde::to_vec(&stored)?);
+        // The scheduler re-HGETs + double-decodes this blob every tick for
+        // the spec's lifetime, so the envelope length is the figure that
+        // actually amplifies in Redis — gate it too.
+        let stored_bytes = self.encode_checked(&stored)?;
         let next_fire_i64 = run_at_ms_as_i64(next_fire)?;
 
         let client = self.pool.next_connected();
@@ -598,14 +638,14 @@ impl<T: Serialize> Producer<T> {
     pub async fn add(&self, payload: T) -> Result<JobId> {
         let job = Job::new(payload);
         let id = job.id.clone();
-        let bytes = Bytes::from(rmp_serde::to_vec(&job)?);
+        let bytes = self.encode_checked(&job)?;
         self.xadd(&id, bytes, "").await?;
         Ok(id)
     }
 
     pub async fn add_with_id(&self, id: JobId, payload: T) -> Result<JobId> {
         let job = Job::with_id(id.clone(), payload);
-        let bytes = Bytes::from(rmp_serde::to_vec(&job)?);
+        let bytes = self.encode_checked(&job)?;
         self.xadd(&id, bytes, "").await?;
         Ok(id)
     }
@@ -632,7 +672,7 @@ impl<T: Serialize> Producer<T> {
             job.retry = Some(retry);
         }
         let id = job.id.clone();
-        let bytes = Bytes::from(rmp_serde::to_vec(&job)?);
+        let bytes = self.encode_checked(&job)?;
         self.xadd(&id, bytes, &opts.name).await?;
         Ok(id)
     }
@@ -679,7 +719,7 @@ impl<T: Serialize> Producer<T> {
                 job.retry = Some(retry);
             }
             let id = job.id.clone();
-            let bytes = Bytes::from(rmp_serde::to_vec(&job)?);
+            let bytes = self.encode_checked(&job)?;
             encoded.push((id, bytes));
         }
 
@@ -712,7 +752,7 @@ impl<T: Serialize> Producer<T> {
         for payload in payloads {
             let job = Job::new(payload);
             let id = job.id.clone();
-            let bytes = Bytes::from(rmp_serde::to_vec(&job)?);
+            let bytes = self.encode_checked(&job)?;
             encoded.push((id, bytes));
         }
 
@@ -757,7 +797,7 @@ impl<T: Serialize> Producer<T> {
         for (name, payload) in items {
             let job = Job::new(payload);
             let id = job.id.clone();
-            let bytes = Bytes::from(rmp_serde::to_vec(&job)?);
+            let bytes = self.encode_checked(&job)?;
             encoded.push((id, bytes, name));
         }
 
@@ -993,7 +1033,7 @@ impl<T: Serialize> Producer<T> {
         let mut encoded: Vec<(JobId, Bytes)> = Vec::with_capacity(items.len());
         for (id, payload) in items {
             let job = Job::with_id(id.clone(), payload);
-            let bytes = Bytes::from(rmp_serde::to_vec(&job)?);
+            let bytes = self.encode_checked(&job)?;
             encoded.push((id, bytes));
         }
         let client = self.pool.next_connected();
@@ -1045,6 +1085,7 @@ impl<T: Serialize> Producer<T> {
         }
         let id = job.id.clone();
         let payload_bytes = rmp_serde::to_vec(&job)?;
+        self.check_payload_size(payload_bytes.len())?;
         let member = encode_delayed_member(name, &payload_bytes);
         let client = self.pool.next_connected();
         let cmd = CustomCommand::new_static("ZADD", ClusterHash::FirstKey, false);
@@ -1063,6 +1104,7 @@ impl<T: Serialize> Producer<T> {
             let job = Job::new(payload);
             let id = job.id.clone();
             let payload_bytes = rmp_serde::to_vec(&job)?;
+            self.check_payload_size(payload_bytes.len())?;
             let member = encode_delayed_member("", &payload_bytes);
             encoded.push((id, member));
         }
@@ -1107,6 +1149,7 @@ impl<T: Serialize> Producer<T> {
             job.retry = retry;
         }
         let payload_bytes = rmp_serde::to_vec(&job)?;
+        self.check_payload_size(payload_bytes.len())?;
         let member = encode_delayed_member(name, &payload_bytes);
         let marker_key = dedup_marker_key(self.queue_name.as_ref(), &id);
         let index_key = delayed_index_key(self.queue_name.as_ref(), &id);
@@ -1142,6 +1185,7 @@ impl<T: Serialize> Producer<T> {
         for (id, payload) in items {
             let job = Job::with_id(id.clone(), payload);
             let payload_bytes = rmp_serde::to_vec(&job)?;
+            self.check_payload_size(payload_bytes.len())?;
             let member = encode_delayed_member("", &payload_bytes);
             encoded.push((id, member));
         }

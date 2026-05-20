@@ -147,6 +147,22 @@ const conn = {
 
 Applies to both `Queue` (producer pool) and `Worker` (consumer). `0` (the default) keeps the unbounded behaviour. Pair a positive cap with alerting on reconnect churn so a bounded failure is loud, not silent.
 
+### Capping payload size
+
+The producer rejects any job whose encoded (MessagePack) payload exceeds `maxPayloadBytes` with an error, *before* it ever reaches Redis — the produce-side mirror of the consumer's oversize-on-read cap (which routes too-big entries to the DLQ). Both default to **1 MiB**; set both to the same value for symmetric produce/consume semantics:
+
+```ts
+import { Producer } from "chasquimq"
+
+const producer = await Producer.connect(url, {
+  queueName: "emails",
+  // Reject any add* / repeatable upsert over 256 KiB before the write.
+  maxPayloadBytes: 256 * 1024,
+})
+```
+
+This is a native `Producer` option (same surface as `maxStreamLen` / `maxDelaySecs`). Negative values are ignored — the engine default stands. An oversize job in a bulk call fails the whole call atomically with no partial write.
+
 ### Pausing and resuming
 
 Two levels of pause, both consumer-side: workers stop pulling new jobs, jobs already in flight finish, producers keep enqueueing.
