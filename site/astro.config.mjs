@@ -93,6 +93,7 @@ export default defineConfig({
               slug: "guides/schedule-repeatable-jobs",
             },
             { label: "Idempotent add", slug: "guides/idempotent-add" },
+            { label: "Inspect jobs", slug: "guides/inspect-jobs" },
             { label: "Observe the engine", slug: "guides/observe-the-engine" },
             { label: "Tune for throughput", slug: "guides/tune-for-throughput" },
             {

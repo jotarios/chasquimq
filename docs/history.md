@@ -246,6 +246,31 @@ Bench (same-host A/B, `worker-delayed-end-to-end`, scale=5, repeats=5, drop-slow
 
 Doc surface: changelog only. No user-visible API, flag, config field, env var, error code, or wire-format change, so the READMEs and Starlight reference pages stay as-is per the doc-sync table; this entry is the record.
 
+## Job introspection (cross-FFI slice)
+
+**`Queue.getJob` / `getJobs` / `getJobState` / `getJobCounts` shipped, cross-FFI, May 2026.** Closes the long-standing `NotSupportedError` stub on both shims; adds the canonical introspection surface without touching the producer / consumer / promoter / scheduler hot paths.
+
+Engine surface (`chasquimq/src/introspect.rs`):
+
+- `Introspector::connect(redis_url, queue, tuning, group)` opens a small (pool size 2) read-only client. Construct one per (queue, consumer-group) pair; safe to clone.
+- `get_job_counts()` returns `{ waiting, active, delayed, completed, failed, paused, completed_is_capped }` in ~5 round trips (`XLEN`, `XPENDING`, `ZCARD`, `XLEN dlq`, `EXISTS paused`, bounded `SCAN result:*`). `completed_is_capped=true` when the SCAN hit the `CHASQUIMQ_COMPLETED_SCAN_CAP` cap (default 10,000) before exhausting; the count is then a lower bound.
+- `get_job_state(id)` is live-state-first: pending (PEL) → delayed → waiting → DLQ → result. A job that was DLQ'd then replayed resolves as `Waiting`, not `Completed`, during the race window.
+- `get_job(id)` walks the same five surfaces and returns a `JobInfo` populated from whichever matched. The engine doesn't decode the msgpack payload — `JobInfo::payload` is the opaque user bytes. A stream/DLQ entry whose envelope didn't decode surfaces with `decode_failed = true` (rather than panic or silent skip).
+- `get_jobs(state, offset, limit, cursor) -> JobsPage { jobs, next_cursor }`: paginated listing. Cursor semantics per state: stream entry id for waiting / failed; `score:offset_into_score` for delayed (regression-fixed during the slice — bare-score cursor dropped tied-score members; see below); raw `SCAN` cursor for completed.
+- NOGROUP on a fresh queue with no consumer group ever opened is swallowed — `XPENDING` errors with `NOGROUP` resolve to `active = 0` instead of bubbling.
+
+Node shim (`chasquimq-node`): new `NativeIntrospector` napi binding + high-level `Queue.getJob` / `getJobs` / `getJobState` / `getJobCounts` (no longer `NotSupportedError` stubs). New `Queue.getCompletedCount` / `getFailedCount` / `getDelayedCount` / `getActiveCount` / `getWaitingCount` / `count()` all route through the new introspector. New `QueueOptions.consumerGroup` (sticky, defaults to `"default"`) configures which group's PEL the introspector reads. Lazy introspector connect; `Queue.close` shuts it down alongside the producer.
+
+Python shim (`chasquimq-py`): pyo3 `Introspector` binding (dict-based return shape so the high-level `Queue` doesn't import private pyclasses), parallel `Queue.get_job` / `get_jobs` / `get_job_state` / `get_job_counts` + `get_waiting_count` / `get_active_count` / `get_delayed_count` / `get_completed_count` / `get_failed_count` / `count()`. New `Queue(consumer_group=...)` kwarg mirrors the Node option. `get_jobs_page(...)` returns `(jobs, next_cursor)` for multi-page sweeps; `get_jobs(...)` drops the cursor and returns just the first page (mirrors the Node convenience signature).
+
+Regression caught during slice review: `paginate_delayed` cursor was a bare score with exclusive `(score` resume. When multiple delayed members share a fire-ms (cron specs firing on the minute, or repeated `add_at` with identical absolute times), every tied member was silently skipped at the page boundary. Cursor now encodes `score:offset_into_score`; resume is inclusive `score` with `LIMIT offset count` to step past the tied tail. Legacy bare-score cursors still parse via the fallback so in-flight callers across the upgrade get the old behavior on the remainder of the sweep. Regression test in `chasquimq/tests/introspect.rs::get_jobs_paginates_delayed_with_tied_scores` (5 tied + 5 distinct across page size 3).
+
+Tests: 16 engine integration cases (live Redis), 14 vitest cases (Node), 16 pytest cases (Python), + unit tests for the new helpers (`parse_delayed_cursor`, `clamp_limit`, `extract_id_from_result_key`, …). Full workspace: **330 Rust** + **172 Node** + **135 Python**, all green.
+
+Bench (`benchmarks/chasquimq-1.0.md` host, contended load avg ~3): `queue-add` 16,971 (+10.4% vs 1.0 baseline), `queue-add-bulk` 184,557 (-2.2%, within run-to-run stddev), `worker-concurrent` 110,728 (-1.1%), `worker-generic` 10,094 ⚠ noisy (+6.1%). No regression beyond the 3% threshold on the headline scenarios — the slice adds zero round trips and zero allocations to the producer / consumer hot paths (introspection runs over a separate dedicated 2-conn pool).
+
+Doc surfaces synced: this slice, `docs/engine.md` (new "Job introspection" section), both shim READMEs (symmetric "Inspect jobs" sections), `site/src/content/docs/reference/{node-api,python-api,rust-api}.md`, new `site/src/content/docs/guides/inspect-jobs.mdx` registered in `site/astro.config.mjs`, `site/src/content/docs/reference/options.md` (new `consumerGroup` / `consumer_group` row + `CHASQUIMQ_COMPLETED_SCAN_CAP` env var row).
+
 ## Redis Cluster support (cross-FFI slice)
 
 **The engine was already cluster-correct by prior deliberate design; this slice makes that reachable, documented, and proven.** Two invariants were already in place and verified here: (1) every key for a queue carries the `{chasqui:<queue>}` hash tag — confirmed across **all** key families in `redis/keys.rs` (stream, delayed, dlq, result, dedup `dlid:`, cancel side-index `didx:`, repeat + repeat:spec, promoter/scheduler locks, events, paused), so a queue's whole keyspace is single-slot; (2) every command and multi-key Lua script (`PROMOTE`, `RETRY_RESCHEDULE`, `RELOCATE_DLQ`, `REPLAY_DLQ`, `JOB_OK`, `CANCEL_DELAYED`, `SCHEDULE_*`, locks) is dispatched with `ClusterHash::FirstKey`. fred's `Config::from_url` already auto-detects the `redis-cluster://` / `rediss-cluster://` / `valkey-cluster://` / `valkeys-cluster://` schemes and selects `ServerConfig::Clustered` with `CLUSTER SLOTS` discovery + MOVED/ASK handling — **no engine code change, no feature flag, no config field**. `git diff main -- chasquimq/src` is empty.

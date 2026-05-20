@@ -1,0 +1,134 @@
+---
+title: Inspect jobs
+description: Look up jobs by id, list jobs in a state, and read per-state counts.
+sidebar:
+  order: 6
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+A running queue keeps work in five surfaces — the main stream (waiting), the consumer group's pending entries list (active), the delayed ZSET (delayed), the DLQ stream (failed), and the result-key keyspace (completed). The introspection API walks all five with bounded scans and zero impact on the producer / consumer hot paths.
+
+## What you can ask
+
+`getJob` / `getJobs` / `getJobState` / `getJobCounts` (Node) and their `get_job` / `get_jobs` / `get_job_state` / `get_job_counts` (Python) snake_case mirrors give you four answers:
+
+| Question | Method |
+|---|---|
+| What's the state of this id? | `getJobState(id)` |
+| Hand me the full record. | `getJob(id)` |
+| How many in each bucket? | `getJobCounts()` |
+| List me everything in state X. | `getJobs("waiting", start, end)` (Node) / `get_jobs("waiting", offset=, limit=)` (Python) |
+
+State resolution is **live-state-first**: pending (PEL) → delayed → waiting → DLQ → result. A job that's been replayed from DLQ resolves as `"waiting"`, not `"completed"`, during the race window. A missing id resolves to `"unknown"` (and `getJob` returns `undefined` / `None`).
+
+## A walkthrough
+
+<Tabs syncKey="shim">
+  <TabItem label="Node" icon="seti:javascript">
+
+```ts
+import { Queue } from "chasquimq";
+
+const queue = new Queue("emails", { connection });
+
+// Per-state counts (5 Redis round trips).
+const counts = await queue.getJobCounts();
+// => { waiting, active, delayed, completed, failed, paused }
+
+// State of a single id — cheap, deterministic, no scan past the
+// first hit.
+const state = await queue.getJobState("job-123");
+// => "waiting" | "active" | "delayed" | "completed" | "failed" | "unknown"
+
+// Full record — payload is msgpack-decoded.
+const job = await queue.getJob("job-123");
+if (job) {
+  console.log(job.name, job.data, job.attemptsMade);
+}
+
+// Paginated listing. `start` / `end` are inclusive indices.
+const firstPage = await queue.getJobs("waiting", 0, 49);
+const secondPage = await queue.getJobs("waiting", 50, 99);
+```
+
+  </TabItem>
+  <TabItem label="Python" icon="seti:python">
+
+```python
+from chasquimq import Queue
+
+async with Queue("emails", redis_url=url) as queue:
+    counts = await queue.get_job_counts()
+    # => {"waiting": ..., "active": ..., "delayed": ...,
+    #     "completed": ..., "failed": ..., "paused": ...}
+
+    state = await queue.get_job_state("job-123")
+    # => "waiting" | "active" | "delayed" | "completed" |
+    #    "failed" | "unknown"
+
+    job = await queue.get_job("job-123")
+    if job is not None:
+        print(job.name, job.data, job.attempt)
+
+    # Single-page convenience.
+    first_page = await queue.get_jobs("waiting", offset=0, limit=50)
+
+    # Multi-page sweep with cursor — needed for queues with more
+    # than `limit` entries in the target state.
+    jobs, cursor = await queue.get_jobs_page("waiting", limit=100)
+    while cursor is not None:
+        more, cursor = await queue.get_jobs_page(
+            "waiting", limit=100, cursor=cursor
+        )
+        jobs.extend(more)
+```
+
+  </TabItem>
+</Tabs>
+
+## Counts in detail
+
+`getJobCounts()` is one Redis round trip per state column (~5 total). `completed` is the exception — it runs a bounded `SCAN` over the `result:*` keyspace under the per-queue hash tag because there is no completed-counter to read directly.
+
+If your queue has more than `CHASQUIMQ_COMPLETED_SCAN_CAP` (default `10_000`) result keys, `completed` returns the cap and `completed_is_capped` is `true` — treat the figure as a lower bound. Tune the cap via the env var on the engine process. For very large keyspaces, prefer the [QueueEvents `completed` stream](/concepts/events/) over polling the count.
+
+## Listing in detail
+
+`getJobs(state, start, end)` (Node) / `get_jobs(state, offset, limit)` (Python) is a **single-page** convenience. For queues larger than the page, use `get_jobs_page` (Python) or pass the underlying cursor through the native API (Node). Cursor encoding depends on the target state:
+
+- **`waiting` / `failed`** — last stream entry id seen, used as exclusive `(` lower bound on the next `XRANGE`.
+- **`delayed`** — `score:offset_into_score`, so multiple delayed members sharing one fire-ms (cron specs firing on the minute, identical absolute `addAt` times) don't drop at the page boundary.
+- **`completed`** — raw `SCAN` cursor (`"0"` resets to the start).
+- **`active`** — single page; the PEL window is already bounded by `concurrency × read_count`.
+
+## NOGROUP and the consumer-group option
+
+The introspector reads `XPENDING` to compute the `active` column. A fresh queue with no consumer ever started returns `NOGROUP`; the introspector swallows that and reports `active = 0` instead of bubbling the error.
+
+If your `Worker` uses a non-default consumer group, set the matching sticky group on the `Queue` so introspection sees the right PEL:
+
+<Tabs syncKey="shim">
+  <TabItem label="Node" icon="seti:javascript">
+
+```ts
+const queue = new Queue("emails", { connection, consumerGroup: "primary" });
+const worker = new Worker("emails", handler, { connection, group: "primary" });
+```
+
+  </TabItem>
+  <TabItem label="Python" icon="seti:python">
+
+```python
+queue = Queue("emails", redis_url=url, consumer_group="primary")
+worker = Worker("emails", handler, redis_url=url, group="primary")
+```
+
+  </TabItem>
+</Tabs>
+
+## Cost characteristics
+
+All introspection methods use bounded scans — no unbounded XRANGE, no unbounded ZRANGE, no unbounded SCAN. The introspector opens a small dedicated pool (size 2) so a noisy admin loop can't compete with the producer's connections. The producer / consumer / promoter / scheduler hot paths are byte-for-byte unchanged by this slice.
+
+See the [engine reference](/reference/rust-api/#introspector) for the full Rust surface and cursor semantics.
