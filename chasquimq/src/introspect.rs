@@ -14,10 +14,11 @@
 //!   stream" (from a manual DLQ replay) resolves as `Waiting`, not
 //!   `Completed` — what matters for callers is the work the next worker
 //!   tick is about to do.
-//! - **`OpaqueBytes` decode envelope.** We decode `Job<OpaqueBytes>` so
-//!   the inspector can pull `id` / `name` / `attempt` / `created_at_ms`
+//! - **Type-erased envelope walk.** We walk the msgpack array via
+//!   `rmpv` so the inspector can pull `id` / `attempt` / `created_at_ms`
 //!   from any payload the producer ever wrote, regardless of `T`. The
-//!   inner payload bytes are returned to the caller as-is.
+//!   inner payload bytes are returned to the caller as-is (re-encoded
+//!   from the rmpv value tree, losslessly).
 //! - **NOGROUP swallowed.** A fresh queue with no consumer group yet
 //!   makes XPENDING return `NOGROUP`; we treat that as zero pending and
 //!   continue. Pinned by `get_job_counts_with_no_consumer_group_yet`.
@@ -30,12 +31,11 @@
 //!   caller can present "≥ N" rather than the exact value.
 
 use crate::error::{Error, Result};
-use crate::job::Job;
-use crate::payload::OpaqueBytes;
+use crate::payload::peek_envelope;
 use crate::redis::keys::{
     delayed_index_key, delayed_key, dlq_key, paused_key, result_key, stream_key,
 };
-use crate::redis::parse::{FieldValue, XrangeEntry, parse_xrange_response};
+use crate::redis::parse::{XrangeEntry, parse_xrange_response};
 use crate::{ConnectionTuning, config::ConsumerConfig};
 use bytes::Bytes;
 use fred::clients::Pool;
@@ -350,8 +350,14 @@ impl Introspector {
     ) -> Result<JobsPage> {
         let limit = clamp_limit(limit);
         match state {
-            JobState::Waiting => self.paginate_stream(&self.stream_key, offset, limit, cursor, false).await,
-            JobState::Failed => self.paginate_stream(&self.dlq_key, offset, limit, cursor, true).await,
+            JobState::Waiting => {
+                self.paginate_stream(&self.stream_key, offset, limit, cursor, false)
+                    .await
+            }
+            JobState::Failed => {
+                self.paginate_stream(&self.dlq_key, offset, limit, cursor, true)
+                    .await
+            }
             JobState::Delayed => self.paginate_delayed(offset, limit, cursor).await,
             JobState::Active => self.paginate_active(offset, limit).await,
             JobState::Completed => self.paginate_completed(limit, cursor).await,
@@ -383,8 +389,14 @@ impl Introspector {
         let Some((min_id, max_id, _)) = self.pel_range().await? else {
             return Ok(false);
         };
-        let entries = xrange_window(&self.pool, &self.stream_key, &min_id, &max_id, STREAM_SCAN_PAGE_DEFAULT)
-            .await?;
+        let entries = xrange_window(
+            &self.pool,
+            &self.stream_key,
+            &min_id,
+            &max_id,
+            STREAM_SCAN_PAGE_DEFAULT,
+        )
+        .await?;
         for entry in entries {
             if decoded_id_matches(&entry, id) {
                 return Ok(true);
@@ -397,8 +409,14 @@ impl Introspector {
         let Some((min_id, max_id, _)) = self.pel_range().await? else {
             return Ok(None);
         };
-        let entries = xrange_window(&self.pool, &self.stream_key, &min_id, &max_id, STREAM_SCAN_PAGE_DEFAULT)
-            .await?;
+        let entries = xrange_window(
+            &self.pool,
+            &self.stream_key,
+            &min_id,
+            &max_id,
+            STREAM_SCAN_PAGE_DEFAULT,
+        )
+        .await?;
         for entry in entries {
             if let Some(info) = entry_to_info_if_match(&entry, id, JobState::Active) {
                 return Ok(Some(info));
@@ -413,7 +431,14 @@ impl Introspector {
         // STREAM_SCAN_PAGE_DEFAULT chunk from `-`. Pagination is the
         // caller's escape hatch; this is the convenience "I know the id
         // is recent" path.
-        let entries = xrange_window(&self.pool, &self.stream_key, "-", "+", STREAM_SCAN_PAGE_DEFAULT).await?;
+        let entries = xrange_window(
+            &self.pool,
+            &self.stream_key,
+            "-",
+            "+",
+            STREAM_SCAN_PAGE_DEFAULT,
+        )
+        .await?;
         for entry in entries {
             if let Some(info) = entry_to_info_if_match(&entry, id, JobState::Waiting) {
                 return Ok(Some(info));
@@ -423,7 +448,14 @@ impl Introspector {
     }
 
     async fn find_in_dlq(&self, id: &str) -> Result<Option<JobInfo>> {
-        let entries = xrange_window(&self.pool, &self.dlq_key, "-", "+", STREAM_SCAN_PAGE_DEFAULT).await?;
+        let entries = xrange_window(
+            &self.pool,
+            &self.dlq_key,
+            "-",
+            "+",
+            STREAM_SCAN_PAGE_DEFAULT,
+        )
+        .await?;
         for entry in entries {
             if let Some(info) = dlq_entry_to_info_if_match(&entry, id) {
                 return Ok(Some(info));
@@ -459,14 +491,14 @@ impl Introspector {
             Some(parts) => parts,
             None => return Ok(None),
         };
-        let (envelope_id, attempt, created_at_ms) = match peek_envelope(&payload) {
+        let (envelope_id, inner_payload, created_at_ms, attempt) = match peek_envelope(&payload) {
             Some(v) => v,
-            None => (id.to_string(), 0, 0),
+            None => (id.to_string(), payload.clone(), 0, 0),
         };
         Ok(Some(JobInfo {
             id: envelope_id,
             name,
-            payload,
+            payload: inner_payload,
             attempt,
             state: JobState::Delayed,
             created_at_ms,
@@ -582,7 +614,7 @@ impl Introspector {
                     continue;
                 }
             };
-            let (id, attempt, created_at_ms) = match peek_envelope(&payload) {
+            let (id, inner_payload, created_at_ms, attempt) = match peek_envelope(&payload) {
                 Some(v) => v,
                 None => {
                     tracing::warn!(
@@ -595,7 +627,7 @@ impl Introspector {
             jobs.push(JobInfo {
                 id,
                 name,
-                payload,
+                payload: inner_payload,
                 attempt,
                 state: JobState::Delayed,
                 created_at_ms,
@@ -834,12 +866,11 @@ fn entry_fields_payload_and_name(entry: &XrangeEntry) -> (Option<Bytes>, String)
 fn decoded_id_matches(entry: &XrangeEntry, id: &str) -> bool {
     let (payload, _) = entry_fields_payload_and_name(entry);
     match payload {
-        Some(bytes) => match rmp_serde::from_slice::<Job<OpaqueBytes>>(&bytes) {
-            Ok(job) => job.id == id,
-            Err(e) => {
+        Some(bytes) => match peek_envelope(&bytes) {
+            Some((entry_id, _, _, _)) => entry_id == id,
+            None => {
                 tracing::warn!(
                     entry_id = %entry.id,
-                    error = %e,
                     "introspect: stream entry envelope did not decode; skipping"
                 );
                 false
@@ -850,58 +881,53 @@ fn decoded_id_matches(entry: &XrangeEntry, id: &str) -> bool {
 }
 
 fn entry_to_info_if_match(entry: &XrangeEntry, id: &str, state: JobState) -> Option<JobInfo> {
-    let (payload, name) = entry_fields_payload_and_name(entry);
-    let payload = payload?;
-    match rmp_serde::from_slice::<Job<OpaqueBytes>>(&payload) {
-        Ok(job) => {
-            if job.id != id {
-                return None;
-            }
-            Some(JobInfo {
-                id: job.id,
-                name,
-                payload: job.payload.into_inner(),
-                attempt: job.attempt,
-                state,
-                created_at_ms: job.created_at_ms,
-                processed_on_ms: stream_id_ms(&entry.id),
-                finished_on_ms: None,
-                failure_reason: None,
-                failure_detail: None,
-                decode_failed: false,
-            })
-        }
-        Err(_) => None,
+    let (payload_bytes, name) = entry_fields_payload_and_name(entry);
+    let payload_bytes = payload_bytes?;
+    let (env_id, inner_payload, created_at_ms, attempt) = peek_envelope(&payload_bytes)?;
+    if env_id != id {
+        return None;
     }
+    Some(JobInfo {
+        id: env_id,
+        name,
+        payload: inner_payload,
+        attempt,
+        state,
+        created_at_ms,
+        processed_on_ms: stream_id_ms(&entry.id),
+        finished_on_ms: None,
+        failure_reason: None,
+        failure_detail: None,
+        decode_failed: false,
+    })
 }
 
 fn stream_entry_to_info_any(entry: &XrangeEntry, state: JobState) -> Option<JobInfo> {
-    let (payload, name) = entry_fields_payload_and_name(entry);
-    let payload = payload?;
-    match rmp_serde::from_slice::<Job<OpaqueBytes>>(&payload) {
-        Ok(job) => Some(JobInfo {
-            id: job.id,
+    let (payload_bytes, name) = entry_fields_payload_and_name(entry);
+    let payload_bytes = payload_bytes?;
+    match peek_envelope(&payload_bytes) {
+        Some((id, inner_payload, created_at_ms, attempt)) => Some(JobInfo {
+            id,
             name,
-            payload: job.payload.into_inner(),
-            attempt: job.attempt,
+            payload: inner_payload,
+            attempt,
             state,
-            created_at_ms: job.created_at_ms,
+            created_at_ms,
             processed_on_ms: stream_id_ms(&entry.id),
             finished_on_ms: None,
             failure_reason: None,
             failure_detail: None,
             decode_failed: false,
         }),
-        Err(e) => {
+        None => {
             tracing::warn!(
                 entry_id = %entry.id,
-                error = %e,
                 "introspect: stream entry envelope did not decode; emitting decode_failed marker"
             );
             Some(JobInfo {
                 id: String::new(),
                 name,
-                payload,
+                payload: payload_bytes,
                 attempt: 0,
                 state,
                 created_at_ms: 0,
@@ -929,16 +955,13 @@ fn dlq_entry_to_info_any(entry: &XrangeEntry) -> Option<JobInfo> {
 }
 
 fn dlq_parsed_to_info(parsed: DlqFields, entry: &XrangeEntry) -> JobInfo {
-    // Try to decode the envelope to recover `attempt` / `created_at_ms`,
+    // Try to walk the envelope to recover `attempt` / `created_at_ms`,
     // but a poison DLQ entry should still surface — the operator likely
-    // wants to see it.
-    let (envelope_id, attempt, created_at_ms, decode_failed) = match rmp_serde::from_slice::<
-        Job<OpaqueBytes>,
-    >(
-        &parsed.payload
-    ) {
-        Ok(j) => (j.id, j.attempt, j.created_at_ms, false),
-        Err(_) => (parsed.source_id.clone(), 0, 0, true),
+    // wants to see it. Envelope-walk failure flips `decode_failed`.
+    let (envelope_id, attempt, created_at_ms, decode_failed) = match peek_envelope(&parsed.payload)
+    {
+        Some((id, _, created, attempt)) => (id, attempt, created, false),
+        None => (parsed.source_id.clone(), 0, 0, true),
     };
     JobInfo {
         id: envelope_id,
@@ -1002,29 +1025,26 @@ fn parse_dlq_fields(entry: &XrangeEntry) -> DlqFields {
     }
 }
 
-/// Decode the slice-3 length-prefixed delayed-ZSET member: `u16 BE name_len`
+/// Decode the slice-3 length-prefixed delayed-ZSET member: `u32 LE name_len`
 /// + `name` UTF-8 + msgpack payload.
+///
+/// `chasquimq::redis::delayed_member::decode_delayed_member` is the canonical
+/// source-of-truth — this is the `Bytes`-flavored mirror used by the
+/// inspector (so it doesn't allocate a `&[u8]` view-into-Bytes).
 fn decode_delayed_member(bytes: &Bytes) -> Option<(String, Bytes)> {
-    if bytes.len() < 2 {
+    if bytes.len() < 4 {
         return None;
     }
-    let name_len = u16::from_be_bytes([bytes[0], bytes[1]]) as usize;
-    if bytes.len() < 2 + name_len {
+    let name_len = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+    if bytes.len() < 4 + name_len {
         return None;
     }
-    let name = match std::str::from_utf8(&bytes[2..2 + name_len]) {
+    let name = match std::str::from_utf8(&bytes[4..4 + name_len]) {
         Ok(s) => s.to_string(),
         Err(_) => return None,
     };
-    let payload = bytes.slice(2 + name_len..);
+    let payload = bytes.slice(4 + name_len..);
     Some((name, payload))
-}
-
-fn peek_envelope(payload: &Bytes) -> Option<(String, u32, u64)> {
-    match rmp_serde::from_slice::<Job<OpaqueBytes>>(payload) {
-        Ok(j) => Some((j.id, j.attempt, j.created_at_ms)),
-        Err(_) => None,
-    }
 }
 
 /// Parse a Redis stream entry id `<ms>-<seq>` and recover the ms.
@@ -1054,7 +1074,9 @@ fn parse_zrange_withscores(v: &Value) -> Vec<(Bytes, i64)> {
                 Ok(f) => f as i64,
                 Err(_) => continue,
             },
-            Value::Bytes(b) => match std::str::from_utf8(b).ok().and_then(|s| s.parse::<f64>().ok())
+            Value::Bytes(b) => match std::str::from_utf8(b)
+                .ok()
+                .and_then(|s| s.parse::<f64>().ok())
             {
                 Some(f) => f as i64,
                 None => continue,
@@ -1129,11 +1151,6 @@ async fn scan_count_results(pool: &Pool, queue: &str, cap: u64) -> Result<(u64, 
     Ok((count, false))
 }
 
-// The FieldValue import is only used inside this module's helpers via the
-// XrangeEntry tuple. Pull it explicitly for clarity.
-#[allow(dead_code)]
-fn _hint_field_value_is_used(_v: &FieldValue) {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1179,10 +1196,11 @@ mod tests {
 
     #[test]
     fn delayed_member_decoder_handles_named_and_unnamed() {
-        // 2-byte BE length || name || payload
+        // 4-byte LE length || name || payload (matches the engine's
+        // canonical `delayed_member::encode_delayed_member`).
         let mut bytes = Vec::new();
         let name = "send-email";
-        bytes.extend_from_slice(&(name.len() as u16).to_be_bytes());
+        bytes.extend_from_slice(&(name.len() as u32).to_le_bytes());
         bytes.extend_from_slice(name.as_bytes());
         bytes.extend_from_slice(&[0x91, 0x01]); // msgpack [1]
         let (n, p) = decode_delayed_member(&Bytes::from(bytes)).expect("Some");
@@ -1190,7 +1208,7 @@ mod tests {
         assert_eq!(p.as_ref(), &[0x91, 0x01]);
 
         let mut bytes = Vec::new();
-        bytes.extend_from_slice(&0u16.to_be_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
         bytes.extend_from_slice(&[0x92, 0x02, 0x03]);
         let (n, p) = decode_delayed_member(&Bytes::from(bytes)).expect("Some");
         assert_eq!(n, "");
@@ -1199,10 +1217,10 @@ mod tests {
 
     #[test]
     fn delayed_member_decoder_rejects_truncated() {
-        // 1 byte — can't even read the u16 length.
-        assert!(decode_delayed_member(&Bytes::from_static(&[0x00])).is_none());
-        // 2 bytes claiming a 10-byte name but no name follows.
-        assert!(decode_delayed_member(&Bytes::from_static(&[0x00, 0x0a])).is_none());
+        // 3 bytes — can't even read the u32 length prefix.
+        assert!(decode_delayed_member(&Bytes::from_static(&[0x00, 0x00, 0x00])).is_none());
+        // 4 bytes claiming a 10-byte name but no name follows.
+        assert!(decode_delayed_member(&Bytes::from_static(&[10, 0, 0, 0])).is_none());
     }
 
     #[test]
@@ -1236,6 +1254,9 @@ mod tests {
     fn clamp_limit_floor_and_ceiling() {
         assert_eq!(clamp_limit(0), STREAM_SCAN_PAGE_DEFAULT);
         assert_eq!(clamp_limit(50), 50);
-        assert_eq!(clamp_limit(STREAM_SCAN_PAGE_MAX + 100), STREAM_SCAN_PAGE_MAX);
+        assert_eq!(
+            clamp_limit(STREAM_SCAN_PAGE_MAX + 100),
+            STREAM_SCAN_PAGE_MAX
+        );
     }
 }

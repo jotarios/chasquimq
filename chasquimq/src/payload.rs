@@ -1,89 +1,64 @@
-//! Engine-private opaque payload wrapper used by the introspection module
-//! to decode `Job<T>` envelopes off the wire without knowing the inner
-//! user type.
+//! Engine-private msgpack envelope walker used by the introspection
+//! module.
 //!
-//! Why a new type instead of reusing `chasquimq-node::RawBytes`: the shim
-//! crate's `RawBytes` lives in `chasquimq-node`, which the engine crate
-//! must not depend on (it would invert the dependency direction and pull
-//! napi-rs into a pure-Rust library). Both types have identical wire shape
-//! — a single msgpack `bin` value — so a `Job<OpaqueBytes>` decodes any
-//! payload a `Producer<T>` ever wrote, regardless of whether `T` was
-//! `RawBytes` (Node shim), the engine's own opaque-bytes path (Python
-//! shim), or a strongly-typed `T: Serialize` (engine integration tests).
+//! `Job<T>` encodes via rmp-serde as a positional msgpack array. The
+//! first slot is `id` (string), the second is `payload` (whatever shape
+//! `T` serialized to), then `created_at_ms` (u64), `attempt` (u32), and
+//! an optional `retry` slot. The introspector needs to recover the
+//! first, third, and fourth slots without knowing `T`.
 //!
-//! `OpaqueBytes` is engine-private (`pub(crate)`) — it's an implementation
-//! detail of the inspector. External callers receive `bytes::Bytes`
-//! directly via the `Introspector` API surface.
+//! `peek_envelope` walks the msgpack array via `rmpv` (a value-tree
+//! decoder) and returns `(id, payload_bytes, created_at_ms, attempt)`,
+//! where `payload_bytes` is the re-encoded msgpack of the payload slot
+//! exactly as it sat on the wire. The re-encode is correct because
+//! `rmpv::Value` round-trips through `rmp_serde::to_vec` losslessly.
+//!
+//! Decode-failure tolerance: if the slice is not a valid msgpack array
+//! or doesn't have the expected positional shape, `peek_envelope`
+//! returns `None`. Callers treat that as "broken envelope" and surface
+//! `decode_failed = true` on the resulting `JobInfo` rather than
+//! propagating the error.
 
 use bytes::Bytes;
-use serde::de::{Error as DeError, Visitor};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::fmt;
 
-/// Opaque payload bytes that survive a `Job<OpaqueBytes>` round trip
-/// through `rmp-serde` as a single msgpack `bin` value.
-///
-/// Mirrors the wire shape of `chasquimq-node::RawBytes` and the python
-/// shim's bytes path — encoded jobs from any producer surface decode
-/// here unchanged.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct OpaqueBytes(pub(crate) Bytes);
-
-impl OpaqueBytes {
-    pub(crate) fn into_inner(self) -> Bytes {
-        self.0
+/// Walk a msgpack-encoded `Job<T>` envelope and return the engine-known
+/// fields plus the raw payload bytes. Returns `None` for any shape that
+/// isn't a positional msgpack array with the expected `[id, payload,
+/// created_at_ms, attempt, ...]` layout.
+pub(crate) fn peek_envelope(bytes: &[u8]) -> Option<(String, Bytes, u64, u32)> {
+    let value: rmpv::Value = rmpv::decode::read_value(&mut std::io::Cursor::new(bytes)).ok()?;
+    let arr = match value {
+        rmpv::Value::Array(arr) => arr,
+        _ => return None,
+    };
+    if arr.len() < 4 {
+        return None;
     }
-}
-
-impl Serialize for OpaqueBytes {
-    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_bytes(self.0.as_ref())
-    }
-}
-
-impl<'de> Deserialize<'de> for OpaqueBytes {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        d.deserialize_bytes(OpaqueBytesVisitor)
-    }
-}
-
-struct OpaqueBytesVisitor;
-
-impl<'de> Visitor<'de> for OpaqueBytesVisitor {
-    type Value = OpaqueBytes;
-
-    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("a msgpack `bin` (or compatible byte buffer)")
-    }
-
-    fn visit_bytes<E: DeError>(self, v: &[u8]) -> Result<OpaqueBytes, E> {
-        Ok(OpaqueBytes(Bytes::copy_from_slice(v)))
-    }
-
-    fn visit_byte_buf<E: DeError>(self, v: Vec<u8>) -> Result<OpaqueBytes, E> {
-        Ok(OpaqueBytes(Bytes::from(v)))
-    }
-
-    fn visit_borrowed_bytes<E: DeError>(self, v: &'de [u8]) -> Result<OpaqueBytes, E> {
-        Ok(OpaqueBytes(Bytes::copy_from_slice(v)))
-    }
-
-    fn visit_seq<A>(self, mut seq: A) -> Result<OpaqueBytes, A::Error>
-    where
-        A: serde::de::SeqAccess<'de>,
-    {
-        let mut buf = Vec::with_capacity(seq.size_hint().unwrap_or(0));
-        while let Some(b) = seq.next_element::<u8>()? {
-            buf.push(b);
-        }
-        Ok(OpaqueBytes(Bytes::from(buf)))
-    }
+    let id = match &arr[0] {
+        rmpv::Value::String(s) => s.as_str()?.to_string(),
+        _ => return None,
+    };
+    // Slot 1: the encoded payload. For the shim path (`RawBytes`-shaped
+    // payloads), the on-wire shape is a msgpack `bin` whose *inner*
+    // bytes are the shim's own msgpack-encoded user value — we hand
+    // those inner bytes back so the shim's `decode_payload` matches.
+    // For the engine-typed path (e.g. `Producer<UserData>`), slot 1 is
+    // whatever shape `T` serialized to (array, map, int, …); we
+    // re-encode the `rmpv::Value` losslessly.
+    let payload_bytes = match &arr[1] {
+        rmpv::Value::Binary(b) => b.clone(),
+        other => rmp_serde::to_vec(other).ok()?,
+    };
+    let created_at_ms = arr[2].as_u64()?;
+    let attempt = arr[3].as_u64().map(|n| n as u32)?;
+    Some((id, Bytes::from(payload_bytes), created_at_ms, attempt))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::job::Job;
+    use bytes::Bytes;
     use serde::{Deserialize, Serialize};
 
     #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
@@ -92,37 +67,80 @@ mod tests {
         count: u32,
     }
 
-    /// A `Job<UserData>` written by a typed producer decodes cleanly as
-    /// `Job<OpaqueBytes>`, with the inner payload bytes recoverable as
-    /// the originally-encoded `UserData` msgpack representation.
+    /// Engine-typed `Producer<UserData>` writes `UserData` as its native
+    /// msgpack shape (a positional 2-element array). The inspector must
+    /// recover `id` / `created_at_ms` / `attempt` from the outer
+    /// envelope regardless.
     #[test]
-    fn typed_job_decodes_as_opaque() {
-        let original = UserData {
+    fn peek_envelope_recovers_typed_job_fields() {
+        let job = Job::new(UserData {
             name: "round-trip".into(),
             count: 7,
-        };
-        let typed_job = Job::new(original.clone());
-        let envelope = rmp_serde::to_vec(&typed_job).expect("encode");
-
-        let opaque: Job<OpaqueBytes> = rmp_serde::from_slice(&envelope).expect("decode opaque");
-        assert_eq!(opaque.id, typed_job.id);
-        assert_eq!(opaque.attempt, 0);
-
-        // The inner payload bytes are the msgpack-encoded UserData.
-        let recovered: UserData =
-            rmp_serde::from_slice(opaque.payload.0.as_ref()).expect("decode user data");
-        assert_eq!(recovered, original);
+        });
+        let envelope = rmp_serde::to_vec(&job).expect("encode");
+        let (id, payload, created_at_ms, attempt) =
+            peek_envelope(&envelope).expect("peek envelope");
+        assert_eq!(id, job.id);
+        assert_eq!(created_at_ms, job.created_at_ms);
+        assert_eq!(attempt, 0);
+        // Payload round-trips back into UserData.
+        let recovered: UserData = rmp_serde::from_slice(&payload).expect("decode user data");
+        assert_eq!(
+            recovered,
+            UserData {
+                name: "round-trip".into(),
+                count: 7
+            }
+        );
     }
 
-    /// A `Job<OpaqueBytes(buf)>` round-trips through msgpack with the
-    /// inner bytes preserved verbatim — the property the shim layers
-    /// depend on.
+    /// A shim-typed producer wraps the user data in a single msgpack
+    /// `bin` (matches `chasquimq-node::RawBytes`). The inspector still
+    /// recovers the envelope fields and the payload bytes survive.
     #[test]
-    fn opaque_round_trip_preserves_inner() {
-        let inner: Vec<u8> = (0u8..=255).cycle().take(4096).collect();
-        let job = Job::new(OpaqueBytes(Bytes::copy_from_slice(&inner)));
-        let envelope = rmp_serde::to_vec(&job).expect("encode");
-        let decoded: Job<OpaqueBytes> = rmp_serde::from_slice(&envelope).expect("decode");
-        assert_eq!(decoded.payload.0.as_ref(), inner.as_slice());
+    fn peek_envelope_recovers_bin_payload() {
+        // Hand-build a Job<X> where X serializes via serialize_bytes.
+        struct RawBytesLike(Bytes);
+        impl serde::Serialize for RawBytesLike {
+            fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                s.serialize_bytes(self.0.as_ref())
+            }
+        }
+        let inner_msgpack = rmp_serde::to_vec(&UserData {
+            name: "shim-path".into(),
+            count: 11,
+        })
+        .expect("encode inner");
+        let job = Job::new(RawBytesLike(Bytes::copy_from_slice(&inner_msgpack)));
+        let envelope = rmp_serde::to_vec(&job).expect("encode envelope");
+        let (id, payload, created_at_ms, attempt) =
+            peek_envelope(&envelope).expect("peek envelope");
+        assert_eq!(id, job.id);
+        assert_eq!(created_at_ms, job.created_at_ms);
+        assert_eq!(attempt, 0);
+        // Re-encoded `bin` round-trips into the original bytes.
+        let recovered: UserData = rmp_serde::from_slice(&payload).expect("decode user data");
+        assert_eq!(
+            recovered,
+            UserData {
+                name: "shim-path".into(),
+                count: 11
+            }
+        );
+    }
+
+    #[test]
+    fn peek_envelope_returns_none_for_garbage() {
+        assert!(peek_envelope(&[0xff, 0x00, 0x01]).is_none());
+        assert!(peek_envelope(&[]).is_none());
+    }
+
+    /// A msgpack array shorter than 4 elements (the minimum encoded
+    /// `Job` shape) is treated as undecodable.
+    #[test]
+    fn peek_envelope_rejects_too_short_array() {
+        // msgpack fixarray of length 2 with two integers.
+        let bytes = vec![0x92, 0x01, 0x02];
+        assert!(peek_envelope(&bytes).is_none());
     }
 }

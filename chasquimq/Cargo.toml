@@ -16,6 +16,11 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 tokio-util = { version = "0.7", features = ["rt"] }
 fred = { version = "10", features = ["i-streams", "enable-rustls-ring", "credential-provider"] }
 rmp-serde = "1"
+# Direct msgpack value-tree access for the introspector's envelope-walk
+# path (so it can recover `id` / `attempt` / `created_at_ms` from a
+# `Job<T>` payload without knowing `T`'s shape). Same version the CLI
+# already uses, so this doesn't grow the workspace lock.
+rmpv = { version = "1", features = ["with-serde"] }
 serde = { version = "1", features = ["derive"] }
 ulid = "1"
 uuid = { version = "1", features = ["v4"] }
