@@ -9,10 +9,15 @@
 import "./_dispose-polyfill.js";
 import {
   Producer as NativeProducer,
+  Introspector as NativeIntrospector,
   type ProducerOpts as NativeProducerOpts,
   type AddOptions as NativeAddOptions,
   type BackoffSpec as NativeBackoffSpec,
   type DlqEntry as NativeDlqEntry,
+  type IntrospectorOpts as NativeIntrospectorOpts,
+  type JobCounts as NativeJobCounts,
+  type JobInfo as NativeJobInfo,
+  type JobsPage as NativeJobsPage,
   type JobRetryOverride as NativeJobRetryOverride,
 } from "../index.js";
 import type {
@@ -42,6 +47,7 @@ export class Queue<
   readonly name: string;
   readonly opts: QueueOptions;
   private producerPromise?: Promise<NativeProducer>;
+  private introspectorPromise?: Promise<NativeIntrospector>;
   private closed = false;
 
   constructor(name: string, opts: QueueOptions) {
@@ -76,6 +82,23 @@ export class Queue<
       );
     }
     return this.producerPromise;
+  }
+
+  private async introspector(): Promise<NativeIntrospector> {
+    if (!this.introspectorPromise) {
+      const url = buildRedisUrl(this.opts.connection);
+      const native: NativeIntrospectorOpts = {
+        queueName: this.name,
+        consumerGroup: this.opts.consumerGroup,
+        reconnectMaxAttempts: this.opts.connection.reconnectMaxAttempts,
+      };
+      this.introspectorPromise = NativeIntrospector.connect(
+        url,
+        native,
+        this.opts.connection.credentialProvider,
+      );
+    }
+    return this.introspectorPromise;
   }
 
   async add(
@@ -385,46 +408,156 @@ export class Queue<
     return producer.replayDlq(limit);
   }
 
-  // --- Stubs (NotSupportedError) ---
+  // --- Introspection -----------------------------------------------------
 
-  async getJob(_id: string): Promise<Job | undefined> {
-    throw new NotSupportedError("Queue.getJob not implemented in v1");
+  /**
+   * Look up a single job by id across the four queue surfaces (stream
+   * PEL, delayed ZSET, main stream, DLQ, result key). Bounded scan;
+   * returns `undefined` when the id isn't found in any surface.
+   *
+   * The returned {@link Job} surfaces engine state via `processedOn` /
+   * `finishedOn` / `failedReason` where applicable. The `data` payload
+   * is the msgpack-decoded user value.
+   */
+  async getJob(
+    id: string,
+  ): Promise<Job<DataType, ResultType, NameType> | undefined> {
+    const insp = await this.introspector();
+    const info = await insp.getJob(id);
+    if (!info) return undefined;
+    return this.nativeInfoToJob(info);
   }
 
+  /**
+   * Paginated listing within a single state. `state` is one of
+   * `"waiting" | "active" | "delayed" | "completed" | "failed"`.
+   * Pagination uses the `next_cursor` returned alongside the page;
+   * pass it back via the optional last-arg cursor on the next call.
+   *
+   * BullMQ compat note: BullMQ's `getJobs` accepts `types: JobType[]`
+   * and `start` / `end` indices. v1 takes a single state plus offset
+   * / limit / cursor. Passing an array throws `NotSupportedError`.
+   */
   async getJobs(
-    _types?: JobType | JobType[],
-    _start?: number,
-    _end?: number,
+    types?: JobType | JobType[],
+    start?: number,
+    end?: number,
     _asc?: boolean,
-  ): Promise<Job[]> {
-    throw new NotSupportedError("Queue.getJobs not implemented in v1");
+  ): Promise<Job<DataType, ResultType, NameType>[]> {
+    if (Array.isArray(types)) {
+      if (types.length === 1) {
+        types = types[0];
+      } else {
+        throw new NotSupportedError(
+          "Queue.getJobs with multiple states is not supported; pass a single JobState",
+        );
+      }
+    }
+    const state: string =
+      types === undefined || types === "paused" ? "waiting" : (types as string);
+    const offset = start ?? 0;
+    const limit = end !== undefined && end >= offset ? end - offset + 1 : 100;
+    const insp = await this.introspector();
+    const page = await insp.getJobs(state, offset, limit, undefined);
+    return page.jobs.map((info) => this.nativeInfoToJob(info));
   }
 
-  async getJobState(_id: string): Promise<JobState | "unknown"> {
-    return "unknown";
+  /**
+   * One of `"waiting" | "active" | "delayed" | "completed" | "failed" |
+   * "unknown"`. Live-state-first: a job that's been replayed from DLQ
+   * resolves as `"waiting"` (not `"completed"`) during the race window.
+   */
+  async getJobState(id: string): Promise<JobState | "unknown"> {
+    const insp = await this.introspector();
+    const s = await insp.getJobState(id);
+    return s as JobState | "unknown";
   }
 
-  async getJobCounts(..._types: JobType[]): Promise<Record<string, number>> {
-    throw new NotSupportedError("Queue.getJobCounts not implemented in v1");
+  /**
+   * Per-state counts: `{ waiting, active, delayed, completed, failed,
+   * paused }`. Pass no args for the full count dict; pass one or more
+   * `JobType`s to filter.
+   *
+   * `completed` is via bounded SCAN over `result:*` keys; large
+   * keyspaces may return a lower-bound figure (configurable cap via
+   * the `CHASQUIMQ_COMPLETED_SCAN_CAP` env var on the engine).
+   */
+  async getJobCounts(...types: JobType[]): Promise<Record<string, number>> {
+    const insp = await this.introspector();
+    const c = await insp.getJobCounts();
+    const all: Record<string, number> = {
+      waiting: c.waiting,
+      active: c.active,
+      delayed: c.delayed,
+      completed: c.completed,
+      failed: c.failed,
+      paused: c.paused,
+    };
+    if (types.length === 0) return all;
+    const out: Record<string, number> = {};
+    for (const t of types) {
+      if (t in all) out[t] = all[t];
+    }
+    return out;
   }
 
   async getWaitingCount(): Promise<number> {
-    throw new NotSupportedError("not implemented");
+    return (await this.getJobCounts("waiting")).waiting ?? 0;
   }
   async getActiveCount(): Promise<number> {
-    throw new NotSupportedError("not implemented");
+    return (await this.getJobCounts("active")).active ?? 0;
   }
   async getDelayedCount(): Promise<number> {
-    throw new NotSupportedError("not implemented");
+    return (await this.getJobCounts("delayed")).delayed ?? 0;
   }
   async getCompletedCount(): Promise<number> {
-    return 0; // engine doesn't persist completions
+    return (await this.getJobCounts("completed")).completed ?? 0;
   }
   async getFailedCount(): Promise<number> {
-    throw new NotSupportedError("not implemented");
+    return (await this.getJobCounts("failed")).failed ?? 0;
   }
   async count(): Promise<number> {
-    throw new NotSupportedError("not implemented");
+    // BullMQ's `Queue.count` returns the number of waiting + active +
+    // delayed jobs (i.e. everything that could still run). Mirror that
+    // so swap-in BullMQ users don't get surprised.
+    const c = await this.getJobCounts();
+    return (c.waiting ?? 0) + (c.active ?? 0) + (c.delayed ?? 0);
+  }
+
+  private nativeInfoToJob(
+    info: NativeJobInfo,
+  ): Job<DataType, ResultType, NameType> {
+    let data: DataType;
+    try {
+      data = decodePayload(info.payload) as DataType;
+    } catch {
+      // Surface poison payloads as the raw bytes; callers can branch
+      // on `failedReason === "decode_failed"` if they want to.
+      data = info.payload as unknown as DataType;
+    }
+    const opts: JobsOptions = {};
+    const job = new Job<DataType, ResultType, NameType>(
+      (info.name || "") as NameType,
+      data,
+      opts,
+      info.id,
+      this,
+    );
+    job.timestamp = info.createdAtMs ?? job.timestamp;
+    job.attemptsMade = info.attempt ?? 0;
+    if (info.processedOnMs !== undefined && info.processedOnMs !== null) {
+      job.processedOn = info.processedOnMs;
+    }
+    if (info.finishedOnMs !== undefined && info.finishedOnMs !== null) {
+      job.finishedOn = info.finishedOnMs;
+    }
+    if (info.failureReason !== undefined && info.failureReason !== null) {
+      job.failedReason = info.failureReason;
+    }
+    if (info.decodeFailed) {
+      job.failedReason = job.failedReason ?? "decode_failed";
+    }
+    return job;
   }
 
   /**
@@ -486,6 +619,11 @@ export class Queue<
       await producer.shutdown();
       this.producerPromise = undefined;
     }
+    if (this.introspectorPromise) {
+      const insp = await this.introspectorPromise;
+      await insp.shutdown();
+      this.introspectorPromise = undefined;
+    }
     this.closed = true;
   }
 
@@ -509,39 +647,39 @@ const TLS_SCHEME: Record<string, string> = {
   "redis-cluster": "rediss-cluster",
   valkey: "valkeys",
   "valkey-cluster": "valkeys-cluster",
-}
+};
 const ALREADY_TLS = [
   "rediss://",
   "rediss-cluster://",
   "valkeys://",
   "valkeys-cluster://",
-]
+];
 
 function buildRedisUrl(c: ConnectionOptions): string {
   // A caller-supplied url wins over host/port + cluster, exactly as it
   // already wins over every other discrete connection field.
-  if (c.url) return applyTls(c.url, c.tls === true)
-  const host = c.host ?? "127.0.0.1"
-  const port = c.port ?? 6379
+  if (c.url) return applyTls(c.url, c.tls === true);
+  const host = c.host ?? "127.0.0.1";
+  const port = c.port ?? 6379;
   const auth = c.password
     ? `${c.username ?? ""}:${encodeURIComponent(c.password)}@`
-    : ""
-  const db = c.db != null ? `/${c.db}` : ""
-  const base = c.tls ? "rediss" : "redis"
-  const scheme = c.cluster === true ? `${base}-cluster` : base
-  return `${scheme}://${auth}${host}:${port}${db}`
+    : "";
+  const db = c.db != null ? `/${c.db}` : "";
+  const base = c.tls ? "rediss" : "redis";
+  const scheme = c.cluster === true ? `${base}-cluster` : base;
+  return `${scheme}://${auth}${host}:${port}${db}`;
 }
 
 function applyTls(url: string, tls: boolean): string {
-  if (!tls) return url
-  const lower = url.toLowerCase()
-  if (ALREADY_TLS.some((p) => lower.startsWith(p))) return url
-  const sep = url.indexOf("://")
+  if (!tls) return url;
+  const lower = url.toLowerCase();
+  if (ALREADY_TLS.some((p) => lower.startsWith(p))) return url;
+  const sep = url.indexOf("://");
   if (sep !== -1) {
-    const tlsScheme = TLS_SCHEME[lower.slice(0, sep)]
-    if (tlsScheme !== undefined) return tlsScheme + url.slice(sep)
+    const tlsScheme = TLS_SCHEME[lower.slice(0, sep)];
+    if (tlsScheme !== undefined) return tlsScheme + url.slice(sep);
   }
-  return "rediss://" + url
+  return "rediss://" + url;
 }
 
 /**
@@ -688,4 +826,4 @@ function buildNativeAddOptions(
  * directly from `dist/queue.js` by `__test__/cluster-url.test.ts` to
  * unit-test scheme handling without opening a Redis connection.
  */
-export const __urlInternals = { buildRedisUrl, applyTls }
+export const __urlInternals = { buildRedisUrl, applyTls };
