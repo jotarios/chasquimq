@@ -602,7 +602,7 @@ fn ms_to_systemtime(ms: i64) -> PyResult<SystemTime> {
     Ok(UNIX_EPOCH + Duration::from_millis(ms as u64))
 }
 
-fn map_engine_err(e: chasquimq::Error) -> PyErr {
+pub(crate) fn map_engine_err(e: chasquimq::Error) -> PyErr {
     PyRuntimeError::new_err(format!("{e}"))
 }
 

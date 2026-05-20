@@ -2,6 +2,7 @@ use pyo3::prelude::*;
 
 mod consumer;
 mod credential_provider;
+mod introspector;
 mod job;
 mod payload;
 mod producer;
@@ -39,5 +40,6 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<consumer::Consumer>()?;
     m.add_class::<scheduler::Scheduler>()?;
     m.add_class::<job::Job>()?;
+    m.add_class::<introspector::Introspector>()?;
     Ok(())
 }
