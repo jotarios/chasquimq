@@ -531,7 +531,12 @@ impl Producer {
     pub async fn drain(&self, group: String, drain_delayed: bool) -> napi::Result<i64> {
         let n = self
             .inner
-            .drain(&group, EngineDrainOptions { delayed: drain_delayed })
+            .drain(
+                &group,
+                EngineDrainOptions {
+                    delayed: drain_delayed,
+                },
+            )
             .await
             .map_err(map_engine_err)?;
         Ok(n as i64)
