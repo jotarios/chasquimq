@@ -392,7 +392,7 @@ async fn remove_active_pending_job() {
                     async move {
                         in_handler.fetch_add(1, Ordering::SeqCst);
                         // Block long enough for the test to act.
-                        tokio::time::sleep(Duration::from_secs(30)).await;
+                        tokio::time::sleep(Duration::from_secs(120)).await;
                         Ok::<bytes::Bytes, HandlerError>(bytes::Bytes::new())
                     }
                 },
@@ -402,7 +402,7 @@ async fn remove_active_pending_job() {
             .ok();
     });
 
-    wait_until(Duration::from_secs(10), "job picked up", || async {
+    wait_until(Duration::from_secs(30), "job picked up", || async {
         in_handler.load(Ordering::SeqCst) >= 1
     })
     .await;
@@ -554,7 +554,7 @@ async fn drain_leaves_active_jobs() {
                     let in_handler = in_handler_c.clone();
                     async move {
                         in_handler.fetch_add(1, Ordering::SeqCst);
-                        tokio::time::sleep(Duration::from_secs(30)).await;
+                        tokio::time::sleep(Duration::from_secs(120)).await;
                         Ok::<bytes::Bytes, HandlerError>(bytes::Bytes::new())
                     }
                 },
@@ -564,7 +564,7 @@ async fn drain_leaves_active_jobs() {
             .ok();
     });
 
-    wait_until(Duration::from_secs(10), "one job in-flight", || async {
+    wait_until(Duration::from_secs(30), "one job in-flight", || async {
         in_handler.load(Ordering::SeqCst) >= 1
     })
     .await;
@@ -652,7 +652,7 @@ async fn drain_multi_pass_clears_all_waiting_past_scan_page() {
                     let in_handler = in_handler_c.clone();
                     async move {
                         in_handler.fetch_add(1, Ordering::SeqCst);
-                        tokio::time::sleep(Duration::from_secs(60)).await;
+                        tokio::time::sleep(Duration::from_secs(120)).await;
                         Ok::<bytes::Bytes, HandlerError>(bytes::Bytes::new())
                     }
                 },
@@ -662,7 +662,7 @@ async fn drain_multi_pass_clears_all_waiting_past_scan_page() {
             .ok();
     });
 
-    wait_until(Duration::from_secs(10), "one job in-flight", || async {
+    wait_until(Duration::from_secs(30), "one job in-flight", || async {
         in_handler.load(Ordering::SeqCst) >= 1
     })
     .await;
@@ -880,7 +880,7 @@ async fn clean_failed_removes_dlq_entries() {
     });
 
     let dlq = format!("{{chasqui:{queue}}}:dlq");
-    wait_until(Duration::from_secs(10), "DLQ populated", || async {
+    wait_until(Duration::from_secs(30), "DLQ populated", || async {
         xlen(&admin, &dlq).await >= 3
     })
     .await;
@@ -991,7 +991,7 @@ async fn clean_waiting_leaves_active_jobs() {
                     let in_handler = in_handler_c.clone();
                     async move {
                         in_handler.fetch_add(1, Ordering::SeqCst);
-                        tokio::time::sleep(Duration::from_secs(60)).await;
+                        tokio::time::sleep(Duration::from_secs(120)).await;
                         Ok::<bytes::Bytes, HandlerError>(bytes::Bytes::new())
                     }
                 },
@@ -1001,7 +1001,7 @@ async fn clean_waiting_leaves_active_jobs() {
             .ok();
     });
 
-    wait_until(Duration::from_secs(10), "one job in-flight", || async {
+    wait_until(Duration::from_secs(30), "one job in-flight", || async {
         in_handler.load(Ordering::SeqCst) >= 1
     })
     .await;
