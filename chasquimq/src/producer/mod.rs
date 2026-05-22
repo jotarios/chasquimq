@@ -1,7 +1,11 @@
 mod dlq;
+mod maintenance;
+
+pub use maintenance::{DrainOptions, RemovalReport};
 
 use crate::config::ProducerConfig;
 use crate::error::{Error, Result};
+use crate::introspect::JobState;
 use crate::job::{Job, JobId, JobRetryOverride, now_ms};
 use crate::redis::commands::{
     CANCEL_DELAYED_SCRIPT, REMOVE_REPEATABLE_SCRIPT, SCHEDULE_DELAYED_IDEMPOTENT_SCRIPT,
@@ -380,6 +384,122 @@ impl<T> Producer<T> {
         }
         let values: Vec<Value> = pipeline.all().await.map_err(Error::Redis)?;
         Ok(values.iter().map(value_as_bytes).collect())
+    }
+
+    /// Remove a single job by its stable [`JobId`], everywhere it could
+    /// live: the delayed ZSET (plus its `didx` / `dlid` side-indexes), a
+    /// waiting or active main-stream entry, the DLQ, and the per-job
+    /// result key.
+    ///
+    /// Idempotent — a `job_id` that exists on no surface returns an
+    /// all-`false` [`RemovalReport`], not an error. The report flags
+    /// exactly which surfaces actually held the job, so a caller can tell
+    /// "removed from the DLQ" from "removed while delayed".
+    ///
+    /// `group` is the consumer-group name whose pending list is checked
+    /// for the active-job case — it must match whatever the workers run
+    /// under (`ConsumerConfig::group`, default `"default"`).
+    ///
+    /// The stable id lives inside the msgpack `Job<T>` envelope, not in
+    /// the Redis stream entry id, so the stream / DLQ branches run a
+    /// bounded `XRANGE` scan to translate the job id into an entry id
+    /// before the atomic delete. A job past the bounded scan window is
+    /// reported as "not on this surface" — pair with the introspection
+    /// API to locate jobs deep in a very large stream.
+    pub async fn remove(&self, job_id: &JobId, group: &str) -> Result<RemovalReport> {
+        maintenance::remove(
+            &self.pool,
+            self.queue_name.as_ref(),
+            self.stream_key.as_ref(),
+            self.delayed_key.as_ref(),
+            self.dlq_key.as_ref(),
+            job_id,
+            group,
+        )
+        .await
+    }
+
+    /// Clear every *waiting* job from the queue — main-stream entries not
+    /// in any consumer-group pending list — and, by default, the delayed
+    /// ZSET as well. In-flight (pending / active) jobs are left running.
+    ///
+    /// `group` is the consumer group whose PEL defines "in-flight".
+    /// [`DrainOptions::delayed`] (default `true`) controls whether
+    /// scheduled future jobs are dropped too; pass `DrainOptions { delayed:
+    /// false }` to keep them.
+    ///
+    /// Returns the total count of stream + delayed entries removed. The
+    /// stream drain runs in bounded passes, so a very large queue drains
+    /// over several round trips without ever blocking Redis.
+    pub async fn drain(&self, group: &str, opts: DrainOptions) -> Result<u64> {
+        maintenance::drain(
+            &self.pool,
+            self.queue_name.as_ref(),
+            self.stream_key.as_ref(),
+            self.delayed_key.as_ref(),
+            group,
+            opts,
+        )
+        .await
+    }
+
+    /// Age- and state-filtered bulk delete. Removes up to `limit` jobs in
+    /// the given [`JobState`] that are older than `now - grace_ms`, and
+    /// returns the removed job ids.
+    ///
+    /// Supported states: `Waiting`, `Failed` (DLQ), `Delayed`,
+    /// `Completed`. `Active` is intentionally a no-op — removing an
+    /// in-flight job mid-execution is a footgun; use [`Producer::remove`]
+    /// for the deliberate per-job case.
+    ///
+    /// Age basis per state:
+    /// - `Waiting` / `Failed`: the Redis stream entry id's millisecond
+    ///   timestamp.
+    /// - `Delayed`: the job's `created_at_ms` — when it was first
+    ///   scheduled — so `clean` drops delayed jobs created more than
+    ///   `grace_ms` ago, regardless of how far out they were due.
+    /// - `Completed`: `grace_ms` is **ignored** (a result key carries no
+    ///   creation timestamp; its own `result_ttl_secs` handles age-out).
+    ///   `clean(Completed, ...)` deletes up to `limit` result keys.
+    pub async fn clean(
+        &self,
+        group: &str,
+        grace_ms: u64,
+        limit: usize,
+        state: JobState,
+    ) -> Result<Vec<String>> {
+        maintenance::clean(
+            &self.pool,
+            self.queue_name.as_ref(),
+            self.stream_key.as_ref(),
+            self.delayed_key.as_ref(),
+            self.dlq_key.as_ref(),
+            group,
+            grace_ms,
+            limit,
+            state,
+        )
+        .await
+    }
+
+    /// Tear the entire queue down — delete the whole `{chasqui:<queue>}`
+    /// keyspace: the main stream and its consumer groups, the DLQ, the
+    /// delayed ZSET, every `didx` / `dlid` side-index, every result key,
+    /// all repeatable specs, the durable paused flag, the cross-process
+    /// events stream, and the promoter / scheduler leader-election locks.
+    ///
+    /// Implemented as a batched `SCAN` + `UNLINK` (async reclaim, so a
+    /// multi-GB stream never stalls Redis). Not atomic — but obliterate is
+    /// a destructive admin action and a crash mid-teardown is fully
+    /// recoverable by re-running (the next `SCAN` finds the remainder).
+    ///
+    /// `group` is accepted for signature symmetry with the other
+    /// maintenance methods; obliterate deletes the keyspace wholesale, so
+    /// every consumer group on the stream is dropped regardless.
+    ///
+    /// Returns the count of Redis keys removed.
+    pub async fn obliterate(&self, group: &str) -> Result<u64> {
+        maintenance::obliterate(&self.pool, self.queue_name.as_ref(), group).await
     }
 
     /// Durably pause every consumer of this queue (the cross-process

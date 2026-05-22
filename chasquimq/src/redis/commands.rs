@@ -541,6 +541,133 @@ end
 return 0
 "#;
 
+/// Atomically remove a single stream entry by its **stream entry id**, both
+/// acking it out of the consumer group's pending list and deleting it from
+/// the stream. Used by `Producer::remove` for the waiting / active branch.
+///
+/// The caller has already located the entry id via a bounded `XRANGE` scan
+/// (the job id lives inside the msgpack envelope, not in the entry id, so a
+/// pure-Lua match is impossible). This script just does the two-step delete
+/// atomically so a concurrent claim / replay can never observe the entry
+/// half-removed.
+///
+/// `XACKDEL` does ack + delete in one Redis primitive. It returns `1`
+/// (acked and removed), `-1` (id not in the stream), or `0` (in the stream
+/// but not pending in this group — i.e. a *waiting* entry). For a waiting
+/// entry `XACKDEL` returns `0` and does NOT delete it, so we follow up with
+/// an unconditional `XDEL` that removes the waiting entry regardless of PEL
+/// membership. The final return is `1` when the entry existed and is now
+/// gone (either path), `0` when it was already absent — the idempotent,
+/// report-what-actually-happened contract `Producer::remove` documents.
+///
+/// KEYS[1] = stream_key
+/// ARGV[1] = group, ARGV[2] = entry_id
+///
+/// Returns 1 if the entry was removed, 0 if it was already gone.
+pub(crate) const REMOVE_STREAM_ENTRY_SCRIPT: &str = r#"
+local ackdel = redis.call('XACKDEL', KEYS[1], ARGV[1], 'IDS', 1, ARGV[2])
+local first
+if type(ackdel) == 'table' then
+  first = tonumber(ackdel[1])
+else
+  first = tonumber(ackdel)
+end
+if first == 1 then
+  return 1
+end
+-- first is 0 (waiting, not pending) or -1 (already gone). XDEL removes a
+-- waiting entry; on an already-gone id it returns 0 — exactly the
+-- idempotent answer we want.
+local deleted = redis.call('XDEL', KEYS[1], ARGV[2])
+return deleted
+"#;
+
+/// Drain the *waiting* entries from a stream — every entry NOT currently in
+/// the consumer group's pending list — without touching in-flight (pending)
+/// jobs. Used by `Producer::drain`.
+///
+/// A ChasquiMQ stream mixes waiting and active entries on the one Redis
+/// Stream (a delivered-but-unacked entry stays in the stream and is also
+/// referenced by the group's PEL). BullMQ keeps its wait list as a separate
+/// Redis list, so its drain is a single `DEL`; ours has to subtract the
+/// pending set first.
+///
+/// The script walks `XRANGE - + COUNT <limit>`, builds a lookup of the
+/// group's pending entry ids from `XPENDING ... <limit>`, and `XDEL`s every
+/// scanned entry that is not pending. `limit` bounds both the scan and the
+/// pending fetch so a single invocation can never block Redis on an
+/// unbounded stream; the caller loops until a pass deletes nothing.
+///
+/// A fresh queue with no consumer group yet makes `XPENDING` raise
+/// `NOGROUP`; `redis.pcall` swallows that and the pending set is simply
+/// empty (every entry counts as waiting), which is correct.
+///
+/// KEYS[1] = stream_key
+/// ARGV[1] = group, ARGV[2] = limit
+///
+/// Returns the count of entries deleted in this pass.
+pub(crate) const DRAIN_STREAM_SCRIPT: &str = r#"
+local limit = tonumber(ARGV[1 + 1])
+if limit <= 0 then
+  return 0
+end
+local entries = redis.call('XRANGE', KEYS[1], '-', '+', 'COUNT', limit)
+if #entries == 0 then
+  return 0
+end
+local pending = {}
+local pend = redis.pcall('XPENDING', KEYS[1], ARGV[1], '-', '+', limit)
+if type(pend) == 'table' and pend.err == nil then
+  for _, p in ipairs(pend) do
+    pending[p[1]] = true
+  end
+end
+local deleted = 0
+for _, entry in ipairs(entries) do
+  local id = entry[1]
+  if not pending[id] then
+    deleted = deleted + redis.call('XDEL', KEYS[1], id)
+  end
+end
+return deleted
+"#;
+
+/// Bulk-delete a known set of stream entry ids by **stream entry id**, both
+/// acking them out of the consumer group's PEL and deleting them from the
+/// stream. Used by `Producer::clean` for the waiting / failed (DLQ) states
+/// after the caller has age-filtered and capped the id list Rust-side.
+///
+/// Each id goes through the same `XACKDEL`-then-`XDEL` fallback as
+/// `REMOVE_STREAM_ENTRY_SCRIPT`: `XACKDEL` removes a pending entry, the
+/// `XDEL` fallback removes a waiting one. Doing the whole batch in one Lua
+/// invocation keeps `clean` to a single round trip instead of one per id.
+///
+/// KEYS[1] = stream_key (or dlq_key — both are streams)
+/// ARGV[1] = group, ARGV[2..] = entry ids to delete
+///
+/// Returns the count of entries actually removed.
+pub(crate) const CLEAN_STREAM_SCRIPT: &str = r#"
+local removed = 0
+local i = 2
+while i <= #ARGV do
+  local id = ARGV[i]
+  local ackdel = redis.call('XACKDEL', KEYS[1], ARGV[1], 'IDS', 1, id)
+  local first
+  if type(ackdel) == 'table' then
+    first = tonumber(ackdel[1])
+  else
+    first = tonumber(ackdel)
+  end
+  if first == 1 then
+    removed = removed + 1
+  else
+    removed = removed + redis.call('XDEL', KEYS[1], id)
+  end
+  i = i + 1
+end
+return removed
+"#;
+
 pub(crate) fn xadd_args(
     stream_key: &str,
     producer_id: &str,
@@ -1106,6 +1233,107 @@ pub(crate) fn evalsha_acquire_lock_args(
         Value::from(holder_id),
         Value::from(ttl_secs as i64),
     ]
+}
+
+/// EVALSHA argument vector for [`REMOVE_STREAM_ENTRY_SCRIPT`].
+pub(crate) fn evalsha_remove_stream_entry_args(
+    sha: &str,
+    stream_key: &str,
+    group: &str,
+    entry_id: &str,
+) -> Vec<Value> {
+    vec![
+        Value::from(sha),
+        Value::from(1_i64),
+        Value::from(stream_key),
+        Value::from(group),
+        Value::from(entry_id),
+    ]
+}
+
+/// EVAL fallback argument vector for [`REMOVE_STREAM_ENTRY_SCRIPT`].
+pub(crate) fn eval_remove_stream_entry_args(
+    script: &str,
+    stream_key: &str,
+    group: &str,
+    entry_id: &str,
+) -> Vec<Value> {
+    vec![
+        Value::from(script),
+        Value::from(1_i64),
+        Value::from(stream_key),
+        Value::from(group),
+        Value::from(entry_id),
+    ]
+}
+
+/// EVALSHA argument vector for [`DRAIN_STREAM_SCRIPT`].
+pub(crate) fn evalsha_drain_stream_args(
+    sha: &str,
+    stream_key: &str,
+    group: &str,
+    limit: u64,
+) -> Vec<Value> {
+    vec![
+        Value::from(sha),
+        Value::from(1_i64),
+        Value::from(stream_key),
+        Value::from(group),
+        Value::from(limit as i64),
+    ]
+}
+
+/// EVAL fallback argument vector for [`DRAIN_STREAM_SCRIPT`].
+pub(crate) fn eval_drain_stream_args(
+    script: &str,
+    stream_key: &str,
+    group: &str,
+    limit: u64,
+) -> Vec<Value> {
+    vec![
+        Value::from(script),
+        Value::from(1_i64),
+        Value::from(stream_key),
+        Value::from(group),
+        Value::from(limit as i64),
+    ]
+}
+
+/// EVALSHA argument vector for [`CLEAN_STREAM_SCRIPT`]. `entry_ids` are
+/// the stream entry ids the caller already age-filtered and capped.
+pub(crate) fn evalsha_clean_stream_args(
+    sha: &str,
+    stream_key: &str,
+    group: &str,
+    entry_ids: &[String],
+) -> Vec<Value> {
+    let mut args: Vec<Value> = Vec::with_capacity(4 + entry_ids.len());
+    args.push(Value::from(sha));
+    args.push(Value::from(1_i64));
+    args.push(Value::from(stream_key));
+    args.push(Value::from(group));
+    for id in entry_ids {
+        args.push(Value::from(id.as_str()));
+    }
+    args
+}
+
+/// EVAL fallback argument vector for [`CLEAN_STREAM_SCRIPT`].
+pub(crate) fn eval_clean_stream_args(
+    script: &str,
+    stream_key: &str,
+    group: &str,
+    entry_ids: &[String],
+) -> Vec<Value> {
+    let mut args: Vec<Value> = Vec::with_capacity(4 + entry_ids.len());
+    args.push(Value::from(script));
+    args.push(Value::from(1_i64));
+    args.push(Value::from(stream_key));
+    args.push(Value::from(group));
+    for id in entry_ids {
+        args.push(Value::from(id.as_str()));
+    }
+    args
 }
 
 #[cfg(test)]
