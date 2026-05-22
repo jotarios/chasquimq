@@ -94,6 +94,10 @@ export default defineConfig({
             },
             { label: "Idempotent add", slug: "guides/idempotent-add" },
             { label: "Inspect jobs", slug: "guides/inspect-jobs" },
+            {
+              label: "Clean and obliterate",
+              slug: "guides/clean-and-obliterate",
+            },
             { label: "Observe the engine", slug: "guides/observe-the-engine" },
             { label: "Tune for throughput", slug: "guides/tune-for-throughput" },
             {

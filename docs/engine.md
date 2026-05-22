@@ -85,6 +85,24 @@ Operational notes:
 - **`completed` is approximate.** It SCANs the `result:*` keyspace under the per-queue hash tag; very large keyspaces return the cap. Tighten or widen via `CHASQUIMQ_COMPLETED_SCAN_CAP`.
 - **No hot-path cost.** The producer / consumer / promoter / scheduler paths are byte-for-byte unchanged by introspection — verified by the no-regression bench in [`benchmarks/chasquimq-1.0.md`](../benchmarks/chasquimq-1.0.md).
 
+## Job maintenance
+
+`Producer` carries four maintenance methods for tearing jobs — or a whole queue — down. They are off the hot path (no `XADD` / `XREADGROUP` / `XACK` change) and every scan is bounded so a single call can never block Redis. All four take the consumer-group name (for stream acks); the shims pass their configured group, defaulting to `"default"`.
+
+Surface:
+
+- **`remove(job_id, group) -> RemovalReport`** — delete one job everywhere it could live: the delayed ZSET (plus its `didx` / `dlid` side-indexes), a waiting or active main-stream entry, the DLQ, and the per-job result key. Idempotent — a `job_id` on no surface returns an all-`false` `RemovalReport { delayed, stream, dlq, result }`, not an error. The stable `JobId` lives inside the msgpack envelope, not the Redis stream entry id, so the stream / DLQ branches run a bounded `XRANGE` scan to translate the job id to an entry id before the atomic `XACKDEL` / `XDEL`. A job past the bounded scan window reports as "not on this surface" — pair with the introspection API to find jobs deep in a very large stream. The delayed branch reuses `CANCEL_DELAYED_SCRIPT` verbatim.
+- **`drain(group, DrainOptions) -> u64`** — clear every *waiting* job (main-stream entries not in any consumer-group PEL) and, by default, the delayed ZSET. In-flight (pending) jobs are left running. `DrainOptions { delayed: false }` keeps scheduled future jobs. A ChasquiMQ stream mixes waiting and active entries on one Redis Stream, so `DRAIN_STREAM_SCRIPT` subtracts the `XPENDING` set from an `XRANGE` page and `XDEL`s the complement; the drain runs in bounded passes until a pass deletes nothing. Returns the total stream + delayed count removed.
+- **`clean(group, grace_ms, limit, state) -> Vec<String>`** — age- and state-filtered bulk delete; removes up to `limit` jobs in `state` older than `now - grace_ms` and returns the removed job ids. Supported states: `Waiting`, `Failed` (DLQ), `Delayed`, `Completed`. `Active` is a deliberate no-op (removing an in-flight job mid-execution is a footgun — use `remove`). Age basis: the stream entry id's millisecond prefix for `Waiting` / `Failed`; the job's `created_at_ms` for `Delayed`; `grace_ms` is **ignored** for `Completed` (a result key has no creation timestamp — its own `result_ttl_secs` handles age-out, so `clean(Completed, …)` is limit-only).
+- **`obliterate(group) -> u64`** — tear the entire `{chasqui:<queue>}` keyspace down: the main stream and its consumer groups, the DLQ, the delayed ZSET, every `didx` / `dlid` side-index, every result key, all repeatable specs, the durable paused flag, the events stream, and the promoter / scheduler locks. Implemented as a batched `SCAN` + `UNLINK` (async reclaim, so a multi-GB stream never stalls Redis). Not atomic — but obliterate is a destructive admin op and a crash mid-teardown is fully recoverable by re-running (the next `SCAN` finds the remainder). Returns the count of Redis keys removed.
+
+Operational notes:
+
+- **`remove` / `clean` scans are bounded.** They walk a single `XRANGE … COUNT 1024` window. A job further back than that is reported as absent on the stream / DLQ surface — not an error, just out of the convenience-scan window. For a job deep in a very large stream, locate it via `get_jobs` pagination first.
+- **`obliterate` drops every consumer group.** It deletes the stream key wholesale, so all consumer groups on the queue go with it. The `group` argument is taken for signature symmetry only.
+- **`clean(Completed)` is limit-only.** No `grace_ms` filtering — result keys carry no creation timestamp. Rely on `result_ttl_secs` for time-based result expiry; use `clean(Completed, …)` only to reclaim result keys eagerly.
+- **The CLI exposes `clean` and `obliterate`.** `chasqui clean <queue> --state <s> --grace-ms <ms> --limit <n>` and `chasqui obliterate <queue>`; both are destructive and prompt for confirmation unless `--yes` is passed.
+
 ## Observability
 
 Every load-bearing engine subsystem emits structured events through the single `chasquimq::MetricsSink` trait:

@@ -288,8 +288,69 @@ chasqui resume emails
 # queue emails resumed
 ```
 
+## `chasqui clean`
+
+```bash
+chasqui clean <QUEUE> [--state <STATE>] [--grace-ms <MS>] [--limit <N>] [--group <NAME>] [--yes] [--redis-url <URL>]
+```
+
+Age- and state-filtered bulk delete. Removes up to `--limit` jobs in
+`--state` that are older than `--grace-ms` milliseconds and prints the
+removed job ids. Prompts for confirmation unless `--yes` is passed.
+
+**Flags:**
+
+- `--state <STATE>` — one of `completed` | `failed` | `delayed` | `waiting`. **Default `completed`.**
+- `--grace-ms <MS>` — only remove jobs older than this many milliseconds. **Default `0`** (remove everything in the state). Ignored for `completed` — a stored result has no creation timestamp.
+- `--limit <N>` — cap on how many jobs are removed in this call. **Default `1000`.**
+- `--group <NAME>` — consumer group used for stream acks. **Default `default`.**
+- `--yes` — skip the interactive confirmation.
+- `--redis-url <URL>` — **default `redis://127.0.0.1:6379`**.
+
+**Example:**
+
+```bash
+chasqui clean emails --state failed --grace-ms 86400000 --limit 500 --yes
+# cleaned 312 'failed' job(s) from queue emails
+```
+
+The age basis is the Redis stream entry id for `waiting` / `failed`,
+the job's `created_at_ms` for `delayed`. `active` is not a valid state —
+removing an in-flight job mid-execution is a footgun; the engine API's
+per-job `remove` is the deliberate escape hatch.
+
+## `chasqui obliterate`
+
+```bash
+chasqui obliterate <QUEUE> [--group <NAME>] [--yes] [--redis-url <URL>]
+```
+
+Tear an entire queue down — delete every Redis key backing it: the
+stream and its consumer groups, the DLQ, delayed jobs, all per-job
+side-indexes and results, repeatable specs, the pause flag, and the
+events stream. **Destructive and not reversible.** Prompts for
+confirmation unless `--yes` is passed.
+
+**Flags:**
+
+- `--group <NAME>` — accepted for symmetry; obliterate drops every consumer group regardless. **Default `default`.**
+- `--yes` — skip the interactive confirmation.
+- `--redis-url <URL>` — **default `redis://127.0.0.1:6379`**.
+
+**Example:**
+
+```bash
+chasqui obliterate emails --yes
+# obliterated queue emails: removed 1284 Redis key(s)
+```
+
+**Under the hood:** a batched `SCAN MATCH {chasqui:<queue>}:*` followed
+by `UNLINK` (async reclaim, so a multi-GB stream never stalls Redis).
+Not atomic — but a crash mid-teardown is recoverable by re-running.
+
 ## See also
 
+- [Clean and obliterate guide](/guides/clean-and-obliterate/) — when to use each maintenance method.
 - [Pause and resume concept](/concepts/pause-and-resume/) — process-local vs. durable pause, and what drains.
 - [DLQ and recovery concept](/concepts/dlq-and-recovery/) — when to peek vs. replay.
 - [The scheduler concept](/concepts/the-scheduler/) — what `repeatable list` is showing you.

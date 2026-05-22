@@ -64,7 +64,7 @@ asyncio.run(main())
 
 | Surface | What it does |
 |---|---|
-| `Queue` | Producer + queue inspection. `add` / `add_bulk` / `add_unique` / `get_job` / `get_jobs` / `get_jobs_page` / `get_job_state` / `get_job_counts` / `get_waiting_count` / `get_active_count` / `get_delayed_count` / `get_completed_count` / `get_failed_count` / `count` / `get_job_result` / `peek_dlq` / `replay_dlq` / `cancel_delayed` / `get_repeatable_jobs` / `remove_repeatable_by_key` / `pause` / `resume` / `is_paused`. Async context manager. |
+| `Queue` | Producer + queue inspection. `add` / `add_bulk` / `add_unique` / `get_job` / `get_jobs` / `get_jobs_page` / `get_job_state` / `get_job_counts` / `get_waiting_count` / `get_active_count` / `get_delayed_count` / `get_completed_count` / `get_failed_count` / `count` / `get_job_result` / `peek_dlq` / `replay_dlq` / `cancel_delayed` / `get_repeatable_jobs` / `remove_repeatable_by_key` / `pause` / `resume` / `is_paused` / `remove` / `remove_report` / `drain` / `clean` / `obliterate`. Async context manager. |
 | `Worker` | Consumer pool. asyncio-first dispatch, opt-in result storage (`store_results=True`), graceful shutdown, `pause` / `resume` / `is_paused`. Async context manager. |
 | `Job` | Frozen dataclass returned by `Queue.add`. Has `id`, `name`, `data`, `attempts_made`, `wait_for_result(timeout=)`. |
 | `QueueEvents` | Asyncio iterator over the engine events stream. Cross-process pub/sub for `completed` / `failed` / `dlq` / `retry-scheduled` / `delayed`. |
@@ -249,6 +249,36 @@ Counts are cheap (~5 Redis round trips, one per state column). `completed` runs 
 ```python
 queue = Queue("emails", redis_url=url, consumer_group="primary")
 ```
+
+### Maintenance
+
+Tear individual jobs — or a whole queue — down. All four methods are off the hot path; every scan is bounded so a single call never blocks Redis.
+
+```python
+async with Queue("emails", redis_url=url) as queue:
+    # Remove one job from everywhere it lives — delayed stage, a waiting
+    # or in-flight stream entry, the DLQ, and the stored result.
+    surfaces = await queue.remove("job-123")
+    # => number of surfaces the job was removed from (0 if not found)
+
+    report = await queue.remove_report("job-123")
+    # => {"delayed": ..., "stream": ..., "dlq": ..., "result": ...}
+
+    # Clear every waiting job. In-flight jobs keep running. Delayed jobs
+    # go too unless you pass delayed=False.
+    drained = await queue.drain()           # => count removed
+    await queue.drain(delayed=False)        # keep scheduled future jobs
+
+    # Age- + state-filtered bulk delete. Removes up to `limit` jobs in
+    # the given state older than `grace_ms`; returns the removed ids.
+    ids = await queue.clean(60_000, 1000, "completed")
+    #     clean(grace_ms, limit, "completed" | "failed" | "delayed" | "waiting")
+
+    # Nuke the entire queue keyspace. Returns the key count removed.
+    await queue.obliterate()
+```
+
+`remove` is idempotent — a job id that exists on no surface resolves without error (count `0`). `clean` ignores `grace_ms` for `"completed"` (a stored result has no creation timestamp; rely on result TTL for time-based expiry). `clean` with `"active"` is a no-op — use `remove` for the deliberate per-job case. `obliterate` cannot be undone.
 
 ## Power-user surface
 

@@ -68,7 +68,7 @@ main()
 
 | Surface | What it does |
 |---|---|
-| `Queue<DataType, ResultType, NameType>` | Producer + queue inspection. `add` / `addBulk` / `addUnique` / `getJob` / `getJobs` / `getJobState` / `getJobCounts` / `getWaitingCount` / `getActiveCount` / `getDelayedCount` / `getCompletedCount` / `getFailedCount` / `count` / `getJobResult` / `peekDlq` / `replayDlq` / `cancelDelayed` / `getRepeatableJobs` / `removeRepeatableByKey` / `pause` / `resume` / `isPaused`. `[Symbol.asyncDispose]`. |
+| `Queue<DataType, ResultType, NameType>` | Producer + queue inspection. `add` / `addBulk` / `addUnique` / `getJob` / `getJobs` / `getJobState` / `getJobCounts` / `getWaitingCount` / `getActiveCount` / `getDelayedCount` / `getCompletedCount` / `getFailedCount` / `count` / `getJobResult` / `peekDlq` / `replayDlq` / `cancelDelayed` / `getRepeatableJobs` / `removeRepeatableByKey` / `pause` / `resume` / `isPaused` / `remove` / `removeReport` / `drain` / `clean` / `obliterate`. `[Symbol.asyncDispose]`. |
 | `Worker<DataType, ResultType, NameType>` | Consumer pool. tokio-side dispatch, opt-in result storage (`storeResults: true`), `EventEmitter` events (`completed` / `failed` / `error`), `pause` / `resume` / `isPaused`. `[Symbol.asyncDispose]`. |
 | `Job<DataType, ResultType, NameType>` | Read-only handle. `id`, `name`, `data`, `attemptsMade`, `waitForResult({ timeoutMs, intervalMs, signal })`. |
 | `QueueEvents` | Cross-process pub/sub via the events stream. Subscribe to `completed` / `failed` / `dlq` / `retry-scheduled` / `delayed` / `drained`. `[Symbol.asyncDispose]`. |
@@ -219,6 +219,39 @@ Counts are cheap (~5 Redis round trips, one per state column). `completed` runs 
 ```ts
 const queue = new Queue("emails", { connection, consumerGroup: "primary" })
 ```
+
+### Maintenance
+
+Tear individual jobs — or a whole queue — down. All four methods are off the hot path; every scan is bounded so a single call never blocks Redis.
+
+```ts
+const queue = new Queue("emails", { connection })
+
+// Remove one job from everywhere it lives — delayed stage, a waiting or
+// in-flight stream entry, the DLQ, and the stored result. Idempotent.
+const surfaces = await queue.remove("job-123")
+// => number of surfaces the job was removed from (0 if not found)
+
+const report = await queue.removeReport("job-123")
+// => { delayed, stream, dlq, result } booleans
+
+// Clear every waiting job. In-flight jobs keep running. Delayed jobs go
+// too unless you pass `false`.
+const drained = await queue.drain() // => count removed
+await queue.drain(false) // keep scheduled future jobs
+
+// Age- + state-filtered bulk delete. Removes up to `limit` jobs in the
+// given state older than `grace` ms; returns the removed job ids.
+const ids = await queue.clean(60_000, 1000, "completed")
+//          clean(graceMs,  limit, "completed" | "failed" | "delayed" | "waiting")
+
+// Nuke the entire queue keyspace — stream, DLQ, delayed, results,
+// repeatable specs, the pause flag, the events stream. Returns the
+// Redis key count removed.
+await queue.obliterate()
+```
+
+`remove` is idempotent — a job id that exists on no surface resolves without error (count `0`). `clean` ignores `grace` for `"completed"` (a stored result has no creation timestamp; rely on result TTL for time-based expiry). `clean` with `"active"` is a no-op — use `remove` for the deliberate per-job case. `obliterate` cannot be undone.
 
 ## Power-user surface
 
