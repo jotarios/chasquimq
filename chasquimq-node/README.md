@@ -68,7 +68,7 @@ main()
 
 | Surface | What it does |
 |---|---|
-| `Queue<DataType, ResultType, NameType>` | Producer + queue inspection. `add` / `addBulk` / `addUnique` / `getJobResult` / `peekDlq` / `replayDlq` / `cancelDelayed` / `getRepeatableJobs` / `removeRepeatableByKey` / `pause` / `resume` / `isPaused`. `[Symbol.asyncDispose]`. |
+| `Queue<DataType, ResultType, NameType>` | Producer + queue inspection. `add` / `addBulk` / `addUnique` / `getJob` / `getJobs` / `getJobState` / `getJobCounts` / `getWaitingCount` / `getActiveCount` / `getDelayedCount` / `getCompletedCount` / `getFailedCount` / `count` / `getJobResult` / `peekDlq` / `replayDlq` / `cancelDelayed` / `getRepeatableJobs` / `removeRepeatableByKey` / `pause` / `resume` / `isPaused`. `[Symbol.asyncDispose]`. |
 | `Worker<DataType, ResultType, NameType>` | Consumer pool. tokio-side dispatch, opt-in result storage (`storeResults: true`), `EventEmitter` events (`completed` / `failed` / `error`), `pause` / `resume` / `isPaused`. `[Symbol.asyncDispose]`. |
 | `Job<DataType, ResultType, NameType>` | Read-only handle. `id`, `name`, `data`, `attemptsMade`, `waitForResult({ timeoutMs, intervalMs, signal })`. |
 | `QueueEvents` | Cross-process pub/sub via the events stream. Subscribe to `completed` / `failed` / `dlq` / `retry-scheduled` / `delayed` / `drained`. `[Symbol.asyncDispose]`. |
@@ -189,6 +189,36 @@ await queue.resume()           // lift it everywhere
 ```
 
 The same durable flag is what the CLI's `chasqui pause <queue>` / `chasqui resume <queue>` toggle. Both surfaces are idempotent — double-pause / double-resume are no-ops.
+
+### Inspect jobs
+
+Read-only introspection across the queue's stream, delayed ZSET, DLQ, and result-key surfaces. Bounded scans; no secondary index; zero impact on the producer / consumer hot paths.
+
+```ts
+const queue = new Queue("emails", { connection })
+
+const counts = await queue.getJobCounts()
+// => { waiting, active, delayed, completed, failed, paused }
+
+const state = await queue.getJobState("job-123")
+// => "waiting" | "active" | "delayed" | "completed" | "failed" | "unknown"
+
+const job = await queue.getJob("job-123")
+// => Job | undefined  (data is msgpack-decoded; engine state on attemptsMade / processedOn / finishedOn / failedReason)
+
+const page = await queue.getJobs("waiting", 0, 50)
+// => Job[]   (paginated; pass end > start to slice — start/end are inclusive indices)
+```
+
+State resolution is **live-state-first**: pending (PEL) → delayed → waiting → DLQ → result. A job that's been replayed from DLQ resolves as `"waiting"`, not `"completed"`, during the race window. A missing id resolves to `"unknown"` and `getJob` returns `undefined`.
+
+Counts are cheap (~5 Redis round trips, one per state column). `completed` runs a bounded `SCAN` over the `result:*` keyspace under the per-queue hash tag — large keyspaces return a lower-bound figure (the cap is configurable via `CHASQUIMQ_COMPLETED_SCAN_CAP` on the engine, default 10,000).
+
+`QueueOptions.consumerGroup` (optional, default `"default"`) configures which consumer group's PEL is read for the `active` column. Set it on the `Queue` if your `Worker` uses a non-default `group`.
+
+```ts
+const queue = new Queue("emails", { connection, consumerGroup: "primary" })
+```
 
 ## Power-user surface
 

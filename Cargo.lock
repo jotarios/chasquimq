@@ -219,6 +219,7 @@ dependencies = [
  "fred",
  "futures-util",
  "rmp-serde",
+ "rmpv",
  "serde",
  "thiserror",
  "tokio",

@@ -92,6 +92,7 @@ class Queue:
         max_payload_bytes: Optional[int] = None,
         reconnect_max_attempts: Optional[int] = None,
         credential_provider: Optional[CredentialProvider] = None,
+        consumer_group: Optional[str] = None,
     ) -> None:
         self._name = name
         self._redis_url = apply_tls(redis_url, tls)
@@ -112,7 +113,13 @@ class Queue:
         # ``Queue.add`` is first awaited there is, by definition, a
         # running loop.
         self._credential_provider = credential_provider
+        # Consumer group whose PEL the introspector reads when computing
+        # "active" state. Must match whatever the workers run under;
+        # ``None`` resolves to the engine default ("default") on the
+        # native side. Symmetric with the Node shim's ``consumerGroup``.
+        self._consumer_group = consumer_group
         self._producer: Optional[_native.Producer] = None
+        self._introspector: Optional[_native.Introspector] = None
         self._closed = False
 
     @property
@@ -140,6 +147,20 @@ class Queue:
                 self._redis_url, self._name, **kwargs
             )
         return self._producer
+
+    def _get_introspector(self) -> _native.Introspector:
+        if self._introspector is None:
+            kwargs: dict[str, Any] = {}
+            if self._consumer_group is not None:
+                kwargs["consumer_group"] = self._consumer_group
+            if self._reconnect_max_attempts is not None:
+                kwargs["reconnect_max_attempts"] = self._reconnect_max_attempts
+            if self._credential_provider is not None:
+                kwargs["credential_provider"] = self._credential_provider
+            self._introspector = _native.Introspector(
+                self._redis_url, self._name, **kwargs
+            )
+        return self._introspector
 
     async def add(
         self,
@@ -485,10 +506,163 @@ class Queue:
         producer = self._get_producer()
         return await producer.remove_repeatable_by_key(key)
 
+    async def get_job_counts(
+        self, *types: str
+    ) -> dict[str, int]:
+        """Per-state counts: ``{waiting, active, delayed, completed,
+        failed, paused}``.
+
+        Pass no args for the full dict; pass one or more state names to
+        filter (returned dict contains only the keys you asked for).
+        ``completed`` is via bounded SCAN over ``result:*`` keys — large
+        keyspaces may return a lower-bound figure (cap configurable via
+        the ``CHASQUIMQ_COMPLETED_SCAN_CAP`` env var on the engine).
+
+        Mirrors :class:`chasquimq.Queue` (Node).
+        """
+        insp = self._get_introspector()
+        c = await insp.get_job_counts()
+        all_counts: dict[str, int] = {
+            "waiting": int(c["waiting"]),
+            "active": int(c["active"]),
+            "delayed": int(c["delayed"]),
+            "completed": int(c["completed"]),
+            "failed": int(c["failed"]),
+            "paused": int(c["paused"]),
+        }
+        if not types:
+            return all_counts
+        return {t: all_counts[t] for t in types if t in all_counts}
+
+    async def get_job_state(self, job_id: str) -> str:
+        """One of ``"waiting" | "active" | "delayed" | "completed" |
+        "failed" | "unknown"``.
+
+        Live-state-first: a job that's been replayed from DLQ resolves
+        as ``"waiting"`` (not ``"completed"``) during the race window.
+        Returns ``"unknown"`` when no surface knows about the id.
+        """
+        insp = self._get_introspector()
+        return await insp.get_job_state(job_id)
+
+    async def get_job(self, job_id: str) -> Optional[Job]:
+        """Look up a single job across the four queue surfaces (PEL,
+        delayed ZSET, main stream, DLQ, result key). Returns ``None``
+        when the id isn't found in any surface. Bounded scan.
+
+        The returned :class:`Job` carries the msgpack-decoded payload as
+        ``data``. Engine state surfaces via ``attempt`` / ``name`` /
+        ``created_at_ms``. When the inspector found the entry but the
+        msgpack envelope did not decode, ``data`` is the raw bytes and
+        ``attempt == 0``.
+        """
+        insp = self._get_introspector()
+        info = await insp.get_job(job_id)
+        if info is None:
+            return None
+        return self._native_info_to_job(info)
+
+    async def get_jobs(
+        self,
+        state: str = "waiting",
+        offset: int = 0,
+        limit: int = 100,
+        cursor: Optional[str] = None,
+    ) -> list[Job]:
+        """Paginated listing within a single state.
+
+        ``state`` is one of ``"waiting" | "active" | "delayed" |
+        "completed" | "failed"``. Pagination uses the ``next_cursor``
+        returned by :meth:`get_jobs_page`; this method drops it on the
+        floor and just returns the first page. For multi-page sweeps,
+        use :meth:`get_jobs_page`.
+        """
+        page, _next = await self.get_jobs_page(
+            state, offset=offset, limit=limit, cursor=cursor
+        )
+        return page
+
+    async def get_jobs_page(
+        self,
+        state: str = "waiting",
+        *,
+        offset: int = 0,
+        limit: int = 100,
+        cursor: Optional[str] = None,
+    ) -> Tuple[list[Job], Optional[str]]:
+        """Paginated listing — page + ``next_cursor``.
+
+        Returns a tuple ``(jobs, next_cursor)``; the cursor is ``None``
+        at the end of the range. Cursor semantics depend on state:
+
+        * ``"waiting"`` / ``"failed"``: cursor is the last stream entry
+          id seen (exclusive). ``offset`` is honored only on the first
+          call (when ``cursor`` is ``None``).
+        * ``"delayed"``: cursor is the last score seen as a stringified
+          millisecond timestamp (exclusive).
+        * ``"completed"``: cursor is the raw SCAN cursor (``"0"`` resets
+          to the start).
+        """
+        insp = self._get_introspector()
+        rows, next_cursor = await insp.get_jobs(state, offset, limit, cursor)
+        jobs = [self._native_info_to_job(info) for info in rows]
+        return jobs, next_cursor
+
+    async def get_waiting_count(self) -> int:
+        c = await self.get_job_counts("waiting")
+        return c.get("waiting", 0)
+
+    async def get_active_count(self) -> int:
+        c = await self.get_job_counts("active")
+        return c.get("active", 0)
+
+    async def get_delayed_count(self) -> int:
+        c = await self.get_job_counts("delayed")
+        return c.get("delayed", 0)
+
+    async def get_completed_count(self) -> int:
+        c = await self.get_job_counts("completed")
+        return c.get("completed", 0)
+
+    async def get_failed_count(self) -> int:
+        c = await self.get_job_counts("failed")
+        return c.get("failed", 0)
+
+    async def count(self) -> int:
+        """Number of jobs that could still run: waiting + active + delayed.
+
+        Mirrors BullMQ's ``Queue.count`` so swap-in users see the same
+        shape.
+        """
+        c = await self.get_job_counts()
+        return c.get("waiting", 0) + c.get("active", 0) + c.get("delayed", 0)
+
+    def _native_info_to_job(self, info: dict[str, Any]) -> Job:
+        raw_payload: bytes = info.get("payload") or b""
+        decode_failed = bool(info.get("decode_failed"))
+        if decode_failed or not raw_payload:
+            data: Any = raw_payload
+        else:
+            try:
+                data = decode_payload(raw_payload)
+            except Exception:
+                data = raw_payload
+        return Job(
+            id=info["id"],
+            name=info.get("name") or "",
+            data=data,
+            attempt=int(info.get("attempt", 0)),
+            created_at_ms=int(info.get("created_at_ms", 0)),
+            _queue=self,
+        )
+
     async def close(self) -> None:
         if self._producer is not None:
             await self._producer.shutdown()
             self._producer = None
+        if self._introspector is not None:
+            await self._introspector.shutdown()
+            self._introspector = None
         self._closed = True
 
     async def __aenter__(self) -> "Queue":

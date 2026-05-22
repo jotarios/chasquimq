@@ -113,6 +113,14 @@ exists.
 | QueueEvents subscriber start id | `QueueEventsOptions.lastEventId` (**`"$"`**) | `QueueEvents(last_event_id="$")` | (build your own with `XREAD`) | Where to start tailing the events stream. |
 | QueueEvents block timeout (ms) | `QueueEventsOptions.blockingTimeout` (**10_000**) | `QueueEvents(block_ms=5000)` | n/a | `XREAD BLOCK` timeout. |
 
+## Introspection
+
+| Option | Node | Python | Rust | Controls |
+|---|---|---|---|---|
+| Consumer group for `active` lookups | `QueueOptions.consumerGroup` (**`"default"`**) | `Queue(consumer_group=...)` (**`None`** → engine `"default"`) | `Introspector::connect(..., group)` (**`None`** → `ConsumerConfig::default().group`) | Which consumer group's PEL the introspector reads for the `active` column. Set to the `Worker`'s `group` when it's not the default. |
+| `completed` SCAN cap | (engine env var) | (engine env var) | `CHASQUIMQ_COMPLETED_SCAN_CAP` env var (**`10000`**) | Upper bound on the bounded `SCAN result:*` used to compute `JobCounts::completed`. When hit, `completed_is_capped = true` and `completed` is a lower bound. |
+| Stream scan page (default / max) | (engine constant) | (engine constant) | `STREAM_SCAN_PAGE_DEFAULT` (**1024**) / `STREAM_SCAN_PAGE_MAX` (**10000**) | Per-call XRANGE `COUNT` and the hard ceiling on `get_jobs(limit=...)`. |
+
 ## Producer-side caps
 
 | Option | Node | Python | Rust | Controls |

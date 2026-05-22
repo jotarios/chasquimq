@@ -64,7 +64,7 @@ asyncio.run(main())
 
 | Surface | What it does |
 |---|---|
-| `Queue` | Producer + queue inspection. `add` / `add_bulk` / `add_unique` / `get_job_result` / `peek_dlq` / `replay_dlq` / `cancel_delayed` / `get_repeatable_jobs` / `remove_repeatable_by_key` / `pause` / `resume` / `is_paused`. Async context manager. |
+| `Queue` | Producer + queue inspection. `add` / `add_bulk` / `add_unique` / `get_job` / `get_jobs` / `get_jobs_page` / `get_job_state` / `get_job_counts` / `get_waiting_count` / `get_active_count` / `get_delayed_count` / `get_completed_count` / `get_failed_count` / `count` / `get_job_result` / `peek_dlq` / `replay_dlq` / `cancel_delayed` / `get_repeatable_jobs` / `remove_repeatable_by_key` / `pause` / `resume` / `is_paused`. Async context manager. |
 | `Worker` | Consumer pool. asyncio-first dispatch, opt-in result storage (`store_results=True`), graceful shutdown, `pause` / `resume` / `is_paused`. Async context manager. |
 | `Job` | Frozen dataclass returned by `Queue.add`. Has `id`, `name`, `data`, `attempts_made`, `wait_for_result(timeout=)`. |
 | `QueueEvents` | Asyncio iterator over the engine events stream. Cross-process pub/sub for `completed` / `failed` / `dlq` / `retry-scheduled` / `delayed`. |
@@ -214,6 +214,41 @@ async with Queue("emails", redis_url=url) as queue:
 ```
 
 The same durable flag is what the CLI's `chasqui pause <queue>` / `chasqui resume <queue>` toggle. Both surfaces are idempotent — double-pause / double-resume are no-ops.
+
+### Inspect jobs
+
+Read-only introspection across the queue's stream, delayed ZSET, DLQ, and result-key surfaces. Bounded scans; no secondary index; zero impact on the producer / consumer hot paths.
+
+```python
+async with Queue("emails", redis_url=url) as queue:
+    counts = await queue.get_job_counts()
+    # => {"waiting": ..., "active": ..., "delayed": ..., "completed": ..., "failed": ..., "paused": ...}
+
+    state = await queue.get_job_state("job-123")
+    # => "waiting" | "active" | "delayed" | "completed" | "failed" | "unknown"
+
+    job = await queue.get_job("job-123")
+    # => Job | None  (data is msgpack-decoded; engine state on attempt / name / created_at_ms)
+
+    page = await queue.get_jobs("waiting", offset=0, limit=50)
+    # => list[Job]
+
+    # Multi-page sweeps with cursor:
+    jobs, cursor = await queue.get_jobs_page("delayed", limit=100)
+    while cursor is not None:
+        more, cursor = await queue.get_jobs_page("delayed", limit=100, cursor=cursor)
+        jobs.extend(more)
+```
+
+State resolution is **live-state-first**: pending (PEL) → delayed → waiting → DLQ → result. A job that's been replayed from DLQ resolves as `"waiting"`, not `"completed"`, during the race window. A missing id resolves to `"unknown"` and `get_job` returns `None`.
+
+Counts are cheap (~5 Redis round trips, one per state column). `completed` runs a bounded `SCAN` over the `result:*` keyspace under the per-queue hash tag — large keyspaces return a lower-bound figure (the cap is configurable via `CHASQUIMQ_COMPLETED_SCAN_CAP` on the engine, default 10,000).
+
+`Queue(consumer_group=...)` (optional, default `"default"`) configures which consumer group's PEL is read for the `active` column. Set it on the `Queue` if your `Worker` uses a non-default `group`.
+
+```python
+queue = Queue("emails", redis_url=url, consumer_group="primary")
+```
 
 ## Power-user surface
 

@@ -181,6 +181,82 @@ Atomically move up to `limit` DLQ entries back into the main stream
 with their attempt counter reset. Default **`limit = 100`**. Returns
 the number of entries actually replayed.
 
+### `queue.getJob(jobId)`
+
+```ts
+async getJob(jobId: string): Promise<Job<DataType, ResultType, NameType> | undefined>
+```
+
+Look up a single job across the four queue surfaces (stream PEL,
+delayed ZSET, main stream, DLQ, result key). Bounded scan; returns
+`undefined` when the id isn't found in any surface. The returned
+`Job`'s `data` is msgpack-decoded; engine state surfaces via
+`processedOn` / `finishedOn` / `failedReason` where applicable.
+
+### `queue.getJobs(types?, start?, end?)`
+
+```ts
+async getJobs(
+  types?: JobType | JobType[],
+  start?: number,
+  end?: number,
+  asc?: boolean,
+): Promise<Job<DataType, ResultType, NameType>[]>
+```
+
+Paginated listing within a single state. `types` is one of `"waiting"
+| "active" | "delayed" | "completed" | "failed"`; `start` / `end` are
+inclusive indices. Passing multiple state names throws
+`NotSupportedError` — multi-state pagination would silently flatten
+fundamentally different surfaces. Cursor-based multi-page sweeps go
+through the lower-level native introspector; in practice for v1 the
+single-page `start` / `end` API is enough.
+
+### `queue.getJobState(jobId)`
+
+```ts
+async getJobState(jobId: string): Promise<JobState | "unknown">
+```
+
+One of `"waiting" | "active" | "delayed" | "completed" | "failed" |
+"unknown"`. **Live-state-first**: a job that's been replayed from DLQ
+resolves as `"waiting"` (not `"completed"`) during the race window. A
+missing id resolves to `"unknown"`.
+
+### `queue.getJobCounts(...types?)`
+
+```ts
+async getJobCounts(...types: JobType[]): Promise<Record<string, number>>
+```
+
+Per-state counts: `{ waiting, active, delayed, completed, failed,
+paused }`. Pass no args for the full dict; pass one or more state
+names to filter (returned dict contains only the keys you asked for).
+`completed` is via bounded `SCAN` over `result:*` keys — large
+keyspaces return a lower-bound figure (cap configurable via the
+`CHASQUIMQ_COMPLETED_SCAN_CAP` env var on the engine).
+
+### `queue.getWaitingCount()`, `queue.getActiveCount()`, `queue.getDelayedCount()`, `queue.getCompletedCount()`, `queue.getFailedCount()`
+
+```ts
+async getWaitingCount(): Promise<number>
+async getActiveCount(): Promise<number>
+async getDelayedCount(): Promise<number>
+async getCompletedCount(): Promise<number>
+async getFailedCount(): Promise<number>
+```
+
+Single-column convenience wrappers over `getJobCounts`.
+
+### `queue.count()`
+
+```ts
+async count(): Promise<number>
+```
+
+`waiting + active + delayed` — the number of jobs that could still
+run.
+
 ### `queue.remove(jobId)`
 
 ```ts
@@ -243,10 +319,7 @@ get isClosed(): boolean
 ### Stubbed methods (NotSupportedError)
 
 These throw [`NotSupportedError`](/reference/error-codes/#cmq-100--node-feature-not-supported)
-in v1: `getJob`, `getJobs`, `getJobCounts`, `getWaitingCount`,
-`getActiveCount`, `getDelayedCount`, `getFailedCount`, `count`,
-`drain`, `obliterate`, `clean`. Some pure-stat
-methods return `0` or `'unknown'` instead. See the [options
+in v1: `drain`, `obliterate`, `clean`. See the [options
 index](/reference/options/) and [Thinking in
 ChasquiMQ](/concepts/thinking-in-chasquimq/) for the engine semantics that
 make these intentionally unsupported.

@@ -28,6 +28,7 @@ language shims so cross-references resolve.
 - [Consumer](#consumer) — constructor and `run`.
 - [Promoter](#promoter) — standalone delayed-job promoter.
 - [Scheduler](#scheduler) — standalone repeatable-spec scheduler.
+- [Introspector](#introspector) — read-only `get_job` / `get_jobs` / `get_job_state` / `get_job_counts`.
 - [Repeatable jobs](#repeatable-jobs) — `RepeatPattern`, `MissedFiresPolicy`, `RepeatableSpec`, `RepeatableMeta`.
 - [Backoff](#backoff) — `BackoffSpec`, `BackoffKind`.
 - [Errors](#errors) — `Error`, `HandlerError`, `Result`.
@@ -563,6 +564,118 @@ next-fire score in the same Lua round trip. Leader-elected via
 Generic over `T` so the scheduler can decode the per-spec stored
 payload type. The [`Consumer`](#consumer) auto-embeds a scheduler
 when `run_scheduler = true`.
+
+## Introspector
+
+```rust
+pub struct Introspector;
+
+impl Introspector {
+    pub async fn connect(
+        redis_url: &str,
+        queue_name: &str,
+        tuning: &ConnectionTuning,
+        group: Option<&str>,
+    ) -> Result<Self>;
+    pub async fn shutdown(&self) -> Result<()>;
+    pub fn queue_name(&self) -> &str;
+    pub fn group(&self) -> &str;
+
+    pub async fn get_job_counts(&self) -> Result<JobCounts>;
+    pub async fn get_job_state(&self, id: &str) -> Result<JobState>;
+    pub async fn get_job(&self, id: &str) -> Result<Option<JobInfo>>;
+    pub async fn get_jobs(
+        &self,
+        state: JobState,
+        offset: u64,
+        limit: u64,
+        cursor: Option<String>,
+    ) -> Result<JobsPage>;
+}
+```
+
+Read-only introspection across the queue's stream, delayed ZSET,
+DLQ, and result-key surfaces. Bounded scans; no secondary index;
+zero impact on the producer / consumer / promoter / scheduler hot
+paths (the introspector uses a small dedicated pool).
+
+State resolution is **live-state-first**: pending (PEL) → delayed →
+waiting → DLQ → result. A job that's been replayed from DLQ resolves
+as `JobState::Waiting`, not `Completed`, during the race window.
+
+`group` is the consumer-group name whose PEL the inspector reads for
+`Active` state. Defaults to `ConsumerConfig::default().group`
+(`"default"`). Pass `None` to take the default.
+
+### `JobState`
+
+```rust
+pub enum JobState {
+    Waiting,
+    Active,
+    Delayed,
+    Completed,
+    Failed,
+    Unknown,
+}
+
+impl JobState {
+    pub fn as_str(self) -> &'static str;
+    pub fn parse(s: &str) -> Option<Self>;
+}
+```
+
+### `JobCounts`
+
+```rust
+pub struct JobCounts {
+    pub waiting: u64,
+    pub active: u64,
+    pub delayed: u64,
+    pub completed: u64,
+    pub failed: u64,
+    pub paused: u64,
+    pub completed_is_capped: bool,
+}
+```
+
+`completed` is via a bounded `SCAN` over `result:*` keys (cap
+configurable via `CHASQUIMQ_COMPLETED_SCAN_CAP`, default `10_000`).
+When the cap is hit, `completed_is_capped` is `true` and `completed`
+is a lower bound.
+
+### `JobInfo` / `JobsPage`
+
+```rust
+pub struct JobInfo {
+    pub id: String,
+    pub name: String,
+    pub payload: Bytes,        // opaque msgpack — engine doesn't decode
+    pub attempt: u32,
+    pub state: JobState,
+    pub created_at_ms: u64,
+    pub processed_on_ms: Option<u64>,
+    pub finished_on_ms: Option<u64>,
+    pub failure_reason: Option<String>,
+    pub failure_detail: Option<String>,
+    pub decode_failed: bool,   // set when the entry's envelope didn't decode
+}
+
+pub struct JobsPage {
+    pub jobs: Vec<JobInfo>,
+    pub next_cursor: Option<String>,
+}
+```
+
+Cursor encoding per state:
+
+- `Waiting` / `Failed`: stream entry id (exclusive on resume).
+- `Delayed`: `<score>:<offset_into_score>` so multiple delayed
+  members sharing one fire-ms (cron specs firing on the minute,
+  identical absolute `add_at` times) page out correctly.
+- `Completed`: raw `SCAN` cursor (`"0"` resets to the start).
+- `Active`: `None` after the first page (the PEL window is already
+  bounded by `concurrency × read_count`).
 
 ## Repeatable jobs
 

@@ -68,6 +68,23 @@ Two independent signals, both observed by the reader only at batch boundaries �
 
 Shutdown signalled while the reader is parked still drains cleanly. `worker-concurrent` throughput is unchanged — the gate adds one atomic load and one time comparison per batch when not paused, strictly cheaper than the per-iteration shutdown check already in the loop.
 
+## Job introspection
+
+`chasquimq::Introspector` is the read-only counterpart to the producer/consumer hot paths. Open one per `(queue, consumer_group)` pair (`Introspector::connect`); it keeps a small dedicated pool (size 2) so introspection bursts don't compete with the producer's connections.
+
+Surface:
+
+- **`get_job_counts() -> JobCounts`** — `{ waiting, active, delayed, completed, failed, paused, completed_is_capped }` in ~5 round trips (`XLEN`, `XPENDING`, `ZCARD`, `XLEN dlq`, `EXISTS paused`, plus a bounded `SCAN result:*`). `completed_is_capped = true` when the SCAN hit `CHASQUIMQ_COMPLETED_SCAN_CAP` (default 10,000) before exhausting; treat `completed` as a lower bound when capped.
+- **`get_job_state(id) -> JobState`** — live-state-first: pending (PEL) → delayed → waiting → DLQ → result. A job replayed from DLQ resolves as `Waiting`, not `Completed`, during the race window — what matters for callers is the work the next worker tick is about to do.
+- **`get_job(id) -> Option<JobInfo>`** — bounded XRANGE + ZRANGEBYSCORE + DLQ scan + result-key probe. `JobInfo::payload` is the opaque msgpack bytes (the engine doesn't decode). An entry whose envelope didn't decode surfaces with `decode_failed = true` instead of panicking or silently skipping.
+- **`get_jobs(state, offset, limit, cursor) -> JobsPage { jobs, next_cursor }`** — paginated listing. Cursor encoding per state: stream entry id (waiting / failed); `score:offset_into_score` (delayed — fixed against tied-fire-ms members being dropped at the page boundary); raw `SCAN` cursor (completed); none / `None`-after-first-page (active, the PEL window is already bounded).
+
+Operational notes:
+
+- **NOGROUP on a fresh queue is swallowed.** `XPENDING` against a never-opened consumer group errors with `NOGROUP`; `get_job_counts` reports `active = 0`. The sticky `consumer_group` constructor option on both shims (Node `QueueOptions.consumerGroup`, Python `Queue(consumer_group=...)`) lets the introspector and the workers agree on which group's PEL counts as "active."
+- **`completed` is approximate.** It SCANs the `result:*` keyspace under the per-queue hash tag; very large keyspaces return the cap. Tighten or widen via `CHASQUIMQ_COMPLETED_SCAN_CAP`.
+- **No hot-path cost.** The producer / consumer / promoter / scheduler paths are byte-for-byte unchanged by introspection — verified by the no-regression bench in [`benchmarks/chasquimq-1.0.md`](../benchmarks/chasquimq-1.0.md).
+
 ## Observability
 
 Every load-bearing engine subsystem emits structured events through the single `chasquimq::MetricsSink` trait:

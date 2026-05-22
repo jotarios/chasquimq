@@ -230,6 +230,103 @@ async def get_job_result_bulk(self, job_ids: Sequence[str]) -> list[Any]
 Pipelined bulk variant. Returns a list aligned by index with
 `job_ids`.
 
+### `await queue.get_job(job_id)`
+
+```python
+async def get_job(self, job_id: str) -> Optional[Job]
+```
+
+Look up a single job across the four queue surfaces (stream PEL,
+delayed ZSET, main stream, DLQ, result key). Bounded scan; returns
+`None` when the id isn't found in any surface. The returned `Job`'s
+`data` is msgpack-decoded; engine state surfaces via `attempt` /
+`name` / `created_at_ms`.
+
+### `await queue.get_jobs(state="waiting", offset=0, limit=100, cursor=None)`
+
+```python
+async def get_jobs(
+    self,
+    state: str = "waiting",
+    offset: int = 0,
+    limit: int = 100,
+    cursor: Optional[str] = None,
+) -> list[Job]
+```
+
+Paginated listing within a single state. `state` is one of
+`"waiting" | "active" | "delayed" | "completed" | "failed"`. Returns
+just the first page. For multi-page sweeps, use `get_jobs_page`.
+
+### `await queue.get_jobs_page(state, *, offset=0, limit=100, cursor=None)`
+
+```python
+async def get_jobs_page(
+    self,
+    state: str = "waiting",
+    *,
+    offset: int = 0,
+    limit: int = 100,
+    cursor: Optional[str] = None,
+) -> Tuple[list[Job], Optional[str]]
+```
+
+Page + `next_cursor`; the cursor is `None` at the end of the range.
+Cursor semantics depend on state:
+
+- `"waiting"` / `"failed"`: cursor is the last stream entry id seen
+  (exclusive). `offset` is honored only on the first call (when
+  `cursor is None`).
+- `"delayed"`: cursor is `score:offset_into_score` so a tied-fire-ms
+  page boundary doesn't drop tied members (cron specs firing on the
+  minute, identical absolute times).
+- `"completed"`: cursor is the raw `SCAN` cursor (`"0"` resets to the
+  start).
+
+### `await queue.get_job_state(job_id)`
+
+```python
+async def get_job_state(self, job_id: str) -> str
+```
+
+One of `"waiting" | "active" | "delayed" | "completed" | "failed" |
+"unknown"`. **Live-state-first**: a job that's been replayed from DLQ
+resolves as `"waiting"` (not `"completed"`) during the race window.
+
+### `await queue.get_job_counts(*types)`
+
+```python
+async def get_job_counts(self, *types: str) -> dict[str, int]
+```
+
+Per-state counts: `{"waiting", "active", "delayed", "completed",
+"failed", "paused"}`. Pass no args for the full dict; pass one or
+more state names to filter. `completed` is via bounded `SCAN` over
+`result:*` keys — large keyspaces return a lower-bound figure (cap
+configurable via the `CHASQUIMQ_COMPLETED_SCAN_CAP` env var on the
+engine).
+
+### `await queue.get_waiting_count()`, `get_active_count()`, `get_delayed_count()`, `get_completed_count()`, `get_failed_count()`
+
+```python
+async def get_waiting_count(self) -> int
+async def get_active_count(self) -> int
+async def get_delayed_count(self) -> int
+async def get_completed_count(self) -> int
+async def get_failed_count(self) -> int
+```
+
+Single-column convenience wrappers over `get_job_counts`.
+
+### `await queue.count()`
+
+```python
+async def count(self) -> int
+```
+
+`waiting + active + delayed` — the number of jobs that could still
+run.
+
 ### `await queue.pause()`, `await queue.resume()`, `await queue.is_paused()`
 
 ```python

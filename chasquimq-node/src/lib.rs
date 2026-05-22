@@ -11,6 +11,7 @@
 
 mod consumer;
 mod credential_provider;
+mod introspector;
 mod payload;
 mod producer;
 mod promoter;
@@ -18,6 +19,7 @@ mod repeat;
 mod scheduler;
 
 pub use consumer::{Consumer, ConsumerOpts, Job, RetryOpts};
+pub use introspector::{Introspector, IntrospectorOpts, JobCounts, JobInfo, JobsPage};
 // `CredentialResponseJs` is the `#[napi(object)]` return type of the JS
 // `credentialProvider` callback. Re-exported so napi-rs generates the
 // `CredentialResponseJs` type in `index.d.ts` for downstream TS callers

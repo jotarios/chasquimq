@@ -79,8 +79,9 @@ skipIfNoRedis('Queue integration', () => {
     ).rejects.toBeInstanceOf(NotSupportedError)
   })
 
-  it('getJob() throws NotSupportedError in v1', async () => {
-    await expect(queue.getJob('any')).rejects.toBeInstanceOf(NotSupportedError)
+  it('getJob() returns undefined for an unknown id', async () => {
+    const job = await queue.getJob('does-not-exist')
+    expect(job).toBeUndefined()
   })
 
   it('pause() / resume() / isPaused() drive the durable cross-process flag', async () => {
