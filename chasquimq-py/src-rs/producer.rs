@@ -11,7 +11,9 @@ use bytes::Bytes;
 use chasquimq::config::ProducerConfig;
 use chasquimq::producer::{AddOptions, Producer as EngineProducer};
 use chasquimq::repeat::{MissedFiresPolicy, RepeatPattern, RepeatableSpec};
-use chasquimq::{BackoffKind, BackoffSpec, JobRetryOverride, RepeatableMeta};
+use chasquimq::{
+    BackoffKind, BackoffSpec, DrainOptions, JobRetryOverride, JobState, RepeatableMeta,
+};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
@@ -554,6 +556,97 @@ impl Producer {
                 }
                 Ok::<_, PyErr>(out.unbind())
             })
+        })
+    }
+
+    /// Remove a single job by id from every surface it could live on.
+    /// `group` is the consumer group whose pending list is checked for
+    /// the active-job case. Idempotent — a missing id resolves without
+    /// error. Returns a dict `{delayed, stream, dlq, result}` of bools.
+    fn remove<'py>(
+        &self,
+        py: Python<'py>,
+        job_id: String,
+        group: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let state = self.state.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let inner = Producer::ensure_connected(state).await?;
+            let r = inner
+                .remove(&job_id, &group)
+                .await
+                .map_err(map_engine_err)?;
+            Python::attach(|py| {
+                let d = PyDict::new(py);
+                d.set_item("delayed", r.delayed)?;
+                d.set_item("stream", r.stream)?;
+                d.set_item("dlq", r.dlq)?;
+                d.set_item("result", r.result)?;
+                Ok::<_, PyErr>(d.unbind())
+            })
+        })
+    }
+
+    /// Clear every waiting job (and, when `drain_delayed` is true, the
+    /// delayed stage). In-flight jobs are left running. Returns the count
+    /// of stream + delayed entries removed.
+    fn drain<'py>(
+        &self,
+        py: Python<'py>,
+        group: String,
+        drain_delayed: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let state = self.state.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let inner = Producer::ensure_connected(state).await?;
+            let n = inner
+                .drain(
+                    &group,
+                    DrainOptions {
+                        delayed: drain_delayed,
+                    },
+                )
+                .await
+                .map_err(map_engine_err)?;
+            Ok(n)
+        })
+    }
+
+    /// Age- and state-filtered bulk delete. `state` is one of
+    /// `"completed" | "failed" | "delayed" | "waiting"`. Removes up to
+    /// `limit` jobs older than `now - grace_ms` and returns their ids.
+    fn clean<'py>(
+        &self,
+        py: Python<'py>,
+        group: String,
+        grace_ms: u64,
+        limit: u64,
+        state: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let parsed = JobState::parse(&state).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "unknown state '{state}'; expected one of completed | failed | delayed | waiting"
+            ))
+        })?;
+        let producer_state = self.state.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let inner = Producer::ensure_connected(producer_state).await?;
+            inner
+                .clean(&group, grace_ms, limit as usize, parsed)
+                .await
+                .map_err(map_engine_err)
+        })
+    }
+
+    /// Tear the entire queue down — delete the whole `{chasqui:<queue>}`
+    /// keyspace. `group` is accepted for signature symmetry; obliterate
+    /// drops every consumer group regardless. Returns the key count
+    /// removed.
+    fn obliterate<'py>(&self, py: Python<'py>, group: String) -> PyResult<Bound<'py, PyAny>> {
+        let state = self.state.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let inner = Producer::ensure_connected(state).await?;
+            inner.obliterate(&group).await.map_err(map_engine_err)
         })
     }
 }
