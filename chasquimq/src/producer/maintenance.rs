@@ -333,9 +333,19 @@ pub(super) async fn drain(
 ) -> Result<u64> {
     let mut removed: u64 = 0;
 
-    // Loop the bounded drain pass until it makes no progress. Each pass
-    // deletes at most MAINTENANCE_SCAN_PAGE waiting entries, so a large
-    // stream drains over several passes without ever blocking Redis.
+    // Loop the bounded drain pass until a pass deletes nothing. Each pass
+    // walks `XRANGE - + COUNT 1024`, skips the consumer-group PEL members
+    // (Active jobs), and `XDEL`s the rest. The stop condition must be
+    // "deleted zero", NOT "deleted < a full page": when Active entries are
+    // interleaved near the front of the stream, a pass legitimately
+    // deletes fewer than a full page while waiting jobs still remain
+    // further back. Each `XDEL` from the front strictly shrinks the
+    // waiting set and the Active set is bounded (concurrency x batch), so
+    // the loop terminates once the scan window is all-Active. A hard
+    // iteration cap is a belt-and-braces guard against a pathological
+    // stream that somehow never converges.
+    let mut passes: u32 = 0;
+    const MAX_DRAIN_PASSES: u32 = 1_000_000;
     loop {
         let client = pool.next_connected();
         let sha = load_sha(client, DRAIN_STREAM_SCRIPT).await?;
@@ -352,10 +362,8 @@ pub(super) async fn drain(
         .await?;
         let pass = lua_int(&v).max(0) as u64;
         removed += pass;
-        // A pass deletes only waiting entries; if it deleted fewer than a
-        // full page, every remaining entry is pending (active) and the
-        // next pass would delete nothing. Stop.
-        if pass < MAINTENANCE_SCAN_PAGE {
+        passes += 1;
+        if pass == 0 || passes >= MAX_DRAIN_PASSES {
             break;
         }
     }
@@ -423,7 +431,56 @@ pub(super) async fn clean(
     }
 }
 
+/// `XPENDING <key> <group> - + <count>` → the set of entry ids currently
+/// pending in the consumer group (Active jobs). A fresh queue with no
+/// group raises `NOGROUP`; that is swallowed and the set is empty.
+async fn pending_id_set(
+    pool: &Pool,
+    stream_key: &str,
+    group: &str,
+    count: u64,
+) -> Result<std::collections::HashSet<String>> {
+    let client = pool.next_connected();
+    let cmd = CustomCommand::new_static("XPENDING", ClusterHash::FirstKey, false);
+    let args = vec![
+        Value::from(stream_key),
+        Value::from(group),
+        Value::from("-"),
+        Value::from("+"),
+        Value::from(count as i64),
+    ];
+    let res: std::result::Result<Value, _> = client.custom(cmd, args).await;
+    let v = match res {
+        Ok(v) => v,
+        // A queue whose consumer group was never opened: no Active jobs.
+        Err(e) if format!("{e}").contains("NOGROUP") => return Ok(Default::default()),
+        Err(e) => return Err(Error::Redis(e)),
+    };
+    let mut set = std::collections::HashSet::new();
+    if let Value::Array(items) = v {
+        for item in items {
+            // Each entry is `[id, consumer, idle_ms, deliveries]`.
+            if let Value::Array(fields) = item {
+                if let Some(id) = fields.first().and_then(|f| match f {
+                    Value::String(s) => Some(s.to_string()),
+                    Value::Bytes(b) => std::str::from_utf8(b).ok().map(|s| s.to_string()),
+                    _ => None,
+                }) {
+                    set.insert(id);
+                }
+            }
+        }
+    }
+    Ok(set)
+}
+
 /// Clean waiting (or DLQ) stream entries older than `cutoff`.
+///
+/// For the main stream (`is_dlq = false`) entries currently in the
+/// consumer group's PEL are *Active*, not *Waiting* — `clean(Waiting)`
+/// must leave them running, so they are subtracted from the candidate
+/// set. The DLQ is a plain stream with no consumer group, so the filter
+/// does not apply there.
 async fn clean_stream(
     pool: &Pool,
     key: &str,
@@ -433,6 +490,12 @@ async fn clean_stream(
     is_dlq: bool,
 ) -> Result<Vec<String>> {
     let entries = xrange_scan(pool, key, MAINTENANCE_SCAN_PAGE).await?;
+    // Subtract Active (PEL) entries from the waiting-clean candidate set.
+    let pending = if is_dlq {
+        Default::default()
+    } else {
+        pending_id_set(pool, key, group, MAINTENANCE_SCAN_PAGE).await?
+    };
     let mut entry_ids: Vec<String> = Vec::new();
     let mut job_ids: Vec<String> = Vec::new();
     for entry in &entries {
@@ -443,6 +506,10 @@ async fn clean_stream(
         match stream_id_ms(&entry.id) {
             Some(ms) if ms <= cutoff => {}
             _ => continue,
+        }
+        // An entry in the PEL is Active — skip it for clean(Waiting).
+        if pending.contains(&entry.id) {
+            continue;
         }
         let job_id = if is_dlq {
             entry

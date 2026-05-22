@@ -607,7 +607,7 @@ return deleted
 ///
 /// Returns the count of entries deleted in this pass.
 pub(crate) const DRAIN_STREAM_SCRIPT: &str = r#"
-local limit = tonumber(ARGV[1 + 1])
+local limit = tonumber(ARGV[2])
 if limit <= 0 then
   return 0
 end

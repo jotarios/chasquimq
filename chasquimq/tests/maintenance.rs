@@ -162,6 +162,25 @@ async fn exists(admin: &Client, key: &str) -> bool {
     matches!(v, Value::Integer(n) if n >= 1)
 }
 
+/// Count of entries pending in a stream's consumer group (Active jobs).
+/// `XPENDING <key> <group>` returns `[count, min, max, consumers]`.
+async fn pending_count(admin: &Client, stream_key: &str, group: &str) -> i64 {
+    let v: Value = admin
+        .custom(
+            CustomCommand::new_static("XPENDING", ClusterHash::FirstKey, false),
+            vec![Value::from(stream_key), Value::from(group)],
+        )
+        .await
+        .unwrap_or(Value::Integer(0));
+    match v {
+        Value::Array(items) => match items.first() {
+            Some(Value::Integer(n)) => *n,
+            _ => 0,
+        },
+        _ => 0,
+    }
+}
+
 fn producer_cfg(queue: &str) -> ProducerConfig {
     ProducerConfig {
         queue_name: queue.to_string(),
@@ -590,6 +609,98 @@ async fn drain_empty_queue_is_noop() {
     admin.quit().await.ok();
 }
 
+#[tokio::test]
+#[ignore = "requires REDIS_URL"]
+async fn drain_multi_pass_clears_all_waiting_past_scan_page() {
+    // Regression: the drain loop must keep going until a pass deletes
+    // ZERO, not until a pass deletes fewer than a full scan page. With
+    // more waiting jobs than MAINTENANCE_SCAN_PAGE (1024) plus an Active
+    // job interleaved near the front, a pass legitimately deletes fewer
+    // than a full page while waiting jobs remain further back. A
+    // stop-on-partial-page loop would leave thousands undrained.
+    let admin = admin().await;
+    let queue = "mnt_drain_multipass";
+    flush_all(&admin, queue).await;
+
+    let producer: Producer<Sample> = Producer::connect(&redis_url(), producer_cfg(queue))
+        .await
+        .expect("connect");
+
+    // 2500 waiting jobs — well past the 1024 scan-page cap.
+    let total = 2500_u32;
+    let batch: Vec<Sample> = (0..total).map(|n| Sample { n, s: "w".into() }).collect();
+    producer.add_bulk(batch).await.expect("add_bulk");
+
+    let stream = format!("{{chasqui:{queue}}}:stream");
+    assert_eq!(xlen(&admin, &stream).await, total as i64);
+
+    // Hold exactly one job in-flight (batch=1 → one entry in the PEL).
+    let cancel = CancellationToken::new();
+    let in_handler = Arc::new(AtomicUsize::new(0));
+    let in_handler_c = in_handler.clone();
+    let cfg = ConsumerConfig {
+        concurrency: 1,
+        batch: 1,
+        ..consumer_cfg(queue, false)
+    };
+    let cancel_c = cancel.clone();
+    let join = tokio::spawn(async move {
+        let consumer: Consumer<Sample> = Consumer::new(redis_url(), cfg);
+        consumer
+            .run(
+                move |_job: Job<Sample>| {
+                    let in_handler = in_handler_c.clone();
+                    async move {
+                        in_handler.fetch_add(1, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_secs(60)).await;
+                        Ok::<bytes::Bytes, HandlerError>(bytes::Bytes::new())
+                    }
+                },
+                cancel_c.clone(),
+            )
+            .await
+            .ok();
+    });
+
+    wait_until(Duration::from_secs(10), "one job in-flight", || async {
+        in_handler.load(Ordering::SeqCst) >= 1
+    })
+    .await;
+
+    // Snapshot the live PEL size — a blocking handler keeps it stable.
+    // It is >= 1 (the in-flight job) but the reader may have prefetched
+    // a few; assert against the real count, not a hard-coded 1.
+    let active = pending_count(&admin, &stream, "default").await;
+    assert!(active >= 1, "expected at least one in-flight job");
+
+    let removed = producer
+        .drain("default", DrainOptions { delayed: false })
+        .await
+        .expect("drain");
+    // Every waiting job is drained; the Active jobs survive. The point of
+    // this test: `removed` is well past one scan page (>1024), proving
+    // the multi-pass loop does not stop on a partial page.
+    assert_eq!(
+        removed,
+        total as u64 - active as u64,
+        "every waiting job drained, active jobs spared"
+    );
+    assert!(
+        removed > 1024,
+        "drain crossed multiple scan pages (removed {removed})"
+    );
+    assert_eq!(
+        xlen(&admin, &stream).await,
+        active,
+        "exactly the active entries remain"
+    );
+
+    cancel.cancel();
+    join.await.ok();
+    producer.shutdown().await.ok();
+    admin.quit().await.ok();
+}
+
 // ============================================================================
 // clean
 // ============================================================================
@@ -836,6 +947,89 @@ async fn clean_active_is_noop() {
         .expect("clean active");
     assert!(removed.is_empty(), "clean(Active) is intentionally a no-op");
 
+    producer.shutdown().await.ok();
+    admin.quit().await.ok();
+}
+
+#[tokio::test]
+#[ignore = "requires REDIS_URL"]
+async fn clean_waiting_leaves_active_jobs() {
+    // Regression: clean(Waiting) must not delete in-flight (PEL) entries.
+    // The main stream mixes waiting and active entries; a naive XRANGE
+    // scan would sweep an old-enough active entry into the delete set.
+    let admin = admin().await;
+    let queue = "mnt_clean_waiting_active";
+    flush_all(&admin, queue).await;
+
+    let producer: Producer<Sample> = Producer::connect(&redis_url(), producer_cfg(queue))
+        .await
+        .expect("connect");
+
+    let total = 30_u32;
+    for n in 0..total {
+        producer
+            .add(Sample { n, s: "w".into() })
+            .await
+            .expect("add");
+    }
+
+    // Hold a job in-flight (batch=1 keeps the PEL small).
+    let cancel = CancellationToken::new();
+    let in_handler = Arc::new(AtomicUsize::new(0));
+    let in_handler_c = in_handler.clone();
+    let cfg = ConsumerConfig {
+        concurrency: 1,
+        batch: 1,
+        ..consumer_cfg(queue, false)
+    };
+    let cancel_c = cancel.clone();
+    let join = tokio::spawn(async move {
+        let consumer: Consumer<Sample> = Consumer::new(redis_url(), cfg);
+        consumer
+            .run(
+                move |_job: Job<Sample>| {
+                    let in_handler = in_handler_c.clone();
+                    async move {
+                        in_handler.fetch_add(1, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_secs(60)).await;
+                        Ok::<bytes::Bytes, HandlerError>(bytes::Bytes::new())
+                    }
+                },
+                cancel_c.clone(),
+            )
+            .await
+            .ok();
+    });
+
+    wait_until(Duration::from_secs(10), "one job in-flight", || async {
+        in_handler.load(Ordering::SeqCst) >= 1
+    })
+    .await;
+
+    let stream = format!("{{chasqui:{queue}}}:stream");
+    // Snapshot the live PEL size — a blocking handler keeps it stable.
+    let active = pending_count(&admin, &stream, "default").await;
+    assert!(active >= 1, "expected at least one in-flight job");
+
+    // grace=0 → every job is old enough; only the waiting ones go, the
+    // Active (PEL) entries are spared.
+    let removed = producer
+        .clean("default", 0, total as usize, JobState::Waiting)
+        .await
+        .expect("clean waiting");
+    assert_eq!(
+        removed.len() as i64,
+        total as i64 - active,
+        "waiting jobs cleaned, the active ones spared"
+    );
+    assert_eq!(
+        xlen(&admin, &stream).await,
+        active,
+        "the active entries survive clean(Waiting)"
+    );
+
+    cancel.cancel();
+    join.await.ok();
     producer.shutdown().await.ok();
     admin.quit().await.ok();
 }
