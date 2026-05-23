@@ -28,14 +28,9 @@ async fn main() {
         for repeat in 0..args.repeats {
             let queue = format!("bench-{scenario}-{repeat}");
             runner::flush_queue(&admin, &queue).await;
-            let report = runner::run_scenario(
-                scenario,
-                &args.redis_url,
-                &queue,
-                args.scale,
-                &run_opts,
-            )
-            .await;
+            let report =
+                runner::run_scenario(scenario, &args.redis_url, &queue, args.scale, &run_opts)
+                    .await;
             if matches!(args.format, Format::Jsonl) {
                 println!(
                     "{}",

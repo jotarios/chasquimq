@@ -158,7 +158,10 @@ impl Job {
             )
         })?;
         let clamped = n.min(u8::MAX as u32) as u8;
-        handle.update_progress(clamped).await.map_err(map_engine_err)
+        handle
+            .update_progress(clamped)
+            .await
+            .map_err(map_engine_err)
     }
 
     /// Append `line` to the per-job log stream and return the new XLEN
@@ -168,9 +171,7 @@ impl Job {
     #[napi]
     pub async fn log(&self, line: String) -> napi::Result<u32> {
         let handle = self.handle.as_ref().ok_or_else(|| {
-            napi::Error::from_reason(
-                "Job.log() requires a live JobHandle (this Job has none)",
-            )
+            napi::Error::from_reason("Job.log() requires a live JobHandle (this Job has none)")
         })?;
         let len = handle.log(&line).await.map_err(map_engine_err)?;
         Ok(len.min(u32::MAX as u64) as u32)
