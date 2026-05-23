@@ -34,6 +34,7 @@ import {
   type Job as NativeJob,
 } from '../index.js'
 import { Job } from './job.js'
+import { QueueEvents } from './queue-events.js'
 import type { ConnectionOptions, JobsOptions } from './types.js'
 import { encodePayload } from './encoding.js'
 import { NotSupportedError } from './errors.js'
@@ -151,6 +152,10 @@ export interface WorkerOptions {
  *
  * ## Events
  *
+ * Event names follow the familiar `EventEmitter` listener convention so
+ * existing application code reads naturally. ChasquiMQ-specific events
+ * are clearly marked.
+ *
  * - `ready`     — `()`. Fired once when `.run()` starts the engine loop.
  * - `active`    — `(job: Job, prev: string)`. Fired before each
  *   processor invocation. `prev` is reserved (always `''`).
@@ -163,6 +168,27 @@ export interface WorkerOptions {
  *   from the native loop.
  * - `closing`   — `(msg: string)`. Fired at the start of `.close()`.
  * - `closed`    — `()`. Fired once shutdown completes.
+ * - `drained`   — `()`. Fired when the engine observes a full→empty
+ *   transition on the main stream (no more jobs to dispatch right now).
+ *   Lazily subscribes to the cross-process events stream on the first
+ *   `worker.on('drained', ...)` call; the subscriber is torn down on
+ *   `.close()`. **Cross-process scope:** every worker on this queue
+ *   receives `drained`, not just this one.
+ * - `paused`    — `()`. Fired when `.pause()` is called. Process-local
+ *   (does not reflect a cross-process `Queue.pause`).
+ * - `resumed`   — `()`. Fired when `.resume()` is called. Process-local.
+ *
+ * ## Listener names accepted for API stability but currently no-op
+ *
+ * These can be wired up without throwing, but the engine does not emit
+ * the underlying transition yet. Listed here so subscriber code keeps
+ * type-checking; promoted to active events when the corresponding
+ * engine work lands.
+ *
+ * - `progress` — `(job: Job, progress: JobProgress)`. Requires engine
+ *   support for in-handler progress updates. Not yet emitted.
+ * - `stalled`  — `(jobId: string, prev: string)`. Requires a stalled-
+ *   detector in the engine. Not yet emitted.
  */
 export class Worker<
   DataType = unknown,
@@ -177,6 +203,21 @@ export class Worker<
   private running = false
   private closed = false
   private runPromise?: Promise<void>
+  /**
+   * Lazily-constructed events-stream subscriber that fans the engine's
+   * cross-process `drained` event onto this worker's `EventEmitter`.
+   * Created the first time a listener attaches to `'drained'`; torn
+   * down in `.close()`. Workers that never subscribe to `drained` pay
+   * no extra Redis connections.
+   */
+  private drainedEvents?: QueueEvents
+  /**
+   * Resolves once the lazy drained subscriber has issued its first
+   * `XREAD BLOCK`. `run()` awaits this (when set) so a user pattern of
+   * `worker.on('drained', cb); queue.add(...)` doesn't race the
+   * engine's first emit against the subscriber's connect+block.
+   */
+  private drainedReadyPromise?: Promise<void>
 
   constructor(
     name: string,
@@ -216,6 +257,16 @@ export class Worker<
     // every reconnect / AUTH cycle.
     this.native = new NativeConsumer(url, nativeOpts, opts.connection.credentialProvider)
 
+    // Spawn the cross-process events-stream subscriber the first time
+    // a user attaches a `drained` listener. Using `newListener` (not a
+    // public method) keeps the API surface plain `EventEmitter`-shaped —
+    // users just call `worker.on('drained', ...)`, no extra setup.
+    this.on('newListener', (event: string) => {
+      if (event === 'drained' && !this.drainedEvents && !this.closed) {
+        this.spawnDrainedSubscriber()
+      }
+    })
+
     if (opts.autorun !== false) {
       // Defer to the next microtask so subscribers can attach listeners
       // (`worker.on('completed', ...)`, etc.) before the first event fires.
@@ -223,6 +274,88 @@ export class Worker<
         void this.run()
       })
     }
+  }
+
+  /**
+   * Lazily start a {@link QueueEvents} subscriber that forwards the
+   * engine's cross-process `drained` event onto this worker's
+   * `EventEmitter`. Idempotent — calling twice has no effect (the first
+   * call wins). Errors from the subscriber are forwarded to this
+   * worker's `error` channel so application code only needs one error
+   * subscription.
+   */
+  private spawnDrainedSubscriber(): void {
+    if (this.drainedEvents) return
+    // `autorun: false` + explicit `await waitUntilReady` + explicit
+    // `run()` lets us hold the worker's own `run()` until the
+    // subscriber's first `XREAD BLOCK` is in flight. Without this, the
+    // engine's first `drained` emit (which fires within a few hundred
+    // ms of worker startup on a fresh queue) can race the subscriber's
+    // connect+block and the event is lost. `lastEventId: '$'` keeps
+    // the subscriber from replaying ancient events from a long-lived
+    // queue; the race window we close is the connect-and-block latency
+    // only.
+    // `blockingTimeout: 1000` (vs the QueueEvents default 10s) keeps
+    // `worker.close()` snappy — close awaits the in-flight `XREAD
+    // BLOCK` to time out plus 1s grace. A 10s block-and-wait would
+    // mean every worker shutdown drags for up to 11s before the
+    // `closed` event fires; 1s + 1s grace = ~2s worst-case teardown.
+    const events = new QueueEvents(this.name, {
+      connection: this.opts.connection,
+      autorun: false,
+      blockingTimeout: 1000,
+    })
+    events.on('drained', () => {
+      this.emit('drained')
+    })
+    // Forward subscriber errors onto the worker's single ``error``
+    // channel so application code only needs one error subscription.
+    // Caller MUST wire a ``worker.on('error', ...)`` listener — an
+    // unhandled ``error`` emit crashes the Node process, same as for
+    // any other ``EventEmitter``.
+    events.on('error', (err: Error) => {
+      if (!this.closed) {
+        this.emit('error', err)
+      }
+    })
+    this.drainedEvents = events
+    // Capture a ready promise that `run()` awaits before kicking the
+    // native engine. `waitUntilReady()` establishes the ioredis
+    // connection; the subsequent `run()` queues the first `XREAD
+    // BLOCK` synchronously into ioredis's command queue, so once
+    // `events.run()` has been invoked the subscription window is open
+    // even though the outer run promise won't resolve until close.
+    // Errors surface via the `error` forwarder above so the worker's
+    // single error channel stays canonical.
+    let resolveReady!: () => void
+    this.drainedReadyPromise = new Promise<void>((res) => {
+      resolveReady = res
+    })
+    void (async () => {
+      try {
+        await events.waitUntilReady()
+        // Fire-and-forget — the loop runs until close. The XREAD
+        // BLOCK lands in ioredis's send queue synchronously inside
+        // `events.run()`, so once we yield past the first microtask
+        // tick the subscriber is "live" for incoming events.
+        void events.run().catch((err) => {
+          if (!this.closed) {
+            this.emit('error', err instanceof Error ? err : new Error(String(err)))
+          }
+        })
+        // Yield once so the XREAD command flushes onto the socket
+        // before we release the worker's startup gate.
+        await new Promise<void>((r) => setImmediate(r))
+        resolveReady()
+      } catch (err) {
+        // Release the gate on connect failure so `run()` never hangs;
+        // the error itself surfaces via the `error` forwarder above.
+        resolveReady()
+        if (!this.closed) {
+          this.emit('error', err instanceof Error ? err : new Error(String(err)))
+        }
+      }
+    })()
   }
 
   /**
@@ -234,6 +367,14 @@ export class Worker<
     if (this.running) return this.runPromise!
     this.running = true
     this.emit('ready')
+
+    // If a `drained` listener attached before `run()` was called, hold
+    // the engine start until the subscriber's `XREAD BLOCK` is in
+    // flight. Best-effort: the gate releases on subscriber error too,
+    // so a Redis blip on the events stream cannot wedge the worker.
+    if (this.drainedReadyPromise) {
+      await this.drainedReadyPromise
+    }
 
     const storeResults = this.opts.storeResults === true
     const handler = async (
@@ -315,6 +456,15 @@ export class Worker<
         /* swallow — already surfaced via 'error' */
       }
     }
+    // Tear down the lazy drained subscriber if one was started. Best-
+    // effort: swallow errors so a transient Redis blip on close doesn't
+    // mask the worker's own shutdown path.
+    if (this.drainedEvents) {
+      await this.drainedEvents.close().catch(() => {
+        /* best-effort cleanup */
+      })
+      this.drainedEvents = undefined
+    }
     this.running = false
     this.emit('closed')
   }
@@ -340,12 +490,17 @@ export class Worker<
    * being processed run to completion; no new jobs are dispatched until
    * {@link Worker.resume}. Process-local (does not write the cross-process
    * Redis flag — use {@link Queue.pause} for queue-wide durable pause).
-   * Idempotent. The `doNotWaitActive` argument is accepted for BullMQ
-   * call-shape parity but is a no-op: this method returns immediately and
+   * Idempotent. The `doNotWaitActive` argument is accepted for call-shape
+   * stability but is a no-op: this method returns immediately and
    * in-flight jobs always drain in the background.
    */
   async pause(_doNotWaitActive = false): Promise<void> {
     this.native.pause()
+    // Emit AFTER trip so a listener firing `pause()` synchronously
+    // observes consistent state: `worker.isPaused() === true` by the
+    // time `paused` fires. Process-local — fired from the local Worker,
+    // not from the cross-process Redis pause flag.
+    this.emit('paused')
   }
 
   /**
@@ -354,6 +509,7 @@ export class Worker<
    */
   resume(): void {
     this.native.resume()
+    this.emit('resumed')
   }
 
   /**

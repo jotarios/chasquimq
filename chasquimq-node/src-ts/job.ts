@@ -8,8 +8,13 @@
 // rewriting a stream entry (e.g. `update`) throw — Streams are append-only.
 
 import type { JobsOptions, JobState, JobProgress } from "./types.js";
-import { NotSupportedError, WaitForResultTimeoutError } from "./errors.js";
+import {
+  NotSupportedError,
+  WaitForResultTimeoutError,
+  WaitUntilFinishedTimeoutError,
+} from "./errors.js";
 import type { Queue } from "./queue.js";
+import type { QueueEvents } from "./queue-events.js";
 
 /**
  * Options for {@link Job.waitForResult}.
@@ -199,6 +204,135 @@ export class Job<
       const sleepMs = Math.min(intervalMs, remaining);
       await sleepWithSignal(sleepMs, signal);
     }
+  }
+
+  /**
+   * Subscribe to the engine's events stream and resolve / reject when
+   * the `completed` or `failed` event for **this** job fires.
+   *
+   * Unlike {@link Job.waitForResult}, this method is event-driven (no
+   * polling, no Redis `GET` per interval) and does not require
+   * `WorkerOptions.storeResults = true` to detect completion. It does,
+   * however, require an attached {@link QueueEvents} subscriber so the
+   * events-stream traffic actually reaches this process.
+   *
+   * Return value semantics:
+   * - On `completed`, resolves with the handler's return value when
+   *   `WorkerOptions.storeResults = true` was set on the worker. The
+   *   value is fetched via `Queue.getJobResult(this.id)` after the
+   *   event fires. If `storeResults` was not enabled (or the handler
+   *   returned `undefined`), resolves with `undefined`. The events
+   *   stream itself never carries the return value — keeping subscriber
+   *   traffic small and predictable.
+   * - On `failed`, rejects with `new Error(failedReason)` carrying the
+   *   engine-reported reason (the same string surfaced on the
+   *   `Worker`'s `failed` event).
+   * - On `ttl` elapse, rejects with {@link WaitUntilFinishedTimeoutError}.
+   *
+   * **Race window.** If the job completed (or failed) *before* this
+   * call wires up its listeners, the events-stream event has already
+   * been dispatched and this method has nothing to subscribe to. The
+   * `ttl` will fire normally. For producers that want to await a job
+   * that may already have finished, pair this with a `getJobState`
+   * check, or use {@link Job.waitForResult} (which can read a
+   * persisted result key written before the wait started).
+   *
+   * @param queueEvents A live {@link QueueEvents} subscriber for the
+   * same queue this job was added to. The caller owns the subscriber
+   * (create one per process; share it across all `waitUntilFinished`
+   * calls).
+   * @param ttl Optional timeout in milliseconds. Omit for an unbounded
+   * wait — practical only when you control the worker and trust it to
+   * either complete or fail every job.
+   */
+  async waitUntilFinished(
+    queueEvents: QueueEvents,
+    ttl?: number,
+  ): Promise<ResultType | undefined> {
+    const jobId = this.id;
+    // Surface a queue/queueEvents mismatch up-front rather than
+    // letting the wait silently time out (the events stream is
+    // per-queue, so a `QueueEvents` for a different queue will never
+    // fire the per-id channel). Only checked when we have the queue
+    // backref; jobs constructed without one (the worker-side path,
+    // which has no queue handle) skip the guard — that's also the
+    // path where calling `waitUntilFinished` is unusual.
+    if (this.queue && queueEvents.name !== this.queue.name) {
+      throw new Error(
+        `Job.waitUntilFinished: queueEvents is for "${queueEvents.name}" ` +
+          `but this job is on "${this.queue.name}" — pass a QueueEvents ` +
+          `subscribed to the right queue`,
+      );
+    }
+    const completedChannel = `completed:${jobId}`;
+    const failedChannel = `failed:${jobId}`;
+
+    return new Promise<ResultType | undefined>((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+
+      const onCompleted = (
+        _args: { jobId: string; name: string; returnvalue: unknown },
+      ): void => {
+        cleanup();
+        // Fetch the stored result on a best-effort basis. The engine
+        // emits the `completed` event *before* the per-entry
+        // JOB_OK_SCRIPT writes the result key (the events emit is
+        // off the ack hot path, the result write is on it), so a
+        // single `getJobResult` immediately after the event can lose
+        // the race. Poll a few times with short backoff to give the
+        // result writer a chance to land. If `storeResults` was
+        // disabled on the worker, every poll returns `undefined` and
+        // we fall through to resolve(undefined) — same shape as
+        // jobs whose handler explicitly returned undefined.
+        const queue = this.queue;
+        if (!queue) {
+          resolve(undefined);
+          return;
+        }
+        void (async () => {
+          for (let i = 0; i < 10; i++) {
+            try {
+              const v = await queue.getJobResult(jobId);
+              if (v !== undefined) {
+                resolve(v);
+                return;
+              }
+            } catch {
+              resolve(undefined);
+              return;
+            }
+            await new Promise<void>((r) => setTimeout(r, 50));
+          }
+          resolve(undefined);
+        })();
+      };
+
+      const onFailed = (args: { jobId: string; failedReason: string }): void => {
+        cleanup();
+        reject(new Error(args.failedReason || "job failed"));
+      };
+
+      const onTimeout = (): void => {
+        cleanup();
+        reject(
+          new WaitUntilFinishedTimeoutError(
+            `Job.waitUntilFinished: no terminal event for ${jobId} after ${ttl}ms`,
+          ),
+        );
+      };
+
+      const cleanup = (): void => {
+        if (timer !== undefined) clearTimeout(timer);
+        queueEvents.removeListener(completedChannel, onCompleted);
+        queueEvents.removeListener(failedChannel, onFailed);
+      };
+
+      queueEvents.once(completedChannel, onCompleted);
+      queueEvents.once(failedChannel, onFailed);
+      if (ttl !== undefined && ttl > 0) {
+        timer = setTimeout(onTimeout, ttl);
+      }
+    });
   }
 
   toJSON(): object {

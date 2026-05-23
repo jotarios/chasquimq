@@ -64,3 +64,23 @@ export class WaitForResultTimeoutError extends Error {
     this.name = "WaitForResultTimeoutError";
   }
 }
+
+/**
+ * Thrown by {@link Job.waitUntilFinished} when neither a `completed` nor
+ * a `failed` event for the watched job arrives within the supplied
+ * `ttl` ms. Distinct from a failed job: a failed job rejects with a
+ * regular `Error` carrying the engine-reported `failedReason`. This
+ * error fires only when the events stream itself goes silent (the worker
+ * died, the network blipped, or the `ttl` was too short for the
+ * handler).
+ *
+ * Detect via `err.name === 'WaitUntilFinishedTimeoutError'` rather than
+ * `err instanceof WaitUntilFinishedTimeoutError` so subclasses across
+ * realms (workers / vm contexts) still match.
+ */
+export class WaitUntilFinishedTimeoutError extends Error {
+  constructor(message?: string) {
+    super(message ?? "waitUntilFinished timed out");
+    this.name = "WaitUntilFinishedTimeoutError";
+  }
+}

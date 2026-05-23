@@ -171,15 +171,35 @@ export class QueueEvents extends EventEmitter {
       case 'waiting':
         this.emit('waiting', { jobId, name }, eventId)
         break
-      case 'active':
-        this.emit('active', { jobId, name, prev: 'waiting', attempt: parseIntSafe(f['attempt']) }, eventId)
+      case 'active': {
+        const attempt = parseIntSafe(f['attempt'])
+        this.emit('active', { jobId, name, prev: 'waiting', attempt }, eventId)
+        // Per-job channel for `Job.waitUntilFinished` and other targeted
+        // subscribers. Same payload shape as the broadcast event; the
+        // narrower event name keeps the targeted-listener path off the
+        // O(N-listeners) dispatch for the broadcast channel.
+        if (jobId) this.emit(`active:${jobId}`, { jobId, name, prev: 'waiting', attempt }, eventId)
         break
-      case 'completed':
-        this.emit('completed', { jobId, name, attempt: parseIntSafe(f['attempt']), returnvalue: undefined }, eventId)
+      }
+      case 'completed': {
+        const attempt = parseIntSafe(f['attempt'])
+        // `returnvalue` is intentionally `undefined` — the events stream
+        // does not carry the handler's return bytes (that would
+        // double-allocate the payload onto every subscriber). Callers
+        // that need the value should pair this with `Queue.getJobResult`
+        // (requires `WorkerOptions.storeResults = true`), which is what
+        // `Job.waitUntilFinished` does internally.
+        this.emit('completed', { jobId, name, attempt, returnvalue: undefined }, eventId)
+        if (jobId) this.emit(`completed:${jobId}`, { jobId, name, attempt, returnvalue: undefined }, eventId)
         break
-      case 'failed':
-        this.emit('failed', { jobId, name, failedReason: f['reason'] ?? '', attempt: parseIntSafe(f['attempt']) }, eventId)
+      }
+      case 'failed': {
+        const attempt = parseIntSafe(f['attempt'])
+        const failedReason = f['reason'] ?? ''
+        this.emit('failed', { jobId, name, failedReason, attempt }, eventId)
+        if (jobId) this.emit(`failed:${jobId}`, { jobId, name, failedReason, attempt }, eventId)
         break
+      }
       case 'retry-scheduled':
         // chasquimq-specific extension event; advanced subscribers use this
         // to observe retry scheduling decisions before they fire.
