@@ -304,8 +304,7 @@ mod tests {
     use crate::redis::keys::events_key;
 
     fn redis_url() -> String {
-        std::env::var("REDIS_URL")
-            .expect("REDIS_URL must be set to run integration tests")
+        std::env::var("REDIS_URL").expect("REDIS_URL must be set to run integration tests")
     }
 
     async fn flush_events(client: &Client, queue: &str) {

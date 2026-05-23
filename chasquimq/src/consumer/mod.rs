@@ -210,8 +210,12 @@ where
         // per concurrent worker (capped at 8). Per-call SET / XADD are
         // cheap; this pool is intentionally smaller than `concurrency`.
         let progress_log_pool_size = (concurrency / 8).clamp(2, 8);
-        let progress_log_pool =
-            connect_pool(&self.redis_url, progress_log_pool_size, &self.cfg.connection).await?;
+        let progress_log_pool = connect_pool(
+            &self.redis_url,
+            progress_log_pool_size,
+            &self.cfg.connection,
+        )
+        .await?;
         let queue_name_arc: Arc<str> = Arc::from(self.cfg.queue_name.as_str());
 
         let wiring = WorkerWiring {

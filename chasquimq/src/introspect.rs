@@ -1363,11 +1363,11 @@ mod tests {
         // Values outside u8 range (`> 255`) fail the parse entirely.
         assert_eq!(value_as_progress(&Value::String("1000".into())), None);
         // Non-decimal payloads (future-format JSON, etc.) → None.
-        assert_eq!(value_as_progress(&Value::String("not-a-number".into())), None);
         assert_eq!(
-            value_as_progress(&Value::String("{\"v\":42}".into())),
+            value_as_progress(&Value::String("not-a-number".into())),
             None
         );
+        assert_eq!(value_as_progress(&Value::String("{\"v\":42}".into())), None);
         // Bytes form (RESP2 bulk string returns Bytes).
         assert_eq!(
             value_as_progress(&Value::Bytes(bytes::Bytes::from_static(b"42"))),
