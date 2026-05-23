@@ -17,6 +17,8 @@ class _Job:
     def created_at_ms(self) -> int: ...
     @property
     def attempt(self) -> int: ...
+    def update_progress(self, n: int) -> Awaitable[None]: ...
+    def log(self, line: str) -> Awaitable[int]: ...
 
 class Producer:
     def __init__(
@@ -107,6 +109,9 @@ class Consumer:
         result_ttl_ms: Optional[int] = None,
         reconnect_max_attempts: Optional[int] = None,
         credential_provider: Optional[CredentialProvider] = None,
+        log_max_stream_len: Optional[int] = None,
+        log_max_line_bytes: Optional[int] = None,
+        events_progress_enabled: Optional[bool] = None,
     ) -> None: ...
     def run(
         self, handler: Callable[[_Job], Awaitable[Any]]
@@ -153,3 +158,10 @@ class Introspector:
         limit: int = 100,
         cursor: Optional[str] = None,
     ) -> Awaitable[Tuple[list[dict[str, Any]], Optional[str]]]: ...
+    def get_job_logs(
+        self,
+        id: str,
+        start: int = 0,
+        end: int = -1,
+        asc: bool = True,
+    ) -> Awaitable[Tuple[list[str], int]]: ...

@@ -117,6 +117,38 @@ impl Introspector {
         })
     }
 
+    /// XRANGE / XREVRANGE the per-job log stream for `id`. Returns
+    /// `(list[str], int)`: the captured lines plus the current XLEN of
+    /// the log stream. `start = 0` / `end = -1` are the BullMQ defaults
+    /// ("everything in order"). Negative `start` is "this many from the
+    /// end" (translated via XLEN). Mirrors `chasquimq-node/src/
+    /// introspector.rs::Introspector::getJobLogs`.
+    #[pyo3(signature = (id, start = 0, end = -1, asc = true))]
+    fn get_job_logs<'py>(
+        &self,
+        py: Python<'py>,
+        id: String,
+        start: i64,
+        end: i64,
+        asc: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let (lines, total) = inner
+                .get_job_logs(&id, start, end, asc)
+                .await
+                .map_err(map_engine_err)?;
+            Python::attach(|py| {
+                let list = PyList::empty(py);
+                for line in lines {
+                    list.append(line)?;
+                }
+                let tup = (list.unbind(), total).into_py_any(py)?;
+                Ok::<Py<PyAny>, PyErr>(tup)
+            })
+        })
+    }
+
     #[pyo3(signature = (state, offset = 0, limit = 100, cursor = None))]
     fn get_jobs<'py>(
         &self,
@@ -168,5 +200,6 @@ fn job_info_to_dict<'py>(py: Python<'py>, info: &EngineJobInfo) -> PyResult<Boun
     d.set_item("failure_reason", info.failure_reason.clone())?;
     d.set_item("failure_detail", info.failure_detail.clone())?;
     d.set_item("decode_failed", info.decode_failed)?;
+    d.set_item("progress", info.progress.map(|n| n as u32))?;
     Ok(d)
 }

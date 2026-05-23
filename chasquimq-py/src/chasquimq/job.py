@@ -49,10 +49,79 @@ class Job:
         default=None, repr=False, compare=False, hash=False
     )
 
+    # Latest progress value persisted via :meth:`update_progress`, or
+    # the introspector-read value when :meth:`Queue.get_job` populated
+    # this Job from the per-job progress key. ``None`` when no progress
+    # has been recorded.
+    progress: Optional[int] = field(
+        default=None, repr=False, compare=False, hash=False
+    )
+
+    # Opaque native handle. Set by the :class:`Worker` shim's native
+    # handler bridge before the user processor sees this :class:`Job`
+    # instance — :meth:`update_progress` and :meth:`log` then forward to
+    # the engine's per-dispatch ``JobHandle``. ``None`` on Jobs
+    # synthesized by :meth:`Queue.get_job` / :meth:`Queue.add` / etc.;
+    # those Jobs are read-only on the progress + log surface and the
+    # methods raise a clear error.
+    _handle: Optional[Any] = field(
+        default=None, repr=False, compare=False, hash=False
+    )
+
     @property
     def attempts_made(self) -> int:
         """Alias for :attr:`attempt` — matches BullMQ naming for compatibility."""
         return self.attempt
+
+    async def update_progress(self, n: int) -> None:
+        """Persist a ``0..=100`` progress value for this job.
+
+        The engine clamps values outside ``0..=100`` to ``100`` (no
+        throw). After the persisted SET succeeds the engine emits a
+        best-effort ``e=progress`` events-stream entry so
+        :class:`QueueEvents` subscribers can fan it out onto the
+        broadcast ``'progress'`` channel and the per-id
+        ``'progress:<jobId>'`` channel; mute the events fan-out via
+        ``Worker(events_progress_enabled=False)``.
+
+        **Read-only Job guard.** Jobs returned by :meth:`Queue.get_job`,
+        :meth:`Queue.get_jobs`, or constructed by :meth:`Queue.add` are
+        synthesized from introspector / producer-side data and carry no
+        live native handle; calling :meth:`update_progress` on those
+        raises :class:`RuntimeError`. Only Jobs handed to a
+        :class:`Worker` processor have a backref.
+        """
+        if self._handle is None:
+            raise RuntimeError(
+                "Job.update_progress() requires the Job be passed to your "
+                "worker handler; Jobs returned by Queue.get_job() are "
+                "read-only"
+            )
+        clamped = max(0, int(n))
+        await self._handle.update_progress(clamped)
+        # Mirror the persisted value onto the local Job so subsequent
+        # ``job.progress`` reads in the handler observe consistent state
+        # with the events stream / introspector view. Engine clamps to
+        # ``100``; mirror that.
+        self.progress = min(clamped, 100)
+
+    async def log(self, line: str) -> int:
+        """Append ``line`` to the per-job log stream and return the new
+        XLEN.
+
+        Oversize lines are truncated on a UTF-8 char boundary with a
+        ``[…truncated]`` marker; the per-line cap is set by
+        ``Worker(log_max_line_bytes=...)`` (default ``4096``). Read back
+        via :meth:`Queue.get_job_logs`.
+
+        Same read-only Job guard as :meth:`update_progress`.
+        """
+        if self._handle is None:
+            raise RuntimeError(
+                "Job.log() requires the Job be passed to your worker "
+                "handler; Jobs returned by Queue.get_job() are read-only"
+            )
+        return int(await self._handle.log(line))
 
     async def wait_for_result(
         self,

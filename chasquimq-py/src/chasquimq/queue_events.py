@@ -407,7 +407,7 @@ def _to_str(v: Any) -> str:
 # in ``queue-events.ts`` — a non-numeric value silently falls back to the
 # raw string so a malformed entry never crashes the iterator.
 _NUMERIC_EVENT_FIELDS: frozenset[str] = frozenset(
-    {"attempt", "backoff_ms", "delay_ms", "duration_us", "ts"}
+    {"attempt", "backoff_ms", "delay_ms", "duration_us", "ts", "progress"}
 )
 
 # Events for which we emit a per-id targeted channel
@@ -416,7 +416,9 @@ _NUMERIC_EVENT_FIELDS: frozenset[str] = frozenset(
 # emit. The targeted channels exist specifically so
 # :meth:`Job.wait_until_finished` doesn't have to filter every
 # broadcast event by jobId.
-_PER_ID_EVENTS: frozenset[str] = frozenset({"active", "completed", "failed"})
+_PER_ID_EVENTS: frozenset[str] = frozenset(
+    {"active", "completed", "failed", "progress"}
+)
 
 
 def _maybe_int(s: str) -> Any:

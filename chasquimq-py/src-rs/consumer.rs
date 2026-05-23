@@ -62,6 +62,9 @@ impl Consumer {
         result_ttl_ms = None,
         reconnect_max_attempts = None,
         credential_provider = None,
+        log_max_stream_len = None,
+        log_max_line_bytes = None,
+        events_progress_enabled = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -85,6 +88,9 @@ impl Consumer {
         result_ttl_ms: Option<i64>,
         reconnect_max_attempts: Option<u32>,
         credential_provider: Option<Py<PyAny>>,
+        log_max_stream_len: Option<u64>,
+        log_max_line_bytes: Option<u32>,
+        events_progress_enabled: Option<bool>,
     ) -> PyResult<Self> {
         let mut cfg = ConsumerConfig {
             queue_name,
@@ -159,6 +165,15 @@ impl Consumer {
         if let Some(cb) = credential_provider {
             let provider = PyCredentialProvider::new(py, cb)?;
             cfg.connection.credential_provider = Some(Arc::new(provider));
+        }
+        if let Some(v) = log_max_stream_len {
+            cfg.log_max_stream_len = v;
+        }
+        if let Some(v) = log_max_line_bytes {
+            cfg.log_max_line_bytes = v as usize;
+        }
+        if let Some(v) = events_progress_enabled {
+            cfg.events_progress_enabled = v;
         }
 
         let unrecoverable_cls = py
