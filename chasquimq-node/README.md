@@ -69,9 +69,9 @@ main()
 | Surface | What it does |
 |---|---|
 | `Queue<DataType, ResultType, NameType>` | Producer + queue inspection. `add` / `addBulk` / `addUnique` / `getJob` / `getJobs` / `getJobState` / `getJobCounts` / `getWaitingCount` / `getActiveCount` / `getDelayedCount` / `getCompletedCount` / `getFailedCount` / `count` / `getJobResult` / `peekDlq` / `replayDlq` / `cancelDelayed` / `getRepeatableJobs` / `removeRepeatableByKey` / `pause` / `resume` / `isPaused` / `remove` / `removeReport` / `drain` / `clean` / `obliterate`. `[Symbol.asyncDispose]`. |
-| `Worker<DataType, ResultType, NameType>` | Consumer pool. tokio-side dispatch, opt-in result storage (`storeResults: true`), `EventEmitter` events (`completed` / `failed` / `error`), `pause` / `resume` / `isPaused`. `[Symbol.asyncDispose]`. |
-| `Job<DataType, ResultType, NameType>` | Read-only handle. `id`, `name`, `data`, `attemptsMade`, `waitForResult({ timeoutMs, intervalMs, signal })`. |
-| `QueueEvents` | Cross-process pub/sub via the events stream. Subscribe to `completed` / `failed` / `dlq` / `retry-scheduled` / `delayed` / `drained`. `[Symbol.asyncDispose]`. |
+| `Worker<DataType, ResultType, NameType>` | Consumer pool. tokio-side dispatch, opt-in result storage (`storeResults: true`), `EventEmitter` events (`ready` / `active` / `completed` / `failed` / `error` / `closing` / `closed` / `drained` / `paused` / `resumed`), `pause` / `resume` / `isPaused`. `[Symbol.asyncDispose]`. |
+| `Job<DataType, ResultType, NameType>` | Read-only handle. `id`, `name`, `data`, `attemptsMade`, `waitForResult({ timeoutMs, intervalMs, signal })`, `waitUntilFinished(queueEvents, ttl?)`. |
+| `QueueEvents` | Cross-process pub/sub via the events stream. Subscribe to `waiting` / `active` / `completed` / `failed` / `dlq` / `retry-scheduled` / `delayed` / `drained` / `retries-exhausted`, plus per-id channels (`completed:<jobId>` / `failed:<jobId>` / `active:<jobId>`) for targeted subscribers. `[Symbol.asyncDispose]`. |
 | `BackoffSpec` | Builders: `.fixed(delayMs)` / `.exponential(initialMs, { multiplier, maxMs, jitterMs })`. |
 | `UnrecoverableError` | Throw from your handler to bypass retries and route the job directly to DLQ. |
 | `NotSupportedError` | Surfaces from APIs that aren't on the chasquimq roadmap (e.g. parent/child flows). |
@@ -189,6 +189,89 @@ await queue.resume()           // lift it everywhere
 ```
 
 The same durable flag is what the CLI's `chasqui pause <queue>` / `chasqui resume <queue>` toggle. Both surfaces are idempotent — double-pause / double-resume are no-ops.
+
+### Subscribing to events
+
+Two layered surfaces: per-worker `EventEmitter` events for in-process observation, and the cross-process `QueueEvents` stream for fan-out across workers, dashboards, and ops tooling.
+
+In-process `Worker` events fire on the local worker only and use plain `EventEmitter` semantics:
+
+```ts
+const worker = new Worker("emails", handler, { connection })
+
+worker.on("ready", () => console.log("engine loop started"))
+worker.on("active", (job) => console.log("running", job.id))
+worker.on("completed", (job, result) => console.log("ok", job.id, result))
+worker.on("failed", (job, err) => console.error("failed", job?.id, err))
+worker.on("error", (err) => console.error("engine error", err))
+worker.on("drained", () => console.log("queue is empty"))
+worker.on("paused", () => console.log("worker parked"))
+worker.on("resumed", () => console.log("worker resumed"))
+worker.on("closing", () => console.log("shutting down"))
+worker.on("closed", () => console.log("shutdown complete"))
+```
+
+`drained` is the only `Worker` event that requires a cross-process subscription (the engine emits it on the events stream, since "no jobs left" is a queue-wide observation). It's lazily wired: the first `worker.on('drained', ...)` call spawns an embedded `QueueEvents` subscriber, torn down on `worker.close()`. Workers that never subscribe pay no extra Redis connections.
+
+Cross-process `QueueEvents` listens on the events stream — every process running a `QueueEvents` instance for the same queue sees every transition, regardless of which worker emitted it:
+
+```ts
+import { QueueEvents } from "chasquimq"
+
+const events = new QueueEvents("emails", { connection })
+await events.waitUntilReady()
+
+events.on("waiting", ({ jobId, name }) => { /* enqueued */ })
+events.on("active", ({ jobId, name, attempt }) => { /* started */ })
+events.on("completed", ({ jobId, name, attempt }) => { /* ok */ })
+events.on("failed", ({ jobId, failedReason, attempt }) => { /* err */ })
+events.on("drained", () => { /* empty */ })
+
+// chasquimq-specific extensions
+events.on("retry-scheduled", ({ jobId, attempt, backoffMs }) => { /* next try */ })
+events.on("dlq", ({ jobId, reason, attempt }) => { /* moved to DLQ */ })
+events.on("retries-exhausted", ({ jobId, attemptsMade, reason }) => { /* DLQ */ })
+
+// Per-id channels — fire only for the named job. Used internally by
+// Job.waitUntilFinished; useful for targeted UI updates without
+// filtering every broadcast event by jobId.
+events.on(`completed:${jobId}`, ({ jobId }) => { /* this job, done */ })
+events.on(`failed:${jobId}`, ({ failedReason }) => { /* this job, failed */ })
+
+await events.close()
+```
+
+`completed` payloads from the events stream do **not** carry the handler's return value (that would double-allocate the payload onto every subscriber). To read the value, pair `QueueEvents` with `Queue.getJobResult(jobId)` and run the worker with `storeResults: true`. The next section's `Job.waitUntilFinished` does this for you.
+
+`progress` and `stalled` listeners are accepted on `Worker` for API stability but are currently no-op — the engine doesn't emit those transitions yet. Attach them safely; they'll start firing when the corresponding engine work lands.
+
+### Awaiting a single job's completion
+
+`Job.waitUntilFinished(queueEvents, ttl?)` is the event-driven completion-wait — subscribes to the per-id `completed:<jobId>` / `failed:<jobId>` channels and resolves / rejects on the first to fire:
+
+```ts
+const events = new QueueEvents("emails", { connection })
+await events.waitUntilReady()
+
+const job = await queue.add("send", { to: "ada@example.com" })
+
+try {
+  // Resolves with the handler's return value (requires
+  // storeResults: true on the worker; otherwise resolves with
+  // undefined). Rejects with new Error(failedReason) on failure.
+  // ttl in ms — omit for an unbounded wait.
+  const result = await job.waitUntilFinished(events, 30_000)
+  console.log("sent:", result)
+} catch (err) {
+  // Either a job failure (engine reason) or a
+  // WaitUntilFinishedTimeoutError (ttl elapsed with no terminal event).
+  console.error(err)
+} finally {
+  await events.close()
+}
+```
+
+Distinct from `Job.waitForResult({ timeoutMs })`: that one polls the `Queue.getJobResult` Redis key and **requires** `storeResults: true` to detect completion at all. `waitUntilFinished` is event-driven, so it detects completion even when no result key was written — but it cannot tell you a job that already finished before the call wired up. Pick `waitUntilFinished` for low-latency awaits of jobs you're about to enqueue; pick `waitForResult` for "did this id ever finish".
 
 ### Inspect jobs
 

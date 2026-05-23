@@ -12,15 +12,27 @@ only one worker fires at a time.
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Awaitable, Callable, Optional, Tuple
+import inspect
+import logging
+from collections import defaultdict
+from typing import Any, Awaitable, Callable, Optional, Tuple, Union
 
 from . import _native
 from ._encoding import decode_payload, encode_payload
 from ._url import apply_tls
 from .job import Job
+from .queue_events import QueueEvents
+
+
+_log = logging.getLogger("chasquimq.worker")
 
 
 Handler = Callable[[Job], Awaitable[Any]]
+
+
+WorkerListener = Callable[..., Union[Any, Awaitable[Any]]]
+"""A callback registered via :meth:`Worker.on`. May be sync or
+``async def``; async callbacks are scheduled on the running loop."""
 
 CredentialProvider = Callable[
     [Optional[str]], Awaitable[Tuple[Optional[str], Optional[str]]]
@@ -40,6 +52,40 @@ class Worker:
     headline throughput target. Pass ``concurrency=1`` explicitly when
     serial processing is required (e.g. handlers that mutate shared
     state without their own synchronization).
+
+    ## Events
+
+    Event names mirror the Node shim's ``Worker`` listener interface,
+    so existing application code reads naturally across languages.
+    Subscribe with :meth:`on`; callbacks may be plain functions or
+    ``async def`` coroutines.
+
+    * ``ready``     — ``()``. Fired once when :meth:`run` starts the
+      engine loop.
+    * ``active``    — ``(job: Job)``. Fired before each handler
+      invocation.
+    * ``completed`` — ``(job: Job, result)``. Fired after the handler
+      returns. The engine acks the job.
+    * ``failed``    — ``(job: Job, err: BaseException)``. Fired after
+      the handler raises. The exception is re-raised so the engine
+      routes the job to retry-or-DLQ.
+    * ``error``     — ``(err: BaseException)``. Fired on engine-side
+      errors surfaced from the native loop or the drained subscriber.
+    * ``closing``   — ``()``. Fired at the start of :meth:`close`.
+    * ``closed``    — ``()``. Fired once shutdown completes.
+    * ``drained``   — ``()``. Fired when the engine observes a
+      full→empty transition on the main stream. Lazily subscribes to
+      the cross-process events stream on the first ``on('drained',
+      ...)`` call; the subscriber is torn down on :meth:`close`.
+      **Cross-process scope:** every worker on this queue receives
+      ``drained``, not just this one.
+    * ``paused``    — ``()``. Fired when :meth:`pause` is called.
+    * ``resumed``   — ``()``. Fired when :meth:`resume` is called.
+
+    Listener names accepted for parity but currently no-op (engine
+    doesn't emit the underlying transition yet): ``progress``,
+    ``stalled``. These can be wired up without raising; promoted to
+    active events when the corresponding engine work lands.
     """
 
     def __init__(
@@ -126,6 +172,18 @@ class Worker:
         # Pause intent recorded before the (deferred) native consumer
         # exists; applied once it is constructed in ``run()``.
         self._pending_paused = False
+        # Listener API. Mirrors :class:`QueueEvents`'s shape so the
+        # mental model is one. Sync and async callbacks both work; an
+        # exception from a sync callback is logged and swallowed so a
+        # buggy listener cannot crash the worker.
+        self._listeners: dict[str, list[WorkerListener]] = defaultdict(list)
+        # Lazy embedded :class:`QueueEvents` subscriber for the
+        # cross-process ``drained`` event. ``None`` until a ``drained``
+        # listener attaches; torn down in :meth:`close`. Workers that
+        # never subscribe to ``drained`` pay no extra Redis connections.
+        self._drained_events: Optional[QueueEvents] = None
+        self._drained_redis_url = redis_url
+        self._drained_tls = tls
 
     @property
     def name(self) -> str:
@@ -159,6 +217,18 @@ class Worker:
                 self._consumer.pause()
 
         self._running = True
+        self._emit("ready")
+
+        # If a ``drained`` listener attached before ``run()`` was
+        # called, hold the engine start until the subscriber's first
+        # ``XREAD BLOCK`` is in flight. Best-effort: cancellation /
+        # error on the subscriber side resolves the wait so the
+        # worker startup is never wedged.
+        if self._drained_events is not None:
+            try:
+                await self._drained_events.wait_until_ready()
+            except Exception:
+                pass
 
         async def native_handler(native_job: Any) -> Optional[bytes]:
             data = decode_payload(bytes(native_job.payload))
@@ -169,7 +239,28 @@ class Worker:
                 attempt=native_job.attempt,
                 created_at_ms=native_job.created_at_ms,
             )
-            result = await self._handler(job)
+            # ``active`` fires before the handler runs so subscribers
+            # building a "currently running" view see jobs even for
+            # long-running handlers. Mirrors the Node shim.
+            self._emit("active", job)
+            try:
+                result = await self._handler(job)
+            except asyncio.CancelledError:
+                # Cancellation (from shutdown / shield bypass) is a
+                # control-flow signal, not a handler failure. The
+                # engine treats the cancelled handler as in-progress
+                # at shutdown; no ``failed`` event fires (a cancelled
+                # handler is not a handler failure).
+                raise
+            except BaseException as exc:
+                # ``failed`` fires before re-raising so subscribers see
+                # the exception that triggered the routing decision
+                # (retry vs. DLQ-unrecoverable). The native binding
+                # detects ``UnrecoverableError`` via MRO; this emit
+                # path stays agnostic.
+                self._emit("failed", job, exc)
+                raise
+            self._emit("completed", job, result)
             if result is None:
                 return None
             return encode_payload(result)
@@ -180,6 +271,17 @@ class Worker:
 
         try:
             await self._consumer_task
+        except asyncio.CancelledError:
+            # External cancellation (test teardown, shutdown via
+            # ``close``). Not an engine error — propagate without
+            # firing the ``error`` channel so subscribers don't see
+            # spurious shutdown noise.
+            raise
+        except BaseException as exc:
+            # Engine-side errors surfaced from the native loop. Mirrors
+            # the Node shim's ``error`` channel.
+            self._emit("error", exc)
+            raise
         finally:
             self._running = False
 
@@ -195,12 +297,23 @@ class Worker:
         if self._closed:
             return
         self._closed = True
+        self._emit("closing")
         # ``close()`` may be called before ``run()`` (e.g. an aborted
         # async-context-manager path). When a credential_provider
         # deferred construction, the native consumer may not exist yet —
         # there is nothing to drain, so just flag closed.
         if self._consumer is not None:
             self._consumer.shutdown()
+        # Tear down the lazy drained subscriber if one was started.
+        # Best-effort: swallow errors so a transient Redis blip on
+        # close doesn't mask the worker's own shutdown path.
+        if self._drained_events is not None:
+            try:
+                await self._drained_events.close()
+            except Exception:
+                pass
+            self._drained_events = None
+        self._emit("closed")
 
     def pause(self) -> None:
         """Pause this worker's reader at the next batch boundary.
@@ -218,6 +331,11 @@ class Worker:
             self._consumer.pause()
         else:
             self._pending_paused = True
+        # Emit AFTER trip so a listener firing :meth:`pause`
+        # synchronously observes consistent state:
+        # :meth:`is_paused` returns ``True`` by the time ``paused``
+        # fires. Process-local; mirrors the Node shim.
+        self._emit("paused")
 
     def resume(self) -> None:
         """Resume a paused worker. The reader wakes immediately (no
@@ -226,6 +344,7 @@ class Worker:
         self._pending_paused = False
         if self._consumer is not None:
             self._consumer.resume()
+        self._emit("resumed")
 
     def is_paused(self) -> bool:
         """Whether this worker is paused via :meth:`pause`. Does not
@@ -243,8 +362,125 @@ class Worker:
     def is_closed(self) -> bool:
         return self._closed
 
+    # --- Listener API surface -----------------------------------------------
+
+    def on(self, event_name: str, callback: WorkerListener) -> None:
+        """Register a callback for a worker event.
+
+        See the class docstring for the supported event names. Callbacks
+        may be plain functions or ``async def`` coroutines. Listeners
+        for ``'drained'`` lazily spawn an internal cross-process
+        events-stream subscriber the first time one attaches; the
+        subscriber is torn down in :meth:`close`.
+        """
+        self._listeners[event_name].append(callback)
+        if (
+            event_name == "drained"
+            and self._drained_events is None
+            and not self._closed
+        ):
+            self._spawn_drained_subscriber()
+
+    def off(self, event_name: str, callback: WorkerListener) -> None:
+        """Remove a previously-registered callback.
+
+        Removes the first matching callback only; passing the same
+        callback twice removes both copies via two ``off`` calls. No
+        error if the callback is not registered.
+        """
+        listeners = self._listeners.get(event_name)
+        if not listeners:
+            return
+        try:
+            listeners.remove(callback)
+        except ValueError:
+            pass
+        if not listeners:
+            self._listeners.pop(event_name, None)
+
+    remove_listener = off
+    """Alias matching the Node ``EventEmitter`` naming."""
+
+    def once(self, event_name: str, callback: WorkerListener) -> None:
+        """Register a callback that fires exactly once and then removes
+        itself.
+        """
+        async def _wrapper(*args: Any, **kwargs: Any) -> None:
+            self.off(event_name, _wrapper)
+            res = callback(*args, **kwargs)
+            if inspect.isawaitable(res):
+                await res
+
+        self.on(event_name, _wrapper)
+
+    def listener_count(self, event_name: Optional[str] = None) -> int:
+        if event_name is not None:
+            return len(self._listeners.get(event_name, []))
+        return sum(len(v) for v in self._listeners.values())
+
+    def _emit(self, event_name: str, *args: Any) -> None:
+        listeners = self._listeners.get(event_name)
+        if not listeners:
+            return
+        # Snapshot before invoking so a ``once`` wrapper's ``off``
+        # call during dispatch doesn't mutate the live list.
+        for cb in list(listeners):
+            try:
+                result = cb(*args)
+            except Exception as exc:
+                _log.warning(
+                    "Worker listener for %r raised; swallowing: %s",
+                    event_name,
+                    exc,
+                    exc_info=True,
+                )
+                continue
+            if inspect.isawaitable(result):
+                task = asyncio.ensure_future(result)
+                task.add_done_callback(_log_listener_task_exception)
+
+    def _spawn_drained_subscriber(self) -> None:
+        """Lazily start a :class:`QueueEvents` subscriber that forwards
+        the engine's cross-process ``drained`` event onto this worker's
+        listener registry. Idempotent. Errors from the subscriber are
+        forwarded to this worker's ``error`` channel so application
+        code only needs one error subscription.
+
+        ``block_ms=1000`` keeps :meth:`close` snappy — the QueueEvents
+        default 5s would mean every worker shutdown drags for up to
+        5s before ``closed`` fires; 1s + small grace ≈ 1s teardown.
+        """
+        events = QueueEvents(
+            self._queue_name,
+            redis_url=self._drained_redis_url,
+            tls=self._drained_tls,
+            block_ms=1000,
+        )
+
+        def _on_drained(_event_id: str) -> None:
+            self._emit("drained")
+
+        events.on("drained", _on_drained)
+        # Note: :class:`QueueEvents` does not currently expose an
+        # explicit ``error`` channel the way Node's ``EventEmitter``
+        # does; transient subscriber errors are logged inside the
+        # ``_listener_loop``. If a future slice adds one, wire it onto
+        # this Worker's ``error`` emitter the same way the Node shim
+        # does.
+        self._drained_events = events
+
     async def __aenter__(self) -> "Worker":
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
         await self.close()
+
+
+def _log_listener_task_exception(task: "asyncio.Task[Any]") -> None:
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        _log.warning(
+            "Worker async listener task failed: %s", exc, exc_info=exc
+        )

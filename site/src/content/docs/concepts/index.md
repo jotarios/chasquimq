@@ -22,6 +22,7 @@ The why behind every design decision. Read [Thinking in ChasquiMQ](/concepts/thi
 - [DLQ and recovery](/concepts/dlq-and-recovery/) — why the DLQ is just another stream.
 - [Result backends](/concepts/result-backends/) — why result storage is opt-in.
 - [The scheduler](/concepts/the-scheduler/) — separate from the consumer for a reason.
+- [Events and listeners](/concepts/events-and-listeners/) — two layers of events, when to reach for each, and how `waitUntilFinished` composes them.
 
 ## Architecture and trade-offs
 

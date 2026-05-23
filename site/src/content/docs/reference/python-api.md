@@ -535,6 +535,40 @@ Idempotent.
 - `worker.is_running` — engine task in flight.
 - `worker.is_closed` — `True` after the first `close()` call.
 
+### Worker events
+
+Subscribe via `worker.on(event_name, callback)`. Callbacks may be
+plain functions or `async def` coroutines — async callbacks are
+scheduled on the running loop. Use `worker.off(event_name, callback)`
+to remove, or `worker.once(event_name, callback)` for a single-shot
+listener. A raised exception from a sync callback is logged and
+swallowed so a buggy listener cannot crash the worker.
+
+| Event | Args | Fires when |
+|---|---|---|
+| `ready` | `()` | `run()` starts the engine loop. |
+| `active` | `(job: Job)` | Before each handler invocation. |
+| `completed` | `(job: Job, result)` | Handler returns. Engine acks the job. |
+| `failed` | `(job: Job, err: BaseException)` | Handler raises. Exception re-raised into engine retry/DLQ path. |
+| `error` | `(err: BaseException)` | Engine-side error surfaced from the native loop. |
+| `closing` | `()` | Start of `close()`. |
+| `closed` | `()` | Shutdown completes. |
+| `drained` | `()` | Engine observed a full→empty transition on the main stream. **Cross-process scope.** Lazily wires an embedded `QueueEvents` subscriber on the first `worker.on('drained', ...)` call; torn down on `close()`. |
+| `paused` | `()` | `pause()` was called. Process-local. |
+| `resumed` | `()` | `resume()` was called. Process-local. |
+
+Names accepted for parity but currently never fire (engine doesn't
+emit the underlying transition yet — safe to wire up, will start
+firing when the corresponding engine work lands):
+
+- `progress` — `(job: Job, progress)`.
+- `stalled` — `(job_id: str, prev: str)`.
+
+```python
+worker.on("completed", lambda job, result: print("ok", job.id))
+worker.on("drained", lambda: print("queue empty"))
+```
+
 ### Type alias: `Handler`
 
 ```python
@@ -609,6 +643,52 @@ the most common cause. For high-fanout workloads, subscribe to
 [`QueueEvents`](#queueevents) instead.
 :::
 
+### `await job.wait_until_finished(queue_events, *, timeout)`
+
+```python
+async def wait_until_finished(
+    self,
+    queue_events: QueueEvents,
+    *,
+    timeout: float | None = None,
+) -> Any | None
+```
+
+Event-driven completion-wait, mirroring the Node shim.
+Subscribes to the per-id `completed:<job_id>` / `failed:<job_id>`
+channels on the supplied `queue_events` and resolves / raises on
+the first to fire.
+
+- Returns the handler's return value when the worker ran with
+  `store_results=True`. The value is fetched via
+  `Queue.get_job_result(self.id)` after the `completed` event lands.
+  When `store_results` was off (or the handler returned `None`),
+  returns `None`.
+- **Raises** `RuntimeError(failed_reason)` on the engine-reported
+  failure reason (the same string surfaced on `Worker`'s `failed`
+  event).
+- **Raises** `WaitUntilFinishedTimeoutError` on `timeout` elapse.
+  Omit `timeout` for an unbounded wait.
+
+Distinct from [`wait_for_result`](#await-jobwait_for_resulttimeoutpoll_interval):
+event-driven (no polling), and works without `store_results=True`
+to *detect* completion. The two cover different races —
+`wait_until_finished` loses to a job that finished before the
+listeners wired up; `wait_for_result` can read a result key written
+before the wait started but needs `store_results=True`.
+
+```python
+events = QueueEvents("emails", redis_url=url)
+# Force the subscriber loop to start so wait_until_ready is awaitable.
+events.on("completed", lambda *_a: None)
+await events.wait_until_ready()
+
+job = await queue.add("send", {"to": "ada@example.com"})
+result = await job.wait_until_finished(events, timeout=30.0)
+
+await events.close()
+```
+
 ## QueueEvents
 
 ```python
@@ -645,13 +725,75 @@ async for ev in events:
 Yields [`QueueEvent`](#queueevent) values. Iteration ends when
 [`close()`](#await-queueeventsclose) is called.
 
+### Listener API
+
+```python
+def on(self, event_name: str, callback: Listener) -> None
+def off(self, event_name: str, callback: Listener) -> None
+def once(self, event_name: str, callback: Listener) -> None
+async def wait_until_ready(self) -> None
+```
+
+`EventEmitter`-style listener surface alongside the iterator. The
+first `on(...)` call lazily spawns an internal subscriber task;
+`close()` cancels it. Pick *one* of the two surfaces — both share
+the same connection but only one `XREAD` consumer can run at a
+time.
+
+Callbacks may be plain functions or `async def` coroutines.
+Callback arity mirrors the Node shim: one argument (`event_id`) for
+queue-scoped events (`drained`), two arguments (`payload`,
+`event_id`) for per-job events. `payload` is a `dict` with
+`jobId` / `name` / engine-specific fields. The `failed` payload
+exposes the engine reason as both `reason` (raw) and `failedReason`
+(camelCase alias) for convenience.
+
+Event names accepted:
+
+| Event | Args | Engine origin |
+|---|---|---|
+| `waiting` | `(payload, event_id)` | Producer added (or promoter promoted) the job. |
+| `active` | `(payload, event_id)` | Worker pulled the job; handler is about to run. |
+| `completed` | `(payload, event_id)` | Handler returned. |
+| `failed` | `(payload, event_id)` | Handler raised. `payload['failedReason']`. |
+| `retry-scheduled` | `(payload, event_id)` | Engine atomically rescheduled the job onto the delayed ZSET. |
+| `delayed` | `(payload, event_id)` | Producer enqueued with `delay > 0`. |
+| `dlq` | `(payload, event_id)` | DLQ relocator wrote the entry to the DLQ stream. |
+| `retries-exhausted` | `(payload, event_id)` | Synthetic alias of `dlq` (chasquimq-specific). |
+| `drained` | `(event_id,)` | Engine drained (queue-scoped, no `jobId`). |
+
+Per-id channels fire alongside the broadcast channel for events
+that carry a `job_id` (naming convention: `<event>:<job_id>`).
+Used internally by
+[`Job.wait_until_finished`](#await-jobwait_until_finishedqueue_events-timeout):
+
+| Event | Args | Fires alongside |
+|---|---|---|
+| `active:<job_id>` | `(payload, event_id)` | `active` |
+| `completed:<job_id>` | `(payload, event_id)` | `completed` |
+| `failed:<job_id>` | `(payload, event_id)` | `failed` |
+
+`await wait_until_ready()` blocks until the listener subscriber has
+issued its first `XREAD BLOCK` (i.e. the subscription window is
+open) — useful for tests that need a deterministic "subscriber is
+listening" gate. No-op when no listeners are attached.
+
+```python
+events = QueueEvents("emails")
+events.on("completed", lambda payload, eid: print("ok", payload["jobId"]))
+events.on(f"completed:{job_id}", on_one_completed)  # targeted
+await events.wait_until_ready()
+# ... do work ...
+await events.close()
+```
+
 ### `await queue_events.close()`
 
 ```python
 async def close(self) -> None
 ```
 
-Stop iteration and release the Redis connection.
+Stop iteration / dispatch and release the Redis connection.
 
 ## QueueEvent
 
@@ -843,6 +985,7 @@ The shim raises typed exceptions:
 
 - [`UnrecoverableError`](/reference/error-codes/#cmq-011--handler-signaled-unrecoverable--dlq) — raise from a handler to skip retries and route to the DLQ. Subclassing is supported via MRO-aware `issubclass` check on the native side.
 - [`NotSupportedError`](/reference/error-codes/#cmq-200--python-feature-not-supported) — caller asked for a v1-stubbed feature.
+- `WaitUntilFinishedTimeoutError` — [`Job.wait_until_finished`](#await-jobwait_until_finishedqueue_events-timeout) saw neither a `completed` nor a `failed` event within the supplied `timeout`. Subclasses `TimeoutError`. Distinct from a failed job: a failed job raises a regular `RuntimeError(failed_reason)`; this error fires only when the events stream itself goes silent.
 
 ```python
 from chasquimq import UnrecoverableError

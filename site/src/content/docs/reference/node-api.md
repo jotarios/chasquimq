@@ -443,7 +443,7 @@ reader immediately (edge-triggered, no poll latency). In-memory only —
 does not write the cross-process flag and does not survive a process
 restart; for queue-wide durable pause use
 [`queue.pause()`](#queuepause-queueresume-queueispaused). Idempotent.
-`doNotWaitActive` is accepted for BullMQ call-shape parity but is a
+`doNotWaitActive` is accepted for call-shape stability but is a
 no-op (in-flight jobs always drain in the background).
 
 ### `worker.isClosed`, `worker.isRunning`
@@ -479,10 +479,23 @@ Throws `NotSupportedError` in v1.
 | `error` | `(err)` | Engine-side error surfaced from the native loop. |
 | `closing` | `(msg)` | Start of `.close()`. |
 | `closed` | `()` | Shutdown completes. |
+| `drained` | `()` | Engine observed a full→empty transition on the main stream. **Cross-process scope.** Lazily wires an embedded `QueueEvents` subscriber on the first `.on('drained', ...)` call; torn down on `close()`. |
+| `paused` | `()` | `.pause()` was called. Process-local. |
+| `resumed` | `()` | `.resume()` was called. Process-local. |
+
+Names accepted for API stability but currently never fire (engine
+doesn't emit the underlying transition yet — safe to wire up, will
+start firing when the corresponding engine work lands):
+
+- `progress` — `(job, progress)`.
+- `stalled` — `(jobId, prev)`.
 
 ```ts
 worker.on("completed", (job, result) => {
   console.log("completed", job.id, result);
+});
+worker.on("drained", () => {
+  console.log("queue empty");
 });
 ```
 
@@ -550,6 +563,47 @@ from "not yet completed", so this method will time out. Mirror
 [`QueueEvents`](#queueevents) instead.
 :::
 
+### `job.waitUntilFinished(queueEvents, ttl?)`
+
+```ts
+async waitUntilFinished(
+  queueEvents: QueueEvents,
+  ttl?: number,
+): Promise<ResultType | undefined>
+```
+
+Event-driven completion-wait. Subscribes to the
+per-id `completed:<jobId>` / `failed:<jobId>` channels on the
+supplied `queueEvents` and resolves / rejects on the first to fire.
+
+- Resolves with the handler's return value when the worker ran with
+  `storeResults: true`. The value is fetched via
+  `Queue.getJobResult(this.id)` after the `completed` event lands.
+  When `storeResults` was off (or the handler returned `undefined`),
+  resolves with `undefined`.
+- Rejects with `new Error(failedReason)` on the engine-reported
+  failure reason (the same string surfaced on `Worker`'s `failed`
+  event).
+- Throws [`WaitUntilFinishedTimeoutError`](/reference/error-codes/)
+  on `ttl` elapse. Omit `ttl` for an unbounded wait.
+
+Distinct from [`waitForResult`](#jobwaitforresultopts): event-driven
+(no polling), and works without `storeResults` to *detect*
+completion. The two cover different races — `waitUntilFinished`
+loses to a job that finished before the listeners wired up;
+`waitForResult` can read a result key written before the wait
+started but needs `storeResults`.
+
+```ts
+const events = new QueueEvents("emails", { connection });
+await events.waitUntilReady();
+
+const job = await queue.add("send", { to: "ada@example.com" });
+const result = await job.waitUntilFinished(events, 30_000);
+
+await events.close();
+```
+
 ### `job.toJSON()`
 
 ```ts
@@ -609,6 +663,23 @@ Implements `[Symbol.asyncDispose]`.
 | `drained` | `(eventId)` | Engine drained (queue-scoped, no `jobId`). |
 | `unknown` | `({ eventName, fields }, eventId)` | Forward-compat sink for unrecognized event types. |
 | `error` | `(err)` | Operational error during XREAD. |
+
+In addition to the broadcast channels, three per-id channels fire
+alongside the matching broadcast for events that carry a `jobId`
+(naming convention: `<event>:<jobId>`):
+
+| Event | Args | Fires alongside |
+|---|---|---|
+| `active:<jobId>` | `({ jobId, name, prev, attempt }, eventId)` | `active` |
+| `completed:<jobId>` | `({ jobId, name, attempt, returnvalue }, eventId)` | `completed` |
+| `failed:<jobId>` | `({ jobId, name, failedReason, attempt }, eventId)` | `failed` |
+
+Per-id channels let `Job.waitUntilFinished` (and any UI watching one
+job) wire a targeted listener without paying the O(N-listeners)
+broadcast dispatch cost. `returnvalue` is always `undefined` on the
+wire — the events stream does not carry the handler's bytes; pair
+with `Queue.getJobResult(jobId)` (and `WorkerOptions.storeResults`)
+to read it back.
 
 Numeric fields (`attempt`, `backoffMs`, `delay`, `duration_us`,
 `ts`) are coerced to `number` at parse time so subscribers don't
@@ -892,6 +963,7 @@ The shim throws typed errors so application code can branch on
 
 - [`UnrecoverableError`](/reference/error-codes/#cmq-011--handler-signaled-unrecoverable--dlq) — throw from a processor to skip retries and route to the DLQ.
 - [`WaitForResultTimeoutError`](/reference/error-codes/#cmq-102--node-result-wait-timeout) — `Job.waitForResult` timed out.
+- `WaitUntilFinishedTimeoutError` — `Job.waitUntilFinished` saw neither a `completed` nor a `failed` event within the supplied `ttl`. Distinct from a failed job: a failed job rejects with `new Error(failedReason)`; this error fires only when the events stream itself goes silent.
 - [`NotSupportedError`](/reference/error-codes/#cmq-100--node-feature-not-supported) — caller asked for a v1-stubbed feature.
 - [`RateLimitError`](/reference/error-codes/#cmq-101--node-rate-limit) — reserved; `Worker.rateLimit` throws this in a future slice.
 

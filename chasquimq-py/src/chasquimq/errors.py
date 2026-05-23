@@ -23,3 +23,17 @@ class UnrecoverableError(RuntimeError):
     PoisonPill(UnrecoverableError): ...``) and still get the
     short-circuit behavior.
     """
+
+
+class WaitUntilFinishedTimeoutError(TimeoutError):
+    """Raised by :meth:`Job.wait_until_finished` when neither a
+    ``completed`` nor a ``failed`` event for the watched job arrives
+    within the supplied ``timeout`` seconds.
+
+    Distinct from a failed job: a failed job raises a regular
+    :class:`RuntimeError` carrying the engine-reported ``failedReason``.
+    This error fires only when the events stream itself goes silent
+    (the worker died, the network blipped, or the ``timeout`` was too
+    short for the handler). Subclasses :class:`TimeoutError` so callers
+    that catch the broad timeout case still match.
+    """

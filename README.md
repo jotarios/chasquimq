@@ -204,6 +204,8 @@ In-repo: [`docs/engine.md`](docs/engine.md) (engine internals), [`docs/history.m
 | Idempotent produce (`IDMP`) | ✓ | — | — | — |
 | Stable job IDs (`addUnique`) | ✓ | ✓ | ✓ | — |
 | Result backends (`getJobResult` / `waitForResult`) | ✓ | ✓ | ✓ | — |
+| Event-driven completion wait (`waitUntilFinished`) | ✓ | ✓ | ✓ | — |
+| Worker / Queue / Job event listeners (`EventEmitter`-style) | ✓ | ✓ | ✓ | partial |
 | Delayed jobs | ✓ | ✓ | ✓ | — |
 | Idempotent delayed scheduling | ✓ | — | — | — |
 | Cancel scheduled job | ✓ | ✓ | ✓ | — |
