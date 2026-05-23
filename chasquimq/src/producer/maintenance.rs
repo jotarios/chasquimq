@@ -48,7 +48,7 @@ use crate::redis::commands::{
     eval_remove_stream_entry_args, evalsha_cancel_delayed_args, evalsha_clean_stream_args,
     evalsha_drain_stream_args, evalsha_remove_stream_entry_args, script_load_args,
 };
-use crate::redis::keys::{dedup_marker_key, delayed_index_key};
+use crate::redis::keys::{dedup_marker_key, delayed_index_key, log_key, progress_key};
 use crate::redis::parse::{XrangeEntry, parse_xrange_response};
 use bytes::Bytes;
 use fred::clients::{Client, Pool};
@@ -303,16 +303,41 @@ pub(super) async fn remove(
         }
     }
 
-    // 4. Result key — a plain DEL. DEL returns the count of keys removed.
+    // 4. Result key + progress + log stream — pipelined so all three
+    //    Redis calls share one round trip. The result key keeps its DEL
+    //    (so we can attribute its removal count to the report's
+    //    `result` field, unchanged public contract); the progress key
+    //    and the log stream ride along as `UNLINK` (async reclaim — a
+    //    multi-MB log stream never stalls the call). All three keys
+    //    share the `{chasqui:<queue>}` hash tag so the pipeline is
+    //    Cluster-correct.
     {
-        let key = crate::redis::keys::result_key(queue_name, job_id);
+        let r_key = crate::redis::keys::result_key(queue_name, job_id);
+        let p_key = progress_key(queue_name, job_id);
+        let l_key = log_key(queue_name, job_id);
         let client = pool.next_connected();
-        let cmd = CustomCommand::new_static("DEL", ClusterHash::FirstKey, false);
-        let v: Value = client
-            .custom(cmd, vec![Value::from(key)])
+
+        let pipeline = client.pipeline();
+        let del_cmd = CustomCommand::new_static("DEL", ClusterHash::FirstKey, false);
+        pipeline
+            .custom::<Value, _>(del_cmd, vec![Value::from(r_key.as_str())])
             .await
             .map_err(Error::Redis)?;
-        report.result = lua_int(&v) >= 1;
+        let unlink_cmd = CustomCommand::new_static("UNLINK", ClusterHash::FirstKey, false);
+        pipeline
+            .custom::<Value, _>(unlink_cmd.clone(), vec![Value::from(p_key)])
+            .await
+            .map_err(Error::Redis)?;
+        pipeline
+            .custom::<Value, _>(unlink_cmd, vec![Value::from(l_key)])
+            .await
+            .map_err(Error::Redis)?;
+        let replies = pipeline.all::<Value>().await.map_err(Error::Redis)?;
+        // First reply is the DEL count for the result key.
+        report.result = match &replies {
+            Value::Array(items) => items.first().map(lua_int).unwrap_or(0) >= 1,
+            single => lua_int(single) >= 1,
+        };
     }
 
     Ok(report)
