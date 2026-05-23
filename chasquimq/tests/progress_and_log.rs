@@ -9,8 +9,9 @@
 
 mod common;
 
+use chasquimq::introspect::{Introspector, JobState};
 use chasquimq::producer::{Producer, log_key, progress_key};
-use chasquimq::{Consumer, ConsumerConfig, JobHandle, RetryConfig};
+use chasquimq::{ConnectionTuning, Consumer, ConsumerConfig, JobHandle, RetryConfig};
 use fred::interfaces::ClientLike;
 use fred::types::{ClusterHash, CustomCommand, Value};
 use serde::{Deserialize, Serialize};
@@ -324,5 +325,145 @@ async fn empty_line_appends_an_entry() {
     let key = log_key(queue, "job-log-empty");
     assert_eq!(xlen(&admin, &key).await, 1);
 
+    let _: () = admin.quit().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REDIS_URL"]
+async fn introspector_get_job_populates_progress() {
+    let admin = admin().await;
+    let queue = "progress_log_i1";
+    flush_all(&admin, queue).await;
+
+    // Make a producer-side stream entry so `get_job` resolves to Waiting,
+    // then write a progress value via a handle and assert it surfaces.
+    let producer: Producer<ProgressSample> =
+        Producer::connect(&redis_url(), producer_cfg(queue))
+            .await
+            .expect("connect producer");
+    let job_id = producer.add(ProgressSample { n: 1 }).await.expect("add");
+    flush_progress_log(&admin, queue, &job_id).await;
+
+    let handle = make_handle(queue, &job_id, 60, 1000, 4096).await;
+    handle.update_progress(73).await.expect("update");
+
+    let inspector = Introspector::connect(&redis_url(), queue, &ConnectionTuning::default(), None)
+        .await
+        .expect("introspector");
+    let info = inspector
+        .get_job(&job_id)
+        .await
+        .expect("get_job")
+        .expect("Some");
+    assert_eq!(info.state, JobState::Waiting);
+    assert_eq!(info.progress, Some(73));
+
+    inspector.shutdown().await.ok();
+    let _: () = admin.quit().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REDIS_URL"]
+async fn introspector_get_job_progress_none_when_unset() {
+    let admin = admin().await;
+    let queue = "progress_log_i2";
+    flush_all(&admin, queue).await;
+
+    let producer: Producer<ProgressSample> =
+        Producer::connect(&redis_url(), producer_cfg(queue))
+            .await
+            .expect("connect producer");
+    let job_id = producer.add(ProgressSample { n: 1 }).await.expect("add");
+    flush_progress_log(&admin, queue, &job_id).await;
+
+    let inspector = Introspector::connect(&redis_url(), queue, &ConnectionTuning::default(), None)
+        .await
+        .expect("introspector");
+    let info = inspector
+        .get_job(&job_id)
+        .await
+        .expect("get_job")
+        .expect("Some");
+    assert_eq!(info.progress, None, "no progress key = None");
+
+    inspector.shutdown().await.ok();
+    let _: () = admin.quit().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REDIS_URL"]
+async fn get_job_logs_asc_and_desc_and_pagination() {
+    let admin = admin().await;
+    let queue = "progress_log_g1";
+    flush_all(&admin, queue).await;
+    flush_progress_log(&admin, queue, "job-logs").await;
+
+    let handle = make_handle(queue, "job-logs", 60, 1000, 4096).await;
+    for i in 0..5 {
+        handle.log(&format!("line-{i}")).await.expect("log");
+    }
+
+    let inspector = Introspector::connect(&redis_url(), queue, &ConnectionTuning::default(), None)
+        .await
+        .expect("introspector");
+
+    // Full asc page.
+    let (asc, total) = inspector
+        .get_job_logs("job-logs", 0, -1, true)
+        .await
+        .expect("get_job_logs asc");
+    assert_eq!(total, 5);
+    assert_eq!(
+        asc,
+        vec!["line-0", "line-1", "line-2", "line-3", "line-4"]
+    );
+
+    // Full desc page.
+    let (desc, _) = inspector
+        .get_job_logs("job-logs", 0, -1, false)
+        .await
+        .expect("get_job_logs desc");
+    assert_eq!(
+        desc,
+        vec!["line-4", "line-3", "line-2", "line-1", "line-0"]
+    );
+
+    // Window [1, 3] asc.
+    let (page, _) = inspector
+        .get_job_logs("job-logs", 1, 3, true)
+        .await
+        .expect("get_job_logs window");
+    assert_eq!(page, vec!["line-1", "line-2", "line-3"]);
+
+    // Negative start: "last two lines, asc within that window".
+    let (tail, _) = inspector
+        .get_job_logs("job-logs", -2, -1, true)
+        .await
+        .expect("get_job_logs negative");
+    assert_eq!(tail, vec!["line-3", "line-4"]);
+
+    inspector.shutdown().await.ok();
+    let _: () = admin.quit().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REDIS_URL"]
+async fn get_job_logs_empty_returns_zero_count() {
+    let admin = admin().await;
+    let queue = "progress_log_g2";
+    flush_all(&admin, queue).await;
+    flush_progress_log(&admin, queue, "no-logs").await;
+
+    let inspector = Introspector::connect(&redis_url(), queue, &ConnectionTuning::default(), None)
+        .await
+        .expect("introspector");
+    let (logs, total) = inspector
+        .get_job_logs("no-logs", 0, -1, true)
+        .await
+        .expect("get_job_logs");
+    assert!(logs.is_empty());
+    assert_eq!(total, 0);
+
+    inspector.shutdown().await.ok();
     let _: () = admin.quit().await.unwrap();
 }
