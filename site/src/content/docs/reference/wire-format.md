@@ -30,6 +30,8 @@ all keys for a queue land on the same slot.
 | `{chasqui:<q>}:repeat:spec:<key>` | Hash | Full repeatable spec body, field `spec`. |
 | `{chasqui:<q>}:events` | Stream | Per-queue event broadcast. |
 | `{chasqui:<q>}:result:<jobId>` | String | Stored handler return bytes (TTL). |
+| `{chasqui:<q>}:progress:<jobId>` | String | Latest progress value (ASCII decimal `u8`, 0..=100) written by `Job.updateProgress`. TTL = `result_ttl_secs`. |
+| `{chasqui:<q>}:log:<jobId>` | Stream | Per-job log stream written by `Job.log`. `MAXLEN ~ log_max_stream_len`; `EXPIRE`d to `result_ttl_secs` on every append. One entry per call, field `line`. |
 | `{chasqui:<q>}:dlid:<jobId>` | String | Idempotent-schedule dedup marker. |
 | `{chasqui:<q>}:didx:<jobId>` | String | Side-index for `cancel_delayed`. |
 | `{chasqui:<q>}:promoter:lock` | String | Promoter leader-election lock. |
@@ -259,7 +261,7 @@ generic Redis client. Fields per event:
 
 | Field | Type | When |
 |---|---|---|
-| `e` | string | Event name (`"waiting"`, `"active"`, `"completed"`, `"failed"`, `"retry-scheduled"`, `"delayed"`, `"dlq"`, `"drained"`). |
+| `e` | string | Event name (`"waiting"`, `"active"`, `"completed"`, `"failed"`, `"retry-scheduled"`, `"delayed"`, `"dlq"`, `"drained"`, `"progress"`). |
 | `id` | string | Job id. Absent for queue-scoped events. |
 | `n` | string | Dispatch name. Absent / empty when no name was set. |
 | `attempt` | int (decimal string) | Per-attempt events. |
@@ -267,6 +269,7 @@ generic Redis client. Fields per event:
 | `delay_ms` | int | `delayed`. |
 | `duration_us` | int | `completed`, `failed` — handler wall-clock duration. |
 | `reason` | string | `failed`, `dlq` — DLQ reason. |
+| `progress` | int (decimal string) | `progress` — clamped `0..=100` value the engine persisted. |
 | `ts` | int | Emit time (epoch ms). |
 
 Numeric fields are decimal strings on the wire; the Node and

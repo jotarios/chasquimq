@@ -68,9 +68,9 @@ main()
 
 | Surface | What it does |
 |---|---|
-| `Queue<DataType, ResultType, NameType>` | Producer + queue inspection. `add` / `addBulk` / `addUnique` / `getJob` / `getJobs` / `getJobState` / `getJobCounts` / `getWaitingCount` / `getActiveCount` / `getDelayedCount` / `getCompletedCount` / `getFailedCount` / `count` / `getJobResult` / `peekDlq` / `replayDlq` / `cancelDelayed` / `getRepeatableJobs` / `removeRepeatableByKey` / `pause` / `resume` / `isPaused` / `remove` / `removeReport` / `drain` / `clean` / `obliterate`. `[Symbol.asyncDispose]`. |
-| `Worker<DataType, ResultType, NameType>` | Consumer pool. tokio-side dispatch, opt-in result storage (`storeResults: true`), `EventEmitter` events (`ready` / `active` / `completed` / `failed` / `error` / `closing` / `closed` / `drained` / `paused` / `resumed`), `pause` / `resume` / `isPaused`. `[Symbol.asyncDispose]`. |
-| `Job<DataType, ResultType, NameType>` | Read-only handle. `id`, `name`, `data`, `attemptsMade`, `waitForResult({ timeoutMs, intervalMs, signal })`, `waitUntilFinished(queueEvents, ttl?)`. |
+| `Queue<DataType, ResultType, NameType>` | Producer + queue inspection. `add` / `addBulk` / `addUnique` / `getJob` / `getJobs` / `getJobState` / `getJobCounts` / `getJobLogs` / `getWaitingCount` / `getActiveCount` / `getDelayedCount` / `getCompletedCount` / `getFailedCount` / `count` / `getJobResult` / `peekDlq` / `replayDlq` / `cancelDelayed` / `getRepeatableJobs` / `removeRepeatableByKey` / `pause` / `resume` / `isPaused` / `remove` / `removeReport` / `drain` / `clean` / `obliterate`. `[Symbol.asyncDispose]`. |
+| `Worker<DataType, ResultType, NameType>` | Consumer pool. tokio-side dispatch, opt-in result storage (`storeResults: true`), `EventEmitter` events (`ready` / `active` / `completed` / `failed` / `error` / `closing` / `closed` / `drained` / `paused` / `resumed` / `progress`), `pause` / `resume` / `isPaused`. `[Symbol.asyncDispose]`. |
+| `Job<DataType, ResultType, NameType>` | Read-only handle. `id`, `name`, `data`, `attemptsMade`, `progress`, `updateProgress(n)` (Worker-side only), `log(line)` (Worker-side only), `waitForResult({ timeoutMs, intervalMs, signal })`, `waitUntilFinished(queueEvents, ttl?)`. |
 | `QueueEvents` | Cross-process pub/sub via the events stream. Subscribe to `waiting` / `active` / `completed` / `failed` / `dlq` / `retry-scheduled` / `delayed` / `drained` / `retries-exhausted`, plus per-id channels (`completed:<jobId>` / `failed:<jobId>` / `active:<jobId>`) for targeted subscribers. `[Symbol.asyncDispose]`. |
 | `BackoffSpec` | Builders: `.fixed(delayMs)` / `.exponential(initialMs, { multiplier, maxMs, jitterMs })`. |
 | `UnrecoverableError` | Throw from your handler to bypass retries and route the job directly to DLQ. |
@@ -243,7 +243,7 @@ await events.close()
 
 `completed` payloads from the events stream do **not** carry the handler's return value (that would double-allocate the payload onto every subscriber). To read the value, pair `QueueEvents` with `Queue.getJobResult(jobId)` and run the worker with `storeResults: true`. The next section's `Job.waitUntilFinished` does this for you.
 
-`progress` and `stalled` listeners are accepted on `Worker` for API stability but are currently no-op — the engine doesn't emit those transitions yet. Attach them safely; they'll start firing when the corresponding engine work lands.
+`progress` fires every time a processor calls `await job.updateProgress(n)` — the worker lazily spawns an embedded `QueueEvents` subscriber on the first `progress` listener (same zero-cost-when-unused pattern as `drained`) and re-emits the cross-process `e=progress` event as `(job, n)`. See the [Progress and logs](#progress-and-logs) section below. `stalled` is accepted on `Worker` for API stability but is currently no-op — the engine doesn't emit a stalled-detector transition yet; attach it safely, it'll start firing when the corresponding engine work lands.
 
 ### Awaiting a single job's completion
 
@@ -335,6 +335,53 @@ await queue.obliterate()
 ```
 
 `remove` is idempotent — a job id that exists on no surface resolves without error (count `0`). `clean` ignores `grace` for `"completed"` (a stored result has no creation timestamp; rely on result TTL for time-based expiry). `clean` with `"active"` is a no-op — use `remove` for the deliberate per-job case. `obliterate` cannot be undone.
+
+### Progress and logs
+
+In-handler write surface for live job state. The engine persists progress to a side-channel Redis key (`{chasqui:<queue>}:progress:<id>` STRING, TTL = `result_ttl_secs`) and appends log lines to a per-job stream (`{chasqui:<queue>}:log:<id>` STREAM with `MAXLEN ~`, TTL = `result_ttl_secs`). The msgpack `Job` envelope is untouched — wire-format-stable.
+
+```ts
+const worker = new Worker("emails", async (job) => {
+  await job.updateProgress(10)
+  await job.log("connecting to SMTP")
+
+  // ... work ...
+  await job.updateProgress(50)
+  await job.log("envelope sent")
+
+  // ... work ...
+  await job.updateProgress(100)
+  return { delivered: true }
+}, { connection })
+```
+
+Read the latest progress (no extra round trip — pipelined into the existing introspector lookup) and the log lines from anywhere:
+
+```ts
+const queue = new Queue("emails", { connection })
+
+const job = await queue.getJob("job-123")
+console.log(job?.progress) // => 50
+
+const { logs, count } = await queue.getJobLogs("job-123")
+// logs: string[]   (the captured `line` field values, asc order)
+// count: number    (current XLEN — not logs.length — for paginating callers)
+
+// Page from the tail; matches BullMQ's getLogs(-100, -1) convention.
+const tail = await queue.getJobLogs("job-123", -100, -1)
+```
+
+Tuning (all `WorkerOptions`):
+
+| Option | Default | Controls |
+|---|---:|---|
+| `logMaxLen` | `1000` | `MAXLEN ~` cap on each per-job log stream (must be `>= 16`). |
+| `logMaxLineBytes` | `4096` | Per-line byte cap; oversize lines truncate on a UTF-8 char boundary with a `[…truncated]` marker. |
+| `eventsProgressEnabled` | `true` | When `false`, mutes the `e=progress` events-stream entry — the persisted progress key is still written. Useful for high-rate progress reporters that don't need cross-process fan-out. |
+
+Subscribe to the cross-process `progress` event via `QueueEvents` (broadcast `progress`, per-id `progress:<jobId>`) or the in-process `Worker.on('progress', (job, n) => ...)` re-fan. **Read-only Job guard:** calling `updateProgress` / `log` on a Job returned by `Queue.getJob` / `Queue.add` throws `Error('Job.updateProgress() requires the Job be passed to your Worker handler; Jobs returned by Queue.getJob() are read-only')` — only Jobs handed to a `Worker` processor carry the live native handle.
+
+> **Breaking (TS types only):** `JobProgress` narrowed from `number | object` to `number`. No runtime impact — the engine wire format never carried the object form.
 
 ## Power-user surface
 

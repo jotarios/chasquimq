@@ -340,6 +340,58 @@ Bench (same-host, no engine changes — empty `git diff main -- chasquimq/src` s
 
 Doc surfaces synced: this slice, both shim READMEs (symmetric "Subscribing to events" + "Awaiting a single job's completion" sections), `site/src/content/docs/reference/{node-api,python-api}.md` (Worker events table extended; new `waitUntilFinished` / `wait_until_finished` sections; QueueEvents per-id channels documented; `WaitUntilFinishedTimeoutError` in the errors section), a new `concepts/events-and-listeners.md` registered in `site/astro.config.mjs` (+ a link in `concepts/index.md`), and the root `README.md` feature table.
 
+## Progress + logs (cross-FFI slice)
+
+**`Job.updateProgress(n)` + `Job.log(line)` + `Queue.getJobLogs(id)` shipped, cross-FFI, May 2026.** Closes the long-accepted-but-no-op `progress` / log gap on both shims (both were previously documented as "accepted for API parity but no-op — engine doesn't emit those transitions yet"). The slice adds a per-handler write surface that persists progress to a side-channel Redis STRING, appends log lines to a per-job Redis Stream, and re-fans both onto the events stream so existing `Worker` / `QueueEvents` subscribers observe them. The envelope (msgpack `Job<T>`) is untouched — wire-format-stable.
+
+Engine surface:
+
+- **`JobHandle` (`chasquimq/src/progress.rs`)** — per-dispatch handle attached to `Job<T>::handle` immediately before the user handler runs (`Option<JobHandle>`); absent on Jobs returned by the introspector's read-only paths.
+  - `update_progress(n: u8)` writes `{chasqui:<queue>}:progress:<id>` as an **ASCII decimal `u8`** STRING (so every shim can `parseInt` / `int(str(...))` it without a msgpack dependency) with TTL = `result_ttl_secs`. Values `> 100` are clamped to 100; the first clamp per handle fires a single `tracing::warn!`. After the SET succeeds, a best-effort `e=progress` events-stream entry is emitted (gated by `events_progress_enabled`).
+  - `log(line: &str)` `XADD`s one entry under field `line` to `{chasqui:<queue>}:log:<id>` (Stream), pipelined with `XLEN` (returned) and `EXPIRE log_key result_ttl_secs`. `MAXLEN ~ log_max_stream_len` keeps the stream bounded. Oversize lines (`> log_max_line_bytes`) are truncated on a UTF-8 char boundary with a `[…truncated]` marker appended; first truncation per handle fires a single warn-once.
+  - Connection budget: a **shared 2–8-sized `fred::clients::Pool`** drives both APIs — never a client per worker. Zero round trips when the handler never calls these.
+
+- **Introspector (`chasquimq/src/introspect.rs`)** — `JobInfo` gains a `progress: Option<u8>` field, pipelined into every `get_job` / `get_jobs` path so the side-channel read adds no extra round trip in the common case. New `Introspector::get_job_logs(id, start, end, asc)` returns `(Vec<String>, u64)` — the captured `line` field values plus the current XLEN. `start = -N` resolves to "this many from the end" via XLEN (matching BullMQ's `getLogs` convention); `end = -1` means "to end".
+
+- **`ConsumerConfig` (`chasquimq/src/config.rs`)** — three new fields with defaults:
+  - `log_max_stream_len: u64 = 1000` (validated `≥ 16` at `Consumer::run`; below the minimum, `MAXLEN ~` rounding leaves the stream effectively empty).
+  - `log_max_line_bytes: usize = 4096`.
+  - `events_progress_enabled: bool = true` — gates only the events-stream XADD; the persisted progress key is always written.
+
+- **Maintenance** — `Producer::remove(id)` was extended to pipeline `UNLINK` on the per-job progress + log keys alongside the existing surfaces; `clean()` reaps the same per removed job; `obliterate()` already deletes the whole `{chasqui:<queue>}` keyspace, including the new `progress:*` / `log:*` keys.
+
+Events: new `progress` event on the cross-process events stream (fields `e=progress`, `id`, `n`, `progress`). Best-effort fan-out — a failed events XADD never propagates back to the handler (the persisted progress key is the source of truth).
+
+Node shim (`chasquimq-node`):
+
+- `Job.updateProgress(n: number)` (was previously a stub) — forwards to the native `Job.updateProgress`. `Job.log(line)` returns `Promise<number>` (new XLEN). Both throw `Error('Job.updateProgress() requires the Job be passed to your Worker handler; Jobs returned by Queue.getJob() are read-only')` when called on a synthesized read-only Job (no `_native` backref).
+- `Queue.getJobLogs(jobId, start?, end?, asc?)` returns `{ logs: string[], count: number }` (`count` is the current XLEN, not `logs.length`). Reads via the introspector.
+- `WorkerOptions` gains `logMaxLen` / `logMaxLineBytes` / `eventsProgressEnabled` — all forwarded to the native `ConsumerConfig` fields.
+- `Worker` emits new `'progress'` event `(job, n)`. The shim lazily spawns an embedded `QueueEvents` subscriber the first time a `progress` listener attaches (same zero-cost-when-unused pattern as `drained`), torn down on `close()`. The forwarder re-uses the in-flight `Job` instance from the worker's `_inflight` map so handler-side `job.progress` and the EE callback observe identical state.
+- `QueueEvents` gains broadcast `'progress'` + per-id `'progress:<jobId>'` channels.
+- **Breaking (TS types only):** `JobProgress` narrowed from `number | object` to `number`. No runtime impact — engine wire format never carried the object form.
+
+Python shim (`chasquimq-py`):
+
+- `Job.update_progress(n: int)` + `Job.log(line: str)` — same read-only Job guard (raises `RuntimeError`).
+- `Queue.get_job_logs(job_id, *, start=0, end=-1, asc=True)` returns `(list[str], int)`.
+- `Worker` keyword args gain `log_max_stream_len` / `log_max_line_bytes` / `events_progress_enabled`.
+- `Worker` emits new `progress` event `(job, n)` via the same lazy embedded `QueueEvents` subscriber as `drained`.
+- `QueueEvents` emits `progress` + per-id `progress:<job_id>` channels.
+- `Job` dataclass gains `progress: Optional[int]` (populated by introspector on read paths; mirrored by `update_progress` on the live path).
+
+Three follow-up bugs caught during post-implementation review and fixed in dedicated commits before this slice committed docs:
+
+1. **Log stream key TTL.** The original `log()` only set `MAXLEN ~`, which bounds entry count but not the key itself — a job that logs once then never logs again would leak the stream indefinitely. Fix: pipeline an `EXPIRE log_key result_ttl_secs` on every `log()` call so the stream key disappears alongside the result key after job completion.
+2. **`clean()` progress/log leak.** `Producer::remove(id)` was extended to unlink the per-job progress + log keys, but the bulk `clean()` path only unlinked the stream/DLQ/result tail. Fix: extracted `unlink_progress_and_log` helper, called from `clean()` for each removed job so the bulk path matches the per-job semantics.
+3. **`i64::MIN` in `get_job_logs` arithmetic.** Negative `start` is interpreted as "this many from the end" (`total + start`); plain `+` on `i64::MIN` panics in debug builds. Fix: switched to `saturating_add` so a malformed caller offset clamps to a sensible window instead of panicking inside the introspector.
+
+Bench (`benchmarks/progress-log-slice.md`): the slice touches the consumer dispatch path (`JobHandle` attached per dispatch) plus the introspector (`progress` field on `JobInfo`), so the host-load explanation is forfeited per the gate in `benchmarks/README.md`. Every per-scenario delta vs the 1.0 baseline is within one stddev — `queue-add-bulk` −2.4% (baseline stddev 4,909), `worker-concurrent` −1.1% (baseline stddev 4,246), `queue-add` +6.3%. No regression. `JobHandle` carries only `Arc<str>` clones plus a shared pool reference (zero per-job allocation, zero extra round trips), and the introspector field is pipelined into the existing `get_job` lookups.
+
+Tests: 16 engine integration cases (live Redis — `tests/progress_and_log.rs`), 8 vitest cases (Node, `__test__/progress-and-log.test.ts`), 14 pytest cases (Python, `tests/test_progress_and_log.py`), + a cross-shim Node↔Python contract test pinning the ASCII-`u8` wire format in both directions. Plus `progress_throughput` Criterion bench scenario (`chasquimq-bench/benches/progress_throughput.rs`).
+
+Doc surfaces synced: this slice, root `README.md` (feature row), `docs/engine.md` (new "Progress and logs" section + ConsumerConfig fields + read-only Job guard), both shim READMEs (symmetric "Progress and logs" sections), `site/src/content/docs/reference/{node-api,python-api,rust-api}.md` (`Job.updateProgress` / `log`, `Queue.getJobLogs`, `JobHandle`, `Introspector::get_job_logs`, `JobInfo.progress`), `site/src/content/docs/reference/options.md` (three new ConsumerConfig fields), `site/src/content/docs/reference/wire-format.md` (new STRING + STREAM keys under the `{chasqui:<queue>}` hash tag), `site/src/content/docs/concepts/events-and-listeners.md` (`progress` event documented as live; `stalled` remains the only no-op listener), `benchmarks/README.md` index, and `benchmarks/progress-log-slice.md`.
+
 ## Deferred follow-ups for 1.x
 
 - **Opt-in result-write bench scenario.** The PR #75 bench guard locked in the no-overhead-when-off claim (`store_results=false` regresses 0%). The opt-in path (`store_results=true` under sustained load) is not yet measured.

@@ -257,6 +257,34 @@ async count(): Promise<number>
 `waiting + active + delayed` — the number of jobs that could still
 run.
 
+### `queue.getJobLogs(jobId, start?, end?, asc?)`
+
+```ts
+async getJobLogs(
+  jobId: string,
+  start?: number,
+  end?: number,
+  asc?: boolean,
+): Promise<{ logs: string[]; count: number }>
+```
+
+Read up to `end - start + 1` lines from a job's log stream
+(`{chasqui:<queue>}:log:<id>` STREAM, populated by
+[`Job.log`](#joblogline) inside a processor). `start` / `end` are
+inclusive entry offsets in the requested order; `end = -1` means
+"to end"; negative `start` is "this many from the end"
+(translated via XLEN), matching BullMQ's `Queue.getJobLogs`
+convention. `asc` defaults to `true` (chronological).
+
+Returns `{ logs, count }`:
+
+- `logs` — captured `line` field values in the requested order.
+- `count` — current XLEN of the log stream (**not** `logs.length`).
+  Lets paginating callers know how many entries exist without
+  walking the whole stream.
+
+Jobs that never called `Job.log` resolve with `{ logs: [], count: 0 }`.
+
 ### `queue.remove(jobId)`, `queue.removeReport(jobId)`
 
 ```ts
@@ -506,9 +534,12 @@ class Job<DataType = unknown, ResultType = unknown, NameType extends string = st
 ```
 
 The value type a processor receives, and what `Queue.add` /
-`Queue.addBulk` return. v1 does not round-trip Job state through
-Redis — the engine streams via `XREADGROUP` / `XACK` and does not
-persist progress, return values, or per-job state metadata.
+`Queue.addBulk` return. The engine streams jobs via `XREADGROUP` /
+`XACK` and does not persist return values by default (opt in with
+`WorkerOptions.storeResults`). Progress and log lines *are*
+persisted to side-channel keys when the handler calls
+[`updateProgress`](#jobupdateprogressprogress) or
+[`log`](#joblogline) — see those methods.
 
 ### Properties
 
@@ -519,7 +550,7 @@ persist progress, return values, or per-job state metadata.
 | `data` | `DataType` | The msgpack-decoded payload. |
 | `opts` | `JobsOptions` | The options the job was enqueued with. |
 | `attemptsMade` | `number` | 1-indexed attempt count. `0` for never-yet-run; `1` on first invocation. |
-| `progress` | `JobProgress` | In-memory only; engine does not persist. |
+| `progress` | `JobProgress` | Latest value set via [`updateProgress`](#jobupdateprogressprogress), or read back by the introspector when this Job was returned by [`queue.getJob`](#queuegetjobjobid) / [`queue.getJobs`](#queuegetjobstypes-start-end). Default `0`. |
 | `returnvalue` | `ResultType?` | Set after the processor resolves. |
 | `failedReason` | `string?` | Set after the processor rejects. |
 | `stacktrace` | `string[]` | Reserved; empty in v1. |
@@ -536,9 +567,43 @@ persist progress, return values, or per-job state metadata.
 async updateProgress(progress: JobProgress): Promise<void>
 ```
 
-In-memory progress update. The engine does not persist progress;
-the worker shim surfaces this via the `progress` event when called
-from inside a processor.
+Persist a `0..=100` progress value for this job under the engine's
+per-job progress key (`{chasqui:<queue>}:progress:<id>` STRING,
+TTL = `result_ttl_secs`), mirror it on the local `progress` field,
+and (when `WorkerOptions.eventsProgressEnabled !== false`) emit an
+`e=progress` events-stream entry that `QueueEvents` re-fans onto
+the broadcast `'progress'` channel and the per-id
+`'progress:<jobId>'` channel.
+
+Values outside `0..=100` are clamped to `100` at the engine
+boundary (no throw; the first clamp per handle logs a single
+warn-once).
+
+**Read-only Job guard.** Throws when called on a Job returned by
+[`queue.getJob`](#queuegetjobjobid) / [`queue.getJobs`](#queuegetjobstypes-start-end)
+or constructed from [`queue.add`](#queueaddname-data-opts) — those
+instances are synthesized from introspector / producer-side data
+and carry no per-handler connection. Only Jobs handed to a
+`Worker` processor have a live backref. Catch via
+`err.message.startsWith('Job.updateProgress()')`.
+
+### `job.log(line)`
+
+```ts
+async log(line: string): Promise<number>
+```
+
+Append `line` to the per-job log stream
+(`{chasqui:<queue>}:log:<id>` STREAM) and return the new XLEN.
+The stream is bounded by `WorkerOptions.logMaxLen` (default
+`1000`) via `MAXLEN ~` and expires alongside the result key
+(TTL = `result_ttl_secs`). Oversize lines (`> logMaxLineBytes`,
+default `4096`) truncate on a UTF-8 char boundary with a
+`[…truncated]` marker appended; first truncation per handle logs
+a single warn-once.
+
+Same read-only Job guard as [`updateProgress`](#jobupdateprogressprogress).
+Read back via [`queue.getJobLogs`](#queuegetjoblogsjobid-start-end-asc).
 
 ### `job.waitForResult(opts?)`
 
@@ -614,7 +679,7 @@ Plain-object snapshot of the job for logging / serialization.
 
 ### Stubbed methods
 
-`log`, `getState`, `remove`, `retry`, `discard`, `update`,
+`getState`, `remove`, `retry`, `discard`, `update`,
 `updateData`, `isCompleted`, `isFailed`, `isActive`, `isWaiting`
 all throw `NotSupportedError` or return a fixed `false` in v1 —
 engine-side state queries land in a future slice. `isDelayed()`
@@ -660,6 +725,7 @@ Implements `[Symbol.asyncDispose]`.
 | `delayed` | `({ jobId, name, delay }, eventId)` | Producer enqueued with `delay > 0`. |
 | `dlq` | `({ jobId, name, reason, attempt }, eventId)` | DLQ relocator wrote the entry to the DLQ stream. |
 | `retries-exhausted` | `({ jobId, name, attemptsMade, reason }, eventId)` | Synthetic alias of `dlq` (chasquimq-specific). |
+| `progress` | `({ jobId, name, progress }, eventId)` | Handler called [`job.updateProgress(n)`](#jobupdateprogressprogress). `progress` is the clamped `0..=100` value the engine persisted. |
 | `drained` | `(eventId)` | Engine drained (queue-scoped, no `jobId`). |
 | `unknown` | `({ eventName, fields }, eventId)` | Forward-compat sink for unrecognized event types. |
 | `error` | `(err)` | Operational error during XREAD. |
@@ -673,6 +739,7 @@ alongside the matching broadcast for events that carry a `jobId`
 | `active:<jobId>` | `({ jobId, name, prev, attempt }, eventId)` | `active` |
 | `completed:<jobId>` | `({ jobId, name, attempt, returnvalue }, eventId)` | `completed` |
 | `failed:<jobId>` | `({ jobId, name, failedReason, attempt }, eventId)` | `failed` |
+| `progress:<jobId>` | `({ jobId, name, progress }, eventId)` | `progress` |
 
 Per-id channels let `Job.waitUntilFinished` (and any UI watching one
 job) wire a targeted listener without paying the O(N-listeners)
@@ -744,6 +811,9 @@ interface WorkerOptions {
   schedulerTickMs?: number;
   storeResults?: boolean;
   resultTtlMs?: number;
+  logMaxLen?: number;
+  logMaxLineBytes?: number;
+  eventsProgressEnabled?: boolean;
 }
 ```
 
@@ -758,6 +828,18 @@ interface WorkerOptions {
 - `schedulerTickMs` — scheduler tick interval. **Default `1000`.**
 - `storeResults` — persist handler return values to `{chasqui:<queue>}:result:<jobId>`. **Default `false`.**
 - `resultTtlMs` — TTL for stored results. **Default `3_600_000` (1h).** Rounded up to whole seconds at the FFI boundary.
+- `logMaxLen` — `MAXLEN ~` cap on each per-job log stream
+  (`{chasqui:<queue>}:log:<id>`). **Default `1000`.** Must be `>= 16`
+  (`Consumer::run` rejects sub-minimum values — below that, the
+  `MAXLEN ~` rounding can leave the stream effectively empty).
+- `logMaxLineBytes` — per-line byte cap for [`Job.log`](#joblogline).
+  Lines exceeding this are truncated on a UTF-8 char boundary
+  with a `[…truncated]` marker appended. **Default `4096`.**
+- `eventsProgressEnabled` — gates the `e=progress` events-stream
+  entry emitted by [`Job.updateProgress`](#jobupdateprogressprogress).
+  The persisted progress key is always written; this only mutes
+  the events fan-out a `QueueEvents` subscriber would observe.
+  **Default `true`.**
 
 ### `JobsOptions`
 
@@ -930,7 +1012,7 @@ path.
 ```ts
 type JobState = "waiting" | "active" | "completed" | "failed" | "delayed" | "unknown";
 type JobType = JobState | "paused" | "prioritized" | "waiting-children";
-type JobProgress = number | object;
+type JobProgress = number;
 ```
 
 `JobState` is the engine's job-state classification, used by
@@ -939,6 +1021,14 @@ type JobProgress = number | object;
 [`clean`](#queuecleangrace-limit-type). `"prioritized"` /
 `"waiting-children"` are accepted on `JobType` for call-site
 compatibility but have no engine semantics in v1.
+
+`JobProgress` is `number` — the engine persists it as an ASCII
+`u8` (0..=100), so any non-numeric or out-of-range value passed
+to [`updateProgress`](#jobupdateprogressprogress) is clamped at
+the engine boundary. **Breaking (TS types only):** previously
+typed as `number | object` to mirror BullMQ; narrowed to
+`number` in the progress-and-logs slice. No runtime impact —
+the engine wire format never carried the object form.
 
 ### `RemovalReport`
 
