@@ -9,13 +9,21 @@
 
 mod common;
 
-use chasquimq::JobHandle;
-use chasquimq::producer::{log_key, progress_key};
+use chasquimq::producer::{Producer, log_key, progress_key};
+use chasquimq::{Consumer, ConsumerConfig, JobHandle, RetryConfig};
 use fred::interfaces::ClientLike;
 use fred::types::{ClusterHash, CustomCommand, Value};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
-use common::{admin, flush_all, redis_url};
+use common::{admin, flush_all, producer_cfg, redis_url, wait_until};
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct ProgressSample {
+    n: u32,
+}
 
 /// Helper: build a [`JobHandle`] bound to a fresh small pool. The test
 /// owns the pool's connection budget so a misbehaving test can't drain
@@ -37,6 +45,21 @@ async fn make_handle(
     )
     .await
     .expect("connect")
+}
+
+/// Wipe progress + log keys for `(queue, job_id)` so a re-run starts
+/// clean. The shared `flush_all` only DELs the queue-scoped surfaces
+/// (stream / dlq / delayed / events); per-job keys need their own cleanup.
+async fn flush_progress_log(admin: &fred::clients::Client, queue: &str, job_id: &str) {
+    for key in [progress_key(queue, job_id), log_key(queue, job_id)] {
+        let _: Value = admin
+            .custom(
+                CustomCommand::new_static("DEL", ClusterHash::FirstKey, false),
+                vec![Value::from(key)],
+            )
+            .await
+            .expect("DEL");
+    }
 }
 
 async fn redis_get(admin: &fred::clients::Client, key: &str) -> Option<String> {
@@ -128,6 +151,7 @@ async fn progress_writes_key_and_sets_ttl() {
     let admin = admin().await;
     let queue = "progress_log_p1";
     flush_all(&admin, queue).await;
+    flush_progress_log(&admin, queue, "job-progress-1").await;
 
     let handle = make_handle(queue, "job-progress-1", 60, 1000, 4096).await;
     handle.update_progress(42).await.expect("update_progress");
@@ -150,6 +174,7 @@ async fn progress_clamps_out_of_range() {
     let admin = admin().await;
     let queue = "progress_log_p2";
     flush_all(&admin, queue).await;
+    flush_progress_log(&admin, queue, "job-clamp").await;
 
     let handle = make_handle(queue, "job-clamp", 60, 1000, 4096).await;
     handle.update_progress(250).await.expect("update_progress");
@@ -168,6 +193,7 @@ async fn log_appends_lines_in_order_and_returns_xlen() {
     let admin = admin().await;
     let queue = "progress_log_l1";
     flush_all(&admin, queue).await;
+    flush_progress_log(&admin, queue, "job-log-1").await;
 
     let handle = make_handle(queue, "job-log-1", 60, 1000, 4096).await;
     let n1 = handle.log("first").await.expect("log 1");
@@ -189,6 +215,7 @@ async fn log_truncates_oversize_line_on_utf8_boundary() {
     let admin = admin().await;
     let queue = "progress_log_l2";
     flush_all(&admin, queue).await;
+    flush_progress_log(&admin, queue, "job-log-trunc").await;
 
     // Cap 8 bytes — well below the natural line length below.
     let handle = make_handle(queue, "job-log-trunc", 60, 1000, 8).await;
@@ -211,12 +238,84 @@ async fn log_truncates_oversize_line_on_utf8_boundary() {
     let _: () = admin.quit().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires REDIS_URL"]
+async fn worker_dispatch_attaches_job_handle_and_handler_can_update_progress() {
+    let admin = admin().await;
+    let queue = "progress_log_dispatch";
+    flush_all(&admin, queue).await;
+
+    let producer: Producer<ProgressSample> =
+        Producer::connect(&redis_url(), producer_cfg(queue))
+            .await
+            .expect("connect producer");
+    let job_id = producer.add(ProgressSample { n: 1 }).await.expect("add");
+    flush_progress_log(&admin, queue, &job_id).await;
+
+    let cfg = ConsumerConfig {
+        queue_name: queue.to_string(),
+        group: "default".to_string(),
+        consumer_id: format!("c-{}", uuid::Uuid::new_v4()),
+        block_ms: 50,
+        retry: RetryConfig {
+            initial_backoff_ms: 20,
+            max_backoff_ms: 500,
+            multiplier: 2.0,
+            jitter_ms: 0,
+        },
+        max_attempts: 3,
+        delayed_enabled: false,
+        concurrency: 4,
+        ..Default::default()
+    };
+
+    let consumer: Consumer<ProgressSample> = Consumer::new(redis_url(), cfg);
+    let shutdown = CancellationToken::new();
+    let shutdown_h = shutdown.clone();
+    let handle = tokio::spawn(async move {
+        consumer
+            .run(
+                move |job| async move {
+                    let h = job
+                        .handle
+                        .as_ref()
+                        .expect("worker wired a JobHandle onto the dispatched Job");
+                    h.update_progress(50).await.expect("update_progress");
+                    Ok(chasquimq::Bytes::new())
+                },
+                shutdown_h,
+            )
+            .await
+    });
+
+    let key = progress_key(queue, &job_id);
+    {
+        let admin = admin.clone();
+        let key = key.clone();
+        wait_until(Duration::from_secs(5), move || {
+            let admin = admin.clone();
+            let key = key.clone();
+            async move { redis_get(&admin, &key).await.as_deref() == Some("50") }
+        })
+        .await;
+    }
+
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(10), handle).await;
+
+    let got = redis_get(&admin, &key).await.expect("present");
+    assert_eq!(got, "50");
+
+    let _: () = admin.quit().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REDIS_URL"]
 async fn empty_line_appends_an_entry() {
     let admin = admin().await;
     let queue = "progress_log_l3";
     flush_all(&admin, queue).await;
+    flush_progress_log(&admin, queue, "job-log-empty").await;
 
     let handle = make_handle(queue, "job-log-empty", 60, 1000, 4096).await;
     let n = handle.log("").await.expect("log");

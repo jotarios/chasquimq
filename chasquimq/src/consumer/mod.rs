@@ -14,7 +14,7 @@ use crate::error::{HandlerError, Result};
 use crate::events::EventsWriter;
 use crate::job::Job;
 use crate::promoter::Promoter;
-use crate::redis::conn::connect;
+use crate::redis::conn::{connect, connect_pool};
 use crate::redis::group::ensure_group;
 use crate::redis::keys::{delayed_key, dlq_key, paused_key, stream_key};
 use crate::redis::parse::StreamEntryId;
@@ -203,6 +203,16 @@ where
         let promoter_handle = self.spawn_promoter(shutdown.clone(), events.clone());
         let scheduler_handle = self.spawn_scheduler::<T>(shutdown.clone());
 
+        // Shared per-handler progress + log Pool. Sized
+        // `(concurrency / 8).max(2).min(8)` so a small worker pool gets a
+        // sane minimum (2 clients) and a busy pool doesn't open one client
+        // per concurrent worker (capped at 8). Per-call SET / XADD are
+        // cheap; this pool is intentionally smaller than `concurrency`.
+        let progress_log_pool_size = (concurrency / 8).clamp(2, 8);
+        let progress_log_pool =
+            connect_pool(&self.redis_url, progress_log_pool_size, &self.cfg.connection).await?;
+        let queue_name_arc: Arc<str> = Arc::from(self.cfg.queue_name.as_str());
+
         let wiring = WorkerWiring {
             ack_tx: ack_tx.clone(),
             retry_tx: retry_tx.clone(),
@@ -214,6 +224,13 @@ where
             store_results: self.cfg.store_results,
             result_ttl_secs: self.cfg.result_ttl_secs,
             ok_result_tx: ok_result_tx.clone(),
+            progress_log_pool,
+            queue_name: queue_name_arc,
+            // Defaults pre-baked here; the `ConsumerConfig` fields that
+            // drive these land in a follow-up commit (config slice).
+            log_max_stream_len: 1_000,
+            log_max_line_bytes: 4_096,
+            events_progress_enabled: true,
         };
         let workers = spawn_workers(concurrency, handler, job_rx, wiring);
         drop(ack_tx);
