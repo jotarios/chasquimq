@@ -20,12 +20,22 @@ async fn main() {
 
     let admin = runner::connect_admin(&args.redis_url).await;
 
+    let run_opts = runner::RunOptions {
+        progress_events_enabled: args.progress_events_enabled,
+    };
     let mut all_reports: BTreeMap<String, Vec<ScenarioReport>> = BTreeMap::new();
     for scenario in &args.scenario {
         for repeat in 0..args.repeats {
             let queue = format!("bench-{scenario}-{repeat}");
             runner::flush_queue(&admin, &queue).await;
-            let report = runner::run_scenario(scenario, &args.redis_url, &queue, args.scale).await;
+            let report = runner::run_scenario(
+                scenario,
+                &args.redis_url,
+                &queue,
+                args.scale,
+                &run_opts,
+            )
+            .await;
             if matches!(args.format, Format::Jsonl) {
                 println!(
                     "{}",

@@ -16,6 +16,9 @@ pub struct Args {
         "worker-concurrent-store-results".to_string(),
         "worker-delayed-end-to-end".to_string(),
         "worker-retry-throughput".to_string(),
+        "progress-throughput-1".to_string(),
+        "progress-throughput-10".to_string(),
+        "progress-throughput-100".to_string(),
     ])]
     pub scenario: Vec<String>,
 
@@ -40,6 +43,13 @@ pub struct Args {
     /// don't pollute timing.
     #[arg(long, default_value = "error")]
     pub log_level: String,
+
+    /// For `progress-throughput-*` scenarios: emit a best-effort
+    /// `e=progress` event after every persisted progress write. Default
+    /// `false` so the scenario isolates the cost of the SET + TTL write;
+    /// flip to `true` to include the events-stream XADD on the hot path.
+    #[arg(long, default_value_t = false)]
+    pub progress_events_enabled: bool,
 }
 
 #[derive(clap::ValueEnum, Clone, Debug)]
