@@ -95,6 +95,7 @@ where
         H: Fn(Job<T>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = std::result::Result<Bytes, HandlerError>> + Send + 'static,
     {
+        self.cfg.validate()?;
         tracing::debug!(
             queue = %self.cfg.queue_name,
             delayed_enabled = self.cfg.delayed_enabled,
@@ -226,11 +227,9 @@ where
             ok_result_tx: ok_result_tx.clone(),
             progress_log_pool,
             queue_name: queue_name_arc,
-            // Defaults pre-baked here; the `ConsumerConfig` fields that
-            // drive these land in a follow-up commit (config slice).
-            log_max_stream_len: 1_000,
-            log_max_line_bytes: 4_096,
-            events_progress_enabled: true,
+            log_max_stream_len: self.cfg.log_max_stream_len,
+            log_max_line_bytes: self.cfg.log_max_line_bytes,
+            events_progress_enabled: self.cfg.events_progress_enabled,
         };
         let workers = spawn_workers(concurrency, handler, job_rx, wiring);
         drop(ack_tx);

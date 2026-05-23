@@ -189,6 +189,25 @@ pub struct ConsumerConfig {
     /// pays one `Instant` comparison per batch, no Redis round trip.
     /// Default `250`.
     pub pause_poll_ms: u64,
+    /// `MAXLEN ~` cap applied to each per-job log stream by
+    /// [`crate::JobHandle::log`]. Approximate trim (the `~`) so Redis
+    /// can do it cheaply; expect actual length to oscillate a few
+    /// entries above the cap. **Must be ≥ 16** — anything smaller and
+    /// the `MAXLEN ~` rounding can leave the stream effectively empty
+    /// (rejected at `Consumer::run` with `Error::Config`). Default
+    /// `1000`.
+    pub log_max_stream_len: u64,
+    /// Per-line byte cap applied by [`crate::JobHandle::log`]. Lines
+    /// exceeding this are truncated on a UTF-8 char boundary with a
+    /// `"[…truncated]"` marker appended; the truncate fires a single
+    /// warn-once per handle. Default `4096`.
+    pub log_max_line_bytes: usize,
+    /// Toggle for the per-progress `e=progress` event emission.
+    /// `update_progress` always SETs the persisted progress key; this
+    /// only gates the events-stream `XADD` so a high-rate handler can
+    /// opt out of the events flood while keeping persisted progress.
+    /// Default `true`.
+    pub events_progress_enabled: bool,
     /// Forwarded to the inline promoter the consumer spawns when
     /// `delayed_enabled` is true. Defaults to [`crate::metrics::NoopSink`].
     pub metrics: std::sync::Arc<dyn crate::metrics::MetricsSink>,
@@ -228,6 +247,9 @@ impl std::fmt::Debug for ConsumerConfig {
             .field("result_batch", &self.result_batch)
             .field("result_idle_ms", &self.result_idle_ms)
             .field("pause_poll_ms", &self.pause_poll_ms)
+            .field("log_max_stream_len", &self.log_max_stream_len)
+            .field("log_max_line_bytes", &self.log_max_line_bytes)
+            .field("events_progress_enabled", &self.events_progress_enabled)
             .field("metrics", &"<dyn MetricsSink>")
             .field("connection", &self.connection)
             .finish()
@@ -267,9 +289,33 @@ impl Default for ConsumerConfig {
             result_batch: 64,
             result_idle_ms: 5,
             pause_poll_ms: 250,
+            log_max_stream_len: 1_000,
+            log_max_line_bytes: 4_096,
+            events_progress_enabled: true,
             metrics: crate::metrics::noop_sink(),
             connection: ConnectionTuning::default(),
         }
+    }
+}
+
+impl ConsumerConfig {
+    /// Minimum acceptable `log_max_stream_len`. Caps below this defeat
+    /// the `MAXLEN ~` rounding inside Redis and can leave the per-job
+    /// log stream effectively empty between writes.
+    pub const MIN_LOG_MAX_STREAM_LEN: u64 = 16;
+
+    /// Validate the config. Called once at the start of `Consumer::run`
+    /// so a misconfigured field surfaces at startup rather than as a
+    /// silent data-loss bug after the first `JobHandle::log` call.
+    pub(crate) fn validate(&self) -> crate::Result<()> {
+        if self.log_max_stream_len < Self::MIN_LOG_MAX_STREAM_LEN {
+            return Err(crate::Error::Config(format!(
+                "log_max_stream_len must be >= {} (got {})",
+                Self::MIN_LOG_MAX_STREAM_LEN,
+                self.log_max_stream_len
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -392,5 +438,38 @@ impl Default for PromoterConfig {
             metrics: crate::metrics::noop_sink(),
             connection: ConnectionTuning::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn consumer_config_defaults_match_documented_values() {
+        let cfg = ConsumerConfig::default();
+        assert_eq!(cfg.log_max_stream_len, 1_000);
+        assert_eq!(cfg.log_max_line_bytes, 4_096);
+        assert!(cfg.events_progress_enabled);
+    }
+
+    #[test]
+    fn validate_rejects_log_max_stream_len_below_minimum() {
+        let mut cfg = ConsumerConfig {
+            log_max_stream_len: ConsumerConfig::MIN_LOG_MAX_STREAM_LEN - 1,
+            ..ConsumerConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+        cfg.log_max_stream_len = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_log_max_stream_len_at_minimum() {
+        let cfg = ConsumerConfig {
+            log_max_stream_len: ConsumerConfig::MIN_LOG_MAX_STREAM_LEN,
+            ..ConsumerConfig::default()
+        };
+        assert!(cfg.validate().is_ok());
     }
 }
