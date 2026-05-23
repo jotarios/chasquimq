@@ -344,6 +344,62 @@ drain and producers keep enqueueing. Survives consumer restarts until
 same key is toggled by `chasqui pause` / `chasqui resume`. See the
 [Pause and resume concept](/concepts/pause-and-resume/).
 
+### `await queue.remove(job_id)`, `await queue.remove_report(job_id)`
+
+```python
+async def remove(self, job_id: str) -> int
+async def remove_report(self, job_id: str) -> dict[str, bool]
+```
+
+Remove a single job by id from every surface it could live on — the
+delayed stage, a waiting or in-flight stream entry, the DLQ, and the
+stored result. `remove` returns the number of distinct surfaces the job
+was removed from (`0` when not found). `remove_report` returns the full
+per-surface dict `{"delayed", "stream", "dlq", "result"}`.
+
+Idempotent — a job id that exists on no surface resolves without error.
+See the [clean and obliterate guide](/guides/clean-and-obliterate/).
+
+### `await queue.drain(delayed=True)`
+
+```python
+async def drain(self, delayed: bool = True) -> int
+```
+
+Clear every *waiting* job from the queue. In-flight (active) jobs are
+left running. By default the delayed stage is also emptied; pass
+`delayed=False` to keep scheduled future jobs. Returns the count of
+stream + delayed entries removed.
+
+### `await queue.clean(grace_ms, limit, state="completed")`
+
+```python
+async def clean(self, grace_ms: int, limit: int, state: str = "completed") -> list[str]
+```
+
+Age- and state-filtered bulk delete. Removes up to `limit` jobs in
+`state` that are older than `grace_ms` milliseconds, and returns the
+removed job ids. `state` is one of `"completed"` / `"failed"` /
+`"delayed"` / `"waiting"`. `"active"` is a no-op — use `remove` for the
+deliberate per-job case.
+
+The age basis is the Redis stream entry id for `"waiting"` / `"failed"`
+and the job's creation time for `"delayed"`. `grace_ms` is **ignored**
+for `"completed"` — a stored result has no creation timestamp; rely on
+the result TTL for time-based expiry.
+
+### `await queue.obliterate()`
+
+```python
+async def obliterate(self) -> int
+```
+
+Tear the entire queue down — delete every Redis key backing it: the
+stream and its consumer groups, the DLQ, the delayed stage, all per-job
+side-indexes and result keys, repeatable specs, the pause flag, and the
+events stream. Returns the count of Redis keys removed. **Not
+reversible.**
+
 ### `await queue.close()`
 
 ```python

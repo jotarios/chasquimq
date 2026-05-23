@@ -1,0 +1,149 @@
+---
+title: Clean and obliterate
+description: Remove individual jobs, drain a backlog, bulk-delete by age and state, or tear a whole queue down.
+sidebar:
+  order: 7
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+Four maintenance methods on `Queue` for tearing jobs — or a whole queue — down. They are off the hot path (no change to produce / consume / ack) and every scan is bounded, so a single call never blocks Redis.
+
+Pick the one that matches the blast radius:
+
+- **`remove`** — one job, surgically.
+- **`drain`** — every waiting job, in-flight ones left running.
+- **`clean`** — bulk delete filtered by age and state.
+- **`obliterate`** — the entire queue keyspace. Last resort.
+
+## Remove a single job
+
+`remove` deletes a job from everywhere it could live — the delayed stage, a waiting or in-flight stream entry, the DLQ, and the stored result. It returns the count of surfaces the job was on.
+
+<Tabs syncKey="binding">
+<TabItem label="Node">
+
+```ts
+const surfaces = await queue.remove("job-123");
+// => number of surfaces the job was removed from (0 if not found)
+
+const report = await queue.removeReport("job-123");
+// => { delayed, stream, dlq, result } booleans
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+surfaces = await queue.remove("job-123")
+# => number of surfaces the job was removed from (0 if not found)
+
+report = await queue.remove_report("job-123")
+# => {"delayed": ..., "stream": ..., "dlq": ..., "result": ...}
+```
+
+</TabItem>
+</Tabs>
+
+`remove` is **idempotent** — a job id that exists on no surface resolves without error (count `0`). The stable job id lives inside the message envelope, not the Redis stream entry id, so the stream and DLQ branches run a bounded scan to translate the id. A job further back than the scan window is reported as absent on that surface — locate it with [`getJobs` pagination](/guides/inspect-jobs/) first if you need to reach deep into a very large stream.
+
+## Drain the waiting backlog
+
+`drain` clears every *waiting* job. In-flight (active) jobs are left running — `drain` never interrupts a worker mid-job. By default the delayed stage is emptied too; pass `false` to keep scheduled future jobs.
+
+<Tabs syncKey="binding">
+<TabItem label="Node">
+
+```ts
+const removed = await queue.drain(); // clears waiting + delayed
+await queue.drain(false); // keep scheduled future jobs
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+removed = await queue.drain()           # clears waiting + delayed
+await queue.drain(delayed=False)        # keep scheduled future jobs
+```
+
+</TabItem>
+</Tabs>
+
+A ChasquiMQ stream mixes waiting and active entries on one Redis Stream — a delivered-but-unacked job stays in the stream. `drain` subtracts the consumer group's pending set before deleting, so an in-flight job is never dropped out from under a worker.
+
+## Bulk delete by age and state
+
+`clean` removes up to `limit` jobs in a given state that are older than `grace` milliseconds, and returns the removed job ids.
+
+<Tabs syncKey="binding">
+<TabItem label="Node">
+
+```ts
+// Drop failed jobs older than a day, up to 500 at a time.
+const ids = await queue.clean(86_400_000, 500, "failed");
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+# Drop failed jobs older than a day, up to 500 at a time.
+ids = await queue.clean(86_400_000, 500, "failed")
+```
+
+</TabItem>
+</Tabs>
+
+The state is one of `completed` / `failed` / `delayed` / `waiting`:
+
+- **`waiting` / `failed`** — age basis is the Redis stream entry id timestamp.
+- **`delayed`** — age basis is the job's creation time, so `clean` drops delayed jobs *created* more than `grace` ago, regardless of how far out they were due.
+- **`completed`** — `grace` is **ignored** (a stored result has no creation timestamp; its own result TTL handles time-based expiry). `clean(completed, ...)` is limit-only — use it to reclaim result keys eagerly.
+
+`active` is not a valid state — removing an in-flight job mid-execution is a footgun. Use `remove` for the deliberate per-job case.
+
+This is the right tool to **drop dead-lettered jobs you do not want to [replay](/guides/replay-the-dlq/)** — e.g. entries that failed because the producer was buggy. `clean(grace, limit, "failed")` clears them without sending them back to a worker.
+
+## Obliterate the whole queue
+
+`obliterate` deletes the entire `{chasqui:<queue>}` keyspace — the stream and its consumer groups, the DLQ, the delayed stage, every per-job side-index and result key, repeatable specs, the pause flag, and the events stream.
+
+<Tabs syncKey="binding">
+<TabItem label="Node">
+
+```ts
+const keysRemoved = await queue.obliterate();
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+keys_removed = await queue.obliterate()
+```
+
+</TabItem>
+</Tabs>
+
+It runs as a batched `SCAN` + `UNLINK` (async reclaim), so a multi-GB stream never stalls Redis. It is **not reversible** — there is no undo. A crash mid-teardown is recoverable: re-running finds and removes the remainder.
+
+## From the CLI
+
+The `chasqui` binary exposes the two destructive bulk operations:
+
+```bash
+# Clean failed jobs older than a day.
+chasqui clean emails --state failed --grace-ms 86400000 --limit 500
+
+# Tear the whole queue down.
+chasqui obliterate emails
+```
+
+Both prompt for a `y/N` confirmation before acting; pass `--yes` to skip it in scripts. See the [CLI reference](/reference/cli/#chasqui-clean).
+
+## See also
+
+- [Inspect jobs](/guides/inspect-jobs/) — find a job before you remove it.
+- [Replay the DLQ](/guides/replay-the-dlq/) — the alternative to `clean(failed)` when the jobs *should* run again.
+- [Node API reference](/reference/node-api/#queueremovejobid-queueremovereportjobid) · [Python API reference](/reference/python-api/#await-queueremovejob_id-await-queueremove_reportjob_id) · [Rust API reference](/reference/rust-api/#producerremove--drain--clean--obliterate)

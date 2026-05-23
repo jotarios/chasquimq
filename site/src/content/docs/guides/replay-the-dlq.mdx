@@ -76,6 +76,6 @@ The risk is when you replay, your fix is wrong, and the job lands in DLQ again. 
 
 ## Drop instead
 
-The CLI does not currently have a "drop without replay" command — DLQ entries expire when you trim the stream. To clear DLQ entirely, use `redis-cli DEL '{chasqui:emails}:dlq'` (operator-only, last resort).
+When the jobs should *not* run again — a buggy producer, structurally invalid entries — drop them instead of replaying. `chasqui clean emails --state failed` (or `Queue.clean(grace, limit, "failed")` from your app) bulk-deletes DLQ entries by age without sending them back to a worker. See the [clean and obliterate guide](/guides/clean-and-obliterate/).
 
 For the underlying mechanics: [DLQ and recovery](/concepts/dlq-and-recovery/).

@@ -25,7 +25,7 @@ pub use metrics::{
     DlqReason, DlqRouted, JobOutcome, JobOutcomeKind, LockOutcome, MetricsSink, NoopSink,
     PromoterTick, ReaderBatch, RetryScheduled, noop_sink,
 };
-pub use producer::{DlqEntry, Producer};
+pub use producer::{DlqEntry, DrainOptions, Producer, RemovalReport};
 pub use promoter::Promoter;
 pub use repeat::{MissedFiresPolicy, RepeatPattern, RepeatableMeta, RepeatableSpec};
 pub use scheduler::Scheduler;

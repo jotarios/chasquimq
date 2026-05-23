@@ -289,6 +289,31 @@ Tests after the slice: **288 Rust** (single-node) + **4 cluster** (real cluster)
 
 Doc surfaces synced: this slice, `docs/engine.md` (the hash-tag operational bullet expanded into a full Redis Cluster note: scheme, discovery, the single-slot invariant, `NOSCRIPT` self-heal, out-of-scope), root `README.md` feature table (new Redis Cluster row), both shim READMEs (symmetric "Redis Cluster" sections), `reference/options.md` (new "Redis Cluster mode" row), a new `concepts/redis-cluster.md` + a new `guides/connect-to-redis-cluster.mdx` both registered in `site/astro.config.mjs`, `benchmarks/README.md` index, and `CLAUDE.md` (stale redis-rs line fixed; cluster shipped; all-primaries-preload deferred).
 
+## Job maintenance API (cross-FFI slice)
+
+**`remove` / `drain` / `clean` / `obliterate` shipped, cross-FFI, May 2026.** Closes the `NotSupportedError` stubs on `Queue.remove` / `drain` / `clean` / `obliterate` (Node) and adds the same four methods to the Python `Queue` (previously absent). The engine maintenance surface is off the hot path — no `XADD` / `XREADGROUP` / `XACK` change — and every scan is bounded so a single call can never block Redis.
+
+Engine surface (`chasquimq/src/producer/maintenance.rs`, a new sibling to `producer/dlq.rs`):
+
+- `Producer::remove(job_id, group) -> RemovalReport` — deletes one job from every surface it could live on: the delayed ZSET (+ `didx` / `dlid` side-indexes), a waiting or active main-stream entry, the DLQ, and the result key. Idempotent — an id on no surface returns an all-`false` `RemovalReport { delayed, stream, dlq, result }`. The stable `JobId` lives inside the msgpack envelope, not the Redis stream entry id, so the stream / DLQ branches run a bounded `XRANGE` scan to translate the id to an entry id, then hand the *entry id* to an atomic Lua script. The delayed branch reuses `CANCEL_DELAYED_SCRIPT` verbatim.
+- `Producer::drain(group, DrainOptions) -> u64` — clears waiting stream entries (those not in any consumer-group PEL) and, by default, the delayed ZSET. In-flight (pending) jobs are left running; `DrainOptions { delayed: false }` keeps scheduled future jobs. A ChasquiMQ stream mixes waiting and active entries on one Redis Stream (BullMQ keeps a separate wait list, so its `drain` is a single `DEL`), so `DRAIN_STREAM_SCRIPT` subtracts the `XPENDING` set from an `XRANGE` page and `XDEL`s the complement; the drain runs in bounded passes until a pass deletes nothing.
+- `Producer::clean(group, grace_ms, limit, state) -> Vec<String>` — age- + state-filtered bulk delete; removes up to `limit` jobs in `state` older than `now - grace_ms` and returns the removed job ids. States: `Waiting`, `Failed`, `Delayed`, `Completed`. `Active` is a deliberate no-op. Age basis: stream entry id ms for waiting / failed; `created_at_ms` for delayed; ignored for completed (result keys carry no creation timestamp — `result_ttl_secs` handles age-out).
+- `Producer::obliterate(group) -> u64` — tears the entire `{chasqui:<queue>}` keyspace down (stream + consumer groups, DLQ, delayed ZSET, every side-index, every result key, repeatable specs, paused flag, events stream, promoter / scheduler locks) via a batched `SCAN` + `UNLINK` (async reclaim, never stalls Redis). Not atomic — a crash mid-teardown is recoverable by re-running.
+
+Three new atomic Lua scripts (`REMOVE_STREAM_ENTRY_SCRIPT`, `DRAIN_STREAM_SCRIPT`, `CLEAN_STREAM_SCRIPT`) follow the existing `EVALSHA` → `NOSCRIPT` → `EVAL` self-heal pattern; the `XACKDEL`-then-`XDEL` fallback in each handles the waiting-vs-active distinction (a pending entry needs the ack, a waiting one needs a plain `XDEL`).
+
+Design call locked in eng review: the `clean(Delayed)` age basis. The first implementation aged delayed jobs by their ZSET *run-at* score, which made a future-scheduled job impossible to `clean` deterministically (its score is never `< now`). Switched to the job's `created_at_ms` from the envelope — "drop delayed jobs created more than `grace_ms` ago" — a stable, testable semantic regardless of how far out the job is due.
+
+Node shim (`chasquimq-node`): four new napi producer bindings + un-stubbed `Queue.remove` / `drain` / `clean` / `obliterate`. `remove` returns the count of surfaces hit; `Queue.removeReport` exposes the per-surface `RemovalReport` (re-exported from the package entry). `drain(delayed = true)`, `clean(grace, limit, type = "completed")`, `obliterate()` all resolve the configured `consumerGroup` (default `"default"`).
+
+Python shim (`chasquimq-py`): four pyo3 producer bindings (`remove` returns a dict) + `Queue.remove` / `remove_report` / `drain` / `clean` / `obliterate` — previously absent entirely. `_native.pyi` updated with the four method stubs.
+
+CLI (`chasquimq-cli`): new `chasqui clean <queue> --state <s> --grace-ms <ms> --limit <n>` and `chasqui obliterate <queue>`; both destructive and gated behind an interactive y/N confirm unless `--yes` is passed, matching the `chasqui dlq replay` pattern.
+
+Tests: 19 engine integration cases (live Redis) covering every state plus the idempotent / active-survives-drain / obliterate-then-reuse edges, 13 vitest cases (Node), 14 pytest cases (Python), + unit tests for the new helpers (`parse_scan`, `stream_id_ms`, `RemovalReport`). No test asserted the old `NotSupportedError` behavior, so un-stubbing was additive — not a breaking change.
+
+Doc surfaces synced: this slice, `docs/engine.md` (new "Job maintenance" section), both shim READMEs (symmetric maintenance sections), `site/src/content/docs/reference/{node-api,python-api,rust-api,cli}.md`, a new `guides/clean-and-obliterate.mdx` registered in `site/astro.config.mjs`, and the root `README.md` feature table.
+
 ## Deferred follow-ups for 1.x
 
 - **Opt-in result-write bench scenario.** The PR #75 bench guard locked in the no-overhead-when-off claim (`store_results=false` regresses 0%). The opt-in path (`store_results=true` under sustained load) is not yet measured.

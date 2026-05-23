@@ -18,7 +18,8 @@ use chasquimq::repeat::{
     RepeatableSpec as EngineRepeatableSpec,
 };
 use chasquimq::{
-    BackoffKind, BackoffSpec as EngineBackoffSpec, JobRetryOverride as EngineJobRetryOverride,
+    BackoffKind, BackoffSpec as EngineBackoffSpec, DrainOptions as EngineDrainOptions,
+    JobRetryOverride as EngineJobRetryOverride, JobState as EngineJobState,
 };
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
@@ -109,6 +110,21 @@ pub struct AddOptions {
 pub struct NamedPayload {
     pub name: String,
     pub payload: Buffer,
+}
+
+/// Result of a [`Producer::remove`] call — which surfaces actually held
+/// the job. Mirrors `chasquimq::RemovalReport`. An all-`false` report is a
+/// valid result (the id was not found anywhere), not an error.
+#[napi(object)]
+pub struct RemovalReport {
+    /// Removed from the delayed ZSET (and its side-indexes).
+    pub delayed: bool,
+    /// Removed from the main stream (waiting or active entry).
+    pub stream: bool,
+    /// Removed from the dead-letter queue.
+    pub dlq: bool,
+    /// The per-job result key was deleted.
+    pub result: bool,
 }
 
 #[napi]
@@ -487,6 +503,84 @@ impl Producer {
     #[napi]
     pub fn producer_id(&self) -> String {
         self.inner.producer_id().to_string()
+    }
+
+    /// Remove a single job by id from every surface it could live on.
+    /// `group` is the consumer group whose pending list is checked for
+    /// the active-job case. Idempotent — a missing id returns an
+    /// all-`false` `RemovalReport`, not an error.
+    #[napi]
+    pub async fn remove(&self, job_id: String, group: String) -> napi::Result<RemovalReport> {
+        let r = self
+            .inner
+            .remove(&job_id, &group)
+            .await
+            .map_err(map_engine_err)?;
+        Ok(RemovalReport {
+            delayed: r.delayed,
+            stream: r.stream,
+            dlq: r.dlq,
+            result: r.result,
+        })
+    }
+
+    /// Clear every waiting job (and, when `drainDelayed` is true — the
+    /// default — the delayed ZSET). In-flight jobs are left running.
+    /// Returns the count of stream + delayed entries removed.
+    #[napi]
+    pub async fn drain(&self, group: String, drain_delayed: bool) -> napi::Result<i64> {
+        let n = self
+            .inner
+            .drain(
+                &group,
+                EngineDrainOptions {
+                    delayed: drain_delayed,
+                },
+            )
+            .await
+            .map_err(map_engine_err)?;
+        Ok(n as i64)
+    }
+
+    /// Age- and state-filtered bulk delete. `state` is one of
+    /// `"completed" | "failed" | "delayed" | "waiting"`. Removes up to
+    /// `limit` jobs older than `now - graceMs` and returns their ids.
+    #[napi]
+    pub async fn clean(
+        &self,
+        group: String,
+        grace_ms: i64,
+        limit: i64,
+        state: String,
+    ) -> napi::Result<Vec<String>> {
+        let parsed = EngineJobState::parse(&state).ok_or_else(|| {
+            napi::Error::from_reason(format!(
+                "unknown state '{state}'; expected one of completed | failed | delayed | waiting"
+            ))
+        })?;
+        self.inner
+            .clean(
+                &group,
+                grace_ms.max(0) as u64,
+                limit.max(0) as usize,
+                parsed,
+            )
+            .await
+            .map_err(map_engine_err)
+    }
+
+    /// Tear the entire queue down — delete the whole `{chasqui:<queue>}`
+    /// keyspace. `group` is accepted for signature symmetry; obliterate
+    /// drops every consumer group regardless. Returns the key count
+    /// removed.
+    #[napi]
+    pub async fn obliterate(&self, group: String) -> napi::Result<i64> {
+        let n = self
+            .inner
+            .obliterate(&group)
+            .await
+            .map_err(map_engine_err)?;
+        Ok(n as i64)
     }
 }
 

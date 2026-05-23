@@ -257,15 +257,67 @@ async count(): Promise<number>
 `waiting + active + delayed` — the number of jobs that could still
 run.
 
-### `queue.remove(jobId)`
+### `queue.remove(jobId)`, `queue.removeReport(jobId)`
 
 ```ts
 async remove(jobId: string): Promise<number>
+async removeReport(jobId: string): Promise<RemovalReport>
 ```
 
-Best-effort cancel of a delayed job. Returns `1` if the entry was
-removed from the delayed ZSET, throws `NotSupportedError` otherwise
-(in-stream entries can't be removed by id alone).
+Remove a single job by id from every surface it could live on — the
+delayed stage, a waiting or in-flight stream entry, the DLQ, and the
+stored result. `remove` returns the number of distinct surfaces the job
+was removed from (`0` when not found anywhere). `removeReport` returns
+the full per-surface `RemovalReport { delayed, stream, dlq, result }`.
+
+Idempotent — a job id that exists on no surface resolves without error.
+The stable job id lives inside the message envelope, not the Redis
+stream entry id, so the stream / DLQ branches run a bounded scan to
+translate the id; a job further back than the scan window is reported
+as absent on that surface. See the
+[clean and obliterate guide](/guides/clean-and-obliterate/).
+
+### `queue.drain(delayed?)`
+
+```ts
+async drain(delayed: boolean = true): Promise<number>
+```
+
+Clear every *waiting* job from the queue. In-flight (active) jobs are
+left running. By default the delayed stage is also emptied; pass
+`delayed = false` to keep scheduled future jobs. Returns the count of
+stream + delayed entries removed.
+
+### `queue.clean(grace, limit, type?)`
+
+```ts
+async clean(grace: number, limit: number, type?: JobType): Promise<string[]>
+```
+
+Age- and state-filtered bulk delete. Removes up to `limit` jobs in
+`type` that are older than `grace` milliseconds, and returns the removed
+job ids. `type` is one of `"completed"` | `"failed"` | `"delayed"` |
+`"waiting"` and defaults to `"completed"`. `"active"` is a no-op —
+removing an in-flight job is a footgun; use [`remove`](#queueremovejobid-queueremovereportjobid)
+for the deliberate per-job case.
+
+The age basis is the Redis stream entry id for `"waiting"` / `"failed"`
+and the job's creation time for `"delayed"`. `grace` is **ignored** for
+`"completed"` — a stored result has no creation timestamp; rely on the
+result TTL for time-based expiry.
+
+### `queue.obliterate(opts?)`
+
+```ts
+async obliterate(opts?: { force?: boolean; count?: number }): Promise<number>
+```
+
+Tear the entire queue down — delete every Redis key backing it: the
+stream and its consumer groups, the DLQ, the delayed stage, all per-job
+side-indexes and result keys, repeatable specs, the pause flag, and the
+events stream. Returns the count of Redis keys removed. `opts` is
+accepted for call-site compatibility; obliterate always tears the whole
+queue down. **Not reversible.**
 
 ### `queue.pause()`, `queue.resume()`, `queue.isPaused()`
 
@@ -318,11 +370,11 @@ get isClosed(): boolean
 
 ### Stubbed methods (NotSupportedError)
 
-These throw [`NotSupportedError`](/reference/error-codes/#cmq-100--node-feature-not-supported)
-in v1: `drain`, `obliterate`, `clean`. See the [options
-index](/reference/options/) and [Thinking in
-ChasquiMQ](/concepts/thinking-in-chasquimq/) for the engine semantics that
-make these intentionally unsupported.
+Parent / child job flows throw
+[`NotSupportedError`](/reference/error-codes/#cmq-100--node-feature-not-supported):
+passing a `parent` option to `add` / `addBulk` is rejected. See
+[Thinking in ChasquiMQ](/concepts/thinking-in-chasquimq/) for the
+rationale.
 
 ## Worker
 
@@ -810,9 +862,28 @@ type JobType = JobState | "paused" | "prioritized" | "waiting-children";
 type JobProgress = number | object;
 ```
 
-Type aliases for documentation. The engine itself does not
-implement most of these states in v1 — see the `Queue` stub
-methods.
+`JobState` is the engine's job-state classification, used by
+[`getJobState`](#queuegetjobstatejobid),
+[`getJobs`](#queuegetjobstypes-start-end), and
+[`clean`](#queuecleangrace-limit-type). `"prioritized"` /
+`"waiting-children"` are accepted on `JobType` for call-site
+compatibility but have no engine semantics in v1.
+
+### `RemovalReport`
+
+```ts
+interface RemovalReport {
+  delayed: boolean;
+  stream: boolean;
+  dlq: boolean;
+  result: boolean;
+}
+```
+
+Returned by [`queue.removeReport`](#queueremovejobid-queueremovereportjobid).
+Each field flags whether the job was removed from that surface — all
+`false` means the id was not found anywhere (a valid result, not an
+error).
 
 ## Errors
 

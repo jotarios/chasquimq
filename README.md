@@ -219,6 +219,7 @@ In-repo: [`docs/engine.md`](docs/engine.md) (engine internals), [`docs/history.m
 | Priorities | Future | ✓ | ✓ | — |
 | Rate limiter | Future | ✓ | ✓ | — |
 | Pause / Resume | ✓ | ✓ | ✓ | — |
+| Job maintenance (`remove` / `drain` / `clean` / `obliterate`) | ✓ | ✓ | ✓ | — |
 | Parent / child dependencies | Future | ✓ | — | — |
 | Web UI | Future | ✓ | ✓ | — |
 | Optimized for | Throughput | Jobs | Jobs | Messages |

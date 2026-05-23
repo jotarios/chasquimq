@@ -436,6 +436,38 @@ This is the engine surface behind `Queue.pause()` and
 without touching Redis, use [`Consumer::pause_control`](#consumer).
 See the [Pause and resume concept](/concepts/pause-and-resume/).
 
+### `Producer::remove` / `drain` / `clean` / `obliterate`
+
+```rust
+pub async fn remove(&self, job_id: &JobId, group: &str) -> Result<RemovalReport>;
+pub async fn drain(&self, group: &str, opts: DrainOptions) -> Result<u64>;
+pub async fn clean(&self, group: &str, grace_ms: u64, limit: usize, state: JobState) -> Result<Vec<String>>;
+pub async fn obliterate(&self, group: &str) -> Result<u64>;
+```
+
+Job maintenance — tear individual jobs, or a whole queue, down. All
+four are off the hot path and use bounded scans. `group` is the
+consumer-group name (used for stream acks).
+
+- **`remove`** deletes one job from every surface it could live on (the
+  delayed ZSET + side-indexes, a waiting or active stream entry, the
+  DLQ, the result key) and returns a `RemovalReport { delayed, stream,
+  dlq, result }`. Idempotent — an id on no surface returns all-`false`.
+- **`drain`** clears waiting stream entries (not in any PEL) and, when
+  `DrainOptions { delayed: true }` (the default), the delayed ZSET.
+  In-flight jobs are left running. Returns the count removed.
+- **`clean`** removes up to `limit` jobs in `state` (`JobState::Waiting`
+  / `Failed` / `Delayed` / `Completed`) older than `now - grace_ms`,
+  returning the removed job ids. `Active` is a no-op. Age basis is the
+  stream entry id for waiting / failed, `created_at_ms` for delayed;
+  `grace_ms` is ignored for completed.
+- **`obliterate`** deletes the entire `{chasqui:<queue>}` keyspace via
+  a batched `SCAN` + `UNLINK`. Returns the key count removed.
+
+These are the engine surface behind `Queue.remove` / `drain` / `clean`
+/ `obliterate` on both shims and `chasqui clean` / `obliterate`. See
+the [clean and obliterate guide](/guides/clean-and-obliterate/).
+
 ### `Producer::shutdown`
 
 ```rust

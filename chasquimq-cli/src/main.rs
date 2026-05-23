@@ -1,6 +1,7 @@
 mod dlq;
 mod events;
 mod inspect;
+mod maintenance;
 mod pause;
 mod repeatable;
 mod watch;
@@ -87,6 +88,44 @@ enum Command {
         /// Queue name (without the `{chasqui:...}` hash-tag wrapping).
         queue: String,
     },
+    /// Age- and state-filtered bulk delete. Removes up to `--limit` jobs
+    /// in `--state` that are older than `--grace-ms` milliseconds and
+    /// prints the removed job ids.
+    Clean {
+        /// Queue name (without the `{chasqui:...}` hash-tag wrapping).
+        queue: String,
+        /// Job state to clean: completed | failed | delayed | waiting.
+        #[arg(long, default_value = "completed", value_name = "STATE")]
+        state: String,
+        /// Only remove jobs older than this many milliseconds.
+        #[arg(long, default_value_t = 0, value_name = "MS")]
+        grace_ms: u64,
+        /// Cap on how many jobs are removed in this call.
+        #[arg(long, default_value_t = 1000)]
+        limit: u32,
+        /// Consumer group used for stream acks. Matches the engine
+        /// default `ConsumerConfig::group`.
+        #[arg(long, default_value = DEFAULT_GROUP, value_name = "NAME")]
+        group: String,
+        /// Skip the interactive confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Tear an entire queue down — delete every Redis key backing it:
+    /// the stream and its consumer groups, the DLQ, delayed jobs, all
+    /// per-job side-indexes and results, repeatable specs, the pause
+    /// flag, and the events stream. Destructive and not reversible.
+    Obliterate {
+        /// Queue name (without the `{chasqui:...}` hash-tag wrapping).
+        queue: String,
+        /// Consumer group accepted for symmetry; obliterate drops every
+        /// group regardless.
+        #[arg(long, default_value = DEFAULT_GROUP, value_name = "NAME")]
+        group: String,
+        /// Skip the interactive confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -147,5 +186,16 @@ async fn main() -> anyhow::Result<()> {
         Command::Events { queue, from } => events::run(redis_url, &queue, &from).await,
         Command::Pause { queue } => pause::pause(redis_url, &queue).await,
         Command::Resume { queue } => pause::resume(redis_url, &queue).await,
+        Command::Clean {
+            queue,
+            state,
+            grace_ms,
+            limit,
+            group,
+            yes,
+        } => maintenance::clean(redis_url, &queue, &group, &state, grace_ms, limit, yes).await,
+        Command::Obliterate { queue, group, yes } => {
+            maintenance::obliterate(redis_url, &queue, &group, yes).await
+        }
     }
 }

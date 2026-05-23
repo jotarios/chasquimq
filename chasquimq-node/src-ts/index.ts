@@ -13,6 +13,7 @@
 // rename to catch divergence.
 
 export { Queue } from './queue.js'
+export type { RemovalReport } from './queue.js'
 export { Job } from './job.js'
 export { Worker } from './worker.js'
 export type { Processor, WorkerOptions } from './worker.js'

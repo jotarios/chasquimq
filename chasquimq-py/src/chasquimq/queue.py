@@ -378,6 +378,80 @@ class Queue:
         producer = self._get_producer()
         return await producer.cancel_delayed(job_id)
 
+    async def remove(self, job_id: str) -> int:
+        """Remove a single job by id from everywhere it could live.
+
+        Deletes the job from the delayed stage, a waiting or in-flight
+        stream entry, the dead-letter queue, and the stored result.
+        Idempotent: a job id that exists on no surface resolves without
+        error.
+
+        Returns the number of distinct surfaces the job was removed
+        from (``0`` when not found anywhere). Use :meth:`remove_report`
+        for the per-surface breakdown.
+        """
+        report = await self.remove_report(job_id)
+        return sum(
+            1
+            for hit in (
+                report["delayed"],
+                report["stream"],
+                report["dlq"],
+                report["result"],
+            )
+            if hit
+        )
+
+    async def remove_report(self, job_id: str) -> dict[str, bool]:
+        """Like :meth:`remove`, but returns the full per-surface report.
+
+        The dict has ``delayed`` / ``stream`` / ``dlq`` / ``result``
+        boolean keys so a caller can tell "removed while delayed" from
+        "removed from the DLQ".
+        """
+        producer = self._get_producer()
+        group = self._consumer_group or "default"
+        return await producer.remove(job_id, group)
+
+    async def drain(self, delayed: bool = True) -> int:
+        """Clear every waiting job from the queue.
+
+        In-flight (active) jobs are left running. By default the delayed
+        stage is also emptied; pass ``delayed=False`` to keep scheduled
+        future jobs. Returns the count of jobs removed.
+        """
+        producer = self._get_producer()
+        group = self._consumer_group or "default"
+        return await producer.drain(group, delayed)
+
+    async def clean(
+        self, grace_ms: int, limit: int, state: str = "completed"
+    ) -> list[str]:
+        """Age- and state-filtered bulk delete.
+
+        Removes up to ``limit`` jobs in ``state`` that are older than
+        ``grace_ms`` milliseconds, and returns the removed job ids.
+        ``state`` is one of ``"completed"`` / ``"failed"`` /
+        ``"delayed"`` / ``"waiting"`` and defaults to ``"completed"``.
+        ``"active"`` is intentionally a no-op — use :meth:`remove` for
+        the deliberate per-job case.
+        """
+        producer = self._get_producer()
+        group = self._consumer_group or "default"
+        return await producer.clean(group, grace_ms, limit, state)
+
+    async def obliterate(self) -> int:
+        """Tear the entire queue down — delete every Redis key backing it.
+
+        Drops the stream and its consumer groups, the dead-letter queue,
+        the delayed stage, all per-job side-indexes and result keys,
+        repeatable specs, the pause flag, and the events stream. Returns
+        the count of Redis keys removed.
+        """
+        producer = self._get_producer()
+        group = self._consumer_group or "default"
+        return await producer.obliterate(group)
+
     async def pause(self) -> None:
         """Durably pause every consumer of this queue (cross-process).
 
