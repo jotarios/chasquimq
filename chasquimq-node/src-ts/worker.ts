@@ -141,6 +141,34 @@ export interface WorkerOptions {
    * boundary because Redis `EX` only accepts integer seconds.
    */
   resultTtlMs?: number
+
+  /**
+   * `MAXLEN ~` cap on the per-job log stream
+   * (`{chasqui:<queue>}:log:<id>`). Default `1000`. Must be `>= 16` —
+   * below that, Redis's `MAXLEN ~` rounding can leave the stream
+   * effectively empty between writes (the engine rejects sub-minimum
+   * values at startup). Maps to `ConsumerConfig::log_max_stream_len`.
+   */
+  logMaxLen?: number
+
+  /**
+   * Per-line byte cap for {@link Job.log}. Oversize lines are
+   * truncated on a UTF-8 char boundary with a `[…truncated]` marker
+   * appended. Default `4096`. Maps to
+   * `ConsumerConfig::log_max_line_bytes`.
+   */
+  logMaxLineBytes?: number
+
+  /**
+   * Gate on the engine's `e=progress` events-stream entry emitted by
+   * {@link Job.updateProgress}. The persisted progress key is always
+   * written; setting this to `false` only mutes the events fan-out,
+   * which a {@link QueueEvents} subscriber would otherwise observe on
+   * the broadcast `'progress'` channel and the per-id
+   * `'progress:<jobId>'` channel. Default `true`. Maps to
+   * `ConsumerConfig::events_progress_enabled`.
+   */
+  eventsProgressEnabled?: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -178,6 +206,16 @@ export interface WorkerOptions {
  *   (does not reflect a cross-process `Queue.pause`).
  * - `resumed`   — `()`. Fired when `.resume()` is called. Process-local.
  *
+ * - `progress`  — `(job: Job, progress: JobProgress)`. Fired every time
+ *   a processor calls `await job.updateProgress(n)`. The engine writes
+ *   the persisted progress key first, then emits an `e=progress` event
+ *   onto the events stream; the worker subscribes to its own
+ *   {@link QueueEvents} subscriber (lazily spawned the first time a
+ *   `progress` listener attaches) and re-emits onto this EE so callers
+ *   see `(job, n)` in the same process that ran the handler. Disable
+ *   the events fan-out (and therefore this event) by setting
+ *   `WorkerOptions.eventsProgressEnabled = false`.
+ *
  * ## Listener names accepted for API stability but currently no-op
  *
  * These can be wired up without throwing, but the engine does not emit
@@ -185,8 +223,6 @@ export interface WorkerOptions {
  * type-checking; promoted to active events when the corresponding
  * engine work lands.
  *
- * - `progress` — `(job: Job, progress: JobProgress)`. Requires engine
- *   support for in-handler progress updates. Not yet emitted.
  * - `stalled`  — `(jobId: string, prev: string)`. Requires a stalled-
  *   detector in the engine. Not yet emitted.
  */
@@ -205,19 +241,28 @@ export class Worker<
   private runPromise?: Promise<void>
   /**
    * Lazily-constructed events-stream subscriber that fans the engine's
-   * cross-process `drained` event onto this worker's `EventEmitter`.
-   * Created the first time a listener attaches to `'drained'`; torn
-   * down in `.close()`. Workers that never subscribe to `drained` pay
-   * no extra Redis connections.
+   * cross-process events (`drained`, `progress`) onto this worker's
+   * `EventEmitter`. Created the first time a listener attaches to
+   * `'drained'` or `'progress'`; torn down in `.close()`. Workers that
+   * never subscribe to either pay no extra Redis connections.
    */
-  private drainedEvents?: QueueEvents
+  private internalEvents?: QueueEvents
   /**
-   * Resolves once the lazy drained subscriber has issued its first
+   * Resolves once the lazy internal subscriber has issued its first
    * `XREAD BLOCK`. `run()` awaits this (when set) so a user pattern of
-   * `worker.on('drained', cb); queue.add(...)` doesn't race the
-   * engine's first emit against the subscriber's connect+block.
+   * `worker.on('drained' | 'progress', cb); queue.add(...)` doesn't
+   * race the engine's first emit against the subscriber's connect+block.
    */
-  private drainedReadyPromise?: Promise<void>
+  private internalEventsReadyPromise?: Promise<void>
+  /**
+   * Map of in-flight `Job` instances by id, populated for the duration
+   * of each processor invocation. Used by the `progress` event forwarder
+   * to surface the same `Job` reference the handler is holding (so
+   * `worker.on('progress', (job, n) => ...)` and the handler observe
+   * identical state). Entries are removed in the handler's `finally`
+   * so the map stays bounded to current concurrency.
+   */
+  private inflight: Map<string, Job<DataType, ResultType, NameType>> = new Map()
 
   constructor(
     name: string,
@@ -248,6 +293,9 @@ export class Worker<
       storeResults: opts.storeResults,
       resultTtlMs: opts.resultTtlMs,
       reconnectMaxAttempts: opts.connection.reconnectMaxAttempts,
+      logMaxLen: opts.logMaxLen,
+      logMaxLineBytes: opts.logMaxLineBytes,
+      eventsProgressEnabled: opts.eventsProgressEnabled,
     }
     // Plumb the optional credentialProvider through to the native
     // Consumer constructor. `undefined` (the common path) collapses to
@@ -258,12 +306,17 @@ export class Worker<
     this.native = new NativeConsumer(url, nativeOpts, opts.connection.credentialProvider)
 
     // Spawn the cross-process events-stream subscriber the first time
-    // a user attaches a `drained` listener. Using `newListener` (not a
-    // public method) keeps the API surface plain `EventEmitter`-shaped —
-    // users just call `worker.on('drained', ...)`, no extra setup.
+    // a user attaches a `drained` or `progress` listener. Using
+    // `newListener` (not a public method) keeps the API surface plain
+    // `EventEmitter`-shaped — users just call
+    // `worker.on('drained' | 'progress', ...)`, no extra setup.
     this.on('newListener', (event: string) => {
-      if (event === 'drained' && !this.drainedEvents && !this.closed) {
-        this.spawnDrainedSubscriber()
+      if (
+        (event === 'drained' || event === 'progress') &&
+        !this.internalEvents &&
+        !this.closed
+      ) {
+        this.spawnInternalSubscriber()
       }
     })
 
@@ -278,19 +331,28 @@ export class Worker<
 
   /**
    * Lazily start a {@link QueueEvents} subscriber that forwards the
-   * engine's cross-process `drained` event onto this worker's
-   * `EventEmitter`. Idempotent — calling twice has no effect (the first
-   * call wins). Errors from the subscriber are forwarded to this
-   * worker's `error` channel so application code only needs one error
-   * subscription.
+   * engine's cross-process events (`drained`, `progress`) onto this
+   * worker's `EventEmitter`. Idempotent — calling twice has no effect
+   * (the first call wins). Errors from the subscriber are forwarded to
+   * this worker's `error` channel so application code only needs one
+   * error subscription.
+   *
+   * Progress event semantics: the engine emits one `e=progress` entry
+   * per `Job.updateProgress` call. This forwarder looks the live `Job`
+   * up by id in {@link Worker.inflight} (populated for the duration of
+   * the handler's run) so subscribers receive the same `Job` reference
+   * the handler is holding — identical to BullMQ's `(job, progress)`
+   * shape. Progress events for jobs whose handlers have already
+   * resolved are dropped silently; they would race the cleanup of the
+   * inflight map and arrive with no live `Job` to dispatch on.
    */
-  private spawnDrainedSubscriber(): void {
-    if (this.drainedEvents) return
+  private spawnInternalSubscriber(): void {
+    if (this.internalEvents) return
     // `autorun: false` + explicit `await waitUntilReady` + explicit
     // `run()` lets us hold the worker's own `run()` until the
     // subscriber's first `XREAD BLOCK` is in flight. Without this, the
-    // engine's first `drained` emit (which fires within a few hundred
-    // ms of worker startup on a fresh queue) can race the subscriber's
+    // engine's first emit (which fires within a few hundred ms of
+    // worker startup on a fresh queue) can race the subscriber's
     // connect+block and the event is lost. `lastEventId: '$'` keeps
     // the subscriber from replaying ancient events from a long-lived
     // queue; the race window we close is the connect-and-block latency
@@ -308,6 +370,17 @@ export class Worker<
     events.on('drained', () => {
       this.emit('drained')
     })
+    events.on('progress', (payload: { jobId: string; name?: string; progress: number }) => {
+      const job = this.inflight.get(payload.jobId)
+      if (job) {
+        // Mirror the persisted progress onto the local Job so listeners
+        // and the handler observe consistent state. The handler itself
+        // already set this via `updateProgress`; this branch covers
+        // listeners that fire before the handler awaits.
+        job.progress = payload.progress
+        this.emit('progress', job, payload.progress)
+      }
+    })
     // Forward subscriber errors onto the worker's single ``error``
     // channel so application code only needs one error subscription.
     // Caller MUST wire a ``worker.on('error', ...)`` listener — an
@@ -318,7 +391,7 @@ export class Worker<
         this.emit('error', err)
       }
     })
-    this.drainedEvents = events
+    this.internalEvents = events
     // Capture a ready promise that `run()` awaits before kicking the
     // native engine. `waitUntilReady()` establishes the ioredis
     // connection; the subsequent `run()` queues the first `XREAD
@@ -328,7 +401,7 @@ export class Worker<
     // Errors surface via the `error` forwarder above so the worker's
     // single error channel stays canonical.
     let resolveReady!: () => void
-    this.drainedReadyPromise = new Promise<void>((res) => {
+    this.internalEventsReadyPromise = new Promise<void>((res) => {
       resolveReady = res
     })
     void (async () => {
@@ -368,12 +441,13 @@ export class Worker<
     this.running = true
     this.emit('ready')
 
-    // If a `drained` listener attached before `run()` was called, hold
-    // the engine start until the subscriber's `XREAD BLOCK` is in
-    // flight. Best-effort: the gate releases on subscriber error too,
-    // so a Redis blip on the events stream cannot wedge the worker.
-    if (this.drainedReadyPromise) {
-      await this.drainedReadyPromise
+    // If a `drained` or `progress` listener attached before `run()`
+    // was called, hold the engine start until the subscriber's `XREAD
+    // BLOCK` is in flight. Best-effort: the gate releases on
+    // subscriber error too, so a Redis blip on the events stream
+    // cannot wedge the worker.
+    if (this.internalEventsReadyPromise) {
+      await this.internalEventsReadyPromise
     }
 
     const storeResults = this.opts.storeResults === true
@@ -392,6 +466,13 @@ export class Worker<
         nativeJob.id,
       )
       job.attemptsMade = nativeJob.attempt
+      // Wire the native handle in BEFORE the handler runs so a processor
+      // that calls `await job.updateProgress(n)` reaches the engine's
+      // per-dispatch `JobHandle`. Track in `inflight` for the duration
+      // of the handler so the `progress` events forwarder can surface
+      // the same Job reference the handler is holding.
+      job._attachNative(nativeJob)
+      this.inflight.set(nativeJob.id, job)
       this.emit('active', job, '')
       try {
         const result = await this.processor(job)
@@ -417,6 +498,8 @@ export class Worker<
         // budget. Re-throw so the rejection propagates verbatim — the
         // binding sees the same error shape regardless of subclass.
         throw e
+      } finally {
+        this.inflight.delete(nativeJob.id)
       }
     }
 
@@ -456,14 +539,14 @@ export class Worker<
         /* swallow — already surfaced via 'error' */
       }
     }
-    // Tear down the lazy drained subscriber if one was started. Best-
+    // Tear down the lazy internal subscriber if one was started. Best-
     // effort: swallow errors so a transient Redis blip on close doesn't
     // mask the worker's own shutdown path.
-    if (this.drainedEvents) {
-      await this.drainedEvents.close().catch(() => {
+    if (this.internalEvents) {
+      await this.internalEvents.close().catch(() => {
         /* best-effort cleanup */
       })
-      this.drainedEvents = undefined
+      this.internalEvents = undefined
     }
     this.running = false
     this.emit('closed')

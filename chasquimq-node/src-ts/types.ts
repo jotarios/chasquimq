@@ -17,7 +17,18 @@
 // classes directly. Both will appear in autocomplete; reach for the
 // high-level shapes unless you've already opted into the native API.
 
-export type JobProgress = number | object;
+/**
+ * Per-handler progress value passed to {@link Job.updateProgress} and
+ * surfaced on the `Worker`'s `'progress'` event payload.
+ *
+ * **BREAKING (TS types, 1.4):** narrowed from `number | object` to
+ * `number`. The engine stores progress as a Redis STRING (ASCII decimal
+ * `u8`, clamped to `0..=100`) so the previous `object` arm was a
+ * non-functional carryover from the BullMQ-shaped type. Code using only
+ * numeric progress values is unaffected; object-progress callers must
+ * encode their state separately (e.g. via {@link Job.log}).
+ */
+export type JobProgress = number;
 
 /**
  * Resolved shape returned by a {@link ConnectionOptions.credentialProvider}
