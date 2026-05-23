@@ -18,7 +18,11 @@
 //!   alongside the result key after job completion.
 //! - **Log storage**: Redis Stream, one entry per call, field `line`.
 //!   `MAXLEN ~ <log_max_stream_len>` keeps the stream bounded; the trim
-//!   is approximate (the `~`) so Redis can do it cheaply.
+//!   is approximate (the `~`) so Redis can do it cheaply. Each `log()`
+//!   refreshes an `EXPIRE` of `result_ttl_secs` on the stream key so the
+//!   log disappears alongside the result key after job completion;
+//!   without that, `MAXLEN` caps the entries but leaves the key itself
+//!   indefinitely.
 //! - **Connection budget**: a `JobHandle` borrows a shared
 //!   [`fred::clients::Pool`] (sized 2–8) — never a client per worker.
 //! - **Bounded lines**: lines exceeding `log_max_line_bytes` are truncated
@@ -204,13 +208,19 @@ impl JobHandle {
     }
 
     /// Append `line` to the per-job log stream and return the new stream
-    /// length (one XADD + XLEN, pipelined into a single round trip).
+    /// length (one XADD + XLEN + EXPIRE, pipelined into a single round
+    /// trip).
     ///
     /// Lines exceeding `log_max_line_bytes` are truncated to the largest
     /// UTF-8 char boundary at or below that byte cap and have the marker
     /// `"[…truncated]"` appended. The first truncation per handle logs a
     /// single `tracing::warn!` so a hot-loop handler can't flood the
     /// operator log.
+    ///
+    /// The trailing `EXPIRE log_key result_ttl_secs` keeps the stream
+    /// key from outliving the result it belongs to — `MAXLEN ~` caps the
+    /// entry count but not the key itself, so a job that logs once and
+    /// never logs again would leak the stream indefinitely without this.
     pub async fn log(&self, line: &str) -> Result<u64> {
         let payload = self.truncate_line(line);
 
@@ -236,6 +246,16 @@ impl JobHandle {
         let xlen_cmd = CustomCommand::new_static("XLEN", ClusterHash::FirstKey, false);
         pipeline
             .custom::<Value, _>(xlen_cmd, vec![Value::from(key.as_str())])
+            .await
+            .map_err(Error::Redis)?;
+
+        let expire_cmd = CustomCommand::new_static("EXPIRE", ClusterHash::FirstKey, false);
+        let ttl = i64::try_from(self.result_ttl_secs).unwrap_or(i64::MAX);
+        pipeline
+            .custom::<Value, _>(
+                expire_cmd,
+                vec![Value::from(key.as_str()), Value::from(ttl)],
+            )
             .await
             .map_err(Error::Redis)?;
 
@@ -270,9 +290,10 @@ impl JobHandle {
     }
 }
 
-/// The pipeline returns `[XADD-reply, XLEN-reply]`; recover the XLEN
-/// integer (the second element). Saturating-on-non-integer means a
-/// surprise reply shape doesn't panic in the user's handler.
+/// The pipeline returns `[XADD-reply, XLEN-reply, EXPIRE-reply]`;
+/// recover the XLEN integer (the second element). Saturating-on-
+/// non-integer means a surprise reply shape doesn't panic in the
+/// user's handler.
 fn extract_xlen(results: &Value) -> u64 {
     let arr = match results {
         Value::Array(items) => items,
@@ -331,9 +352,11 @@ mod tests {
 
     #[test]
     fn extract_xlen_pulls_second_element_integer() {
+        // Production shape: [XADD-reply, XLEN-reply, EXPIRE-reply].
         let v = Value::Array(vec![
             Value::String("1700000000000-0".into()),
             Value::Integer(42),
+            Value::Integer(1),
         ]);
         assert_eq!(extract_xlen(&v), 42);
     }

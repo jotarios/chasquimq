@@ -93,6 +93,20 @@ async fn redis_ttl(admin: &fred::clients::Client, key: &str) -> i64 {
     }
 }
 
+async fn redis_pttl(admin: &fred::clients::Client, key: &str) -> i64 {
+    let v: Value = admin
+        .custom(
+            CustomCommand::new_static("PTTL", ClusterHash::FirstKey, false),
+            vec![Value::from(key)],
+        )
+        .await
+        .expect("PTTL");
+    match v {
+        Value::Integer(n) => n,
+        other => panic!("unexpected PTTL reply: {other:?}"),
+    }
+}
+
 async fn xlen(admin: &fred::clients::Client, key: &str) -> i64 {
     let v: Value = admin
         .custom(
@@ -434,6 +448,28 @@ async fn get_job_logs_asc_and_desc_and_pagination() {
     assert_eq!(tail, vec!["line-3", "line-4"]);
 
     inspector.shutdown().await.ok();
+    let _: () = admin.quit().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REDIS_URL"]
+async fn log_key_has_ttl_matching_result_ttl_secs() {
+    let admin = admin().await;
+    let queue = "progress_log_ttl";
+    flush_all(&admin, queue).await;
+    flush_progress_log(&admin, queue, "job-log-ttl").await;
+
+    let result_ttl_secs: u64 = 60;
+    let handle = make_handle(queue, "job-log-ttl", result_ttl_secs, 1000, 4096).await;
+    handle.log("first line").await.expect("log");
+
+    let key = log_key(queue, "job-log-ttl");
+    let pttl = redis_pttl(&admin, &key).await;
+    assert!(
+        pttl > 0 && pttl <= (result_ttl_secs * 1000) as i64,
+        "log key PTTL must be > 0 and <= result_ttl_secs * 1000 (got {pttl})"
+    );
+
     let _: () = admin.quit().await.unwrap();
 }
 
