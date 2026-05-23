@@ -850,6 +850,76 @@ async fn clean_waiting_removes_old_entries() {
 
 #[tokio::test]
 #[ignore = "requires REDIS_URL"]
+async fn clean_purges_progress_and_log_keys() {
+    let admin = admin().await;
+    let queue = "mnt_clean_progress_log";
+    flush_all(&admin, queue).await;
+
+    let producer: Producer<Sample> = Producer::connect(&redis_url(), producer_cfg(queue))
+        .await
+        .expect("connect");
+
+    // Enqueue three waiting jobs and plant a progress key + a log
+    // stream entry against each one — the same per-job surfaces
+    // `remove(id)` is responsible for sweeping. `clean()` must do the
+    // same for every job it removes.
+    let mut ids: Vec<String> = Vec::new();
+    for n in 0..3_u32 {
+        let id = producer
+            .add(Sample { n, s: "w".into() })
+            .await
+            .expect("add");
+        let progress_key = format!("{{chasqui:{queue}}}:progress:{id}");
+        let log_key = format!("{{chasqui:{queue}}}:log:{id}");
+        let _: Value = admin
+            .custom(
+                CustomCommand::new_static("SET", ClusterHash::FirstKey, false),
+                vec![Value::from(progress_key.clone()), Value::from("17")],
+            )
+            .await
+            .expect("SET progress");
+        let _: Value = admin
+            .custom(
+                CustomCommand::new_static("XADD", ClusterHash::FirstKey, false),
+                vec![
+                    Value::from(log_key.clone()),
+                    Value::from("*"),
+                    Value::from("line"),
+                    Value::from("first"),
+                ],
+            )
+            .await
+            .expect("XADD log");
+        assert!(exists(&admin, &progress_key).await);
+        assert!(exists(&admin, &log_key).await);
+        ids.push(id);
+    }
+
+    let removed = producer
+        .clean("default", 0, 1000, JobState::Waiting)
+        .await
+        .expect("clean");
+    assert_eq!(removed.len(), 3, "all 3 waiting cleaned");
+
+    for id in &ids {
+        let progress_key = format!("{{chasqui:{queue}}}:progress:{id}");
+        let log_key = format!("{{chasqui:{queue}}}:log:{id}");
+        assert!(
+            !exists(&admin, &progress_key).await,
+            "progress key purged by clean for {id}"
+        );
+        assert!(
+            !exists(&admin, &log_key).await,
+            "log stream purged by clean for {id}"
+        );
+    }
+
+    producer.shutdown().await.ok();
+    admin.quit().await.ok();
+}
+
+#[tokio::test]
+#[ignore = "requires REDIS_URL"]
 async fn clean_grace_window_excludes_recent() {
     let admin = admin().await;
     let queue = "mnt_clean_grace";

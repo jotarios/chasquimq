@@ -173,6 +173,45 @@ fn stream_id_ms(id: &str) -> Option<u64> {
     id.split('-').next()?.parse::<u64>().ok()
 }
 
+/// Unlink the per-job `progress` + `log` keys for each id in `job_ids`,
+/// pipelined into a single round trip per call. Mirrors the
+/// `UNLINK progress + UNLINK log` tail of `remove(id)` so the
+/// bulk-removal paths (`clean_stream` / `clean_delayed` /
+/// `clean_completed`) leave no orphaned auxiliary keys behind. All
+/// per-job keys share the `{chasqui:<queue>}` hash tag so the pipeline
+/// is Cluster-correct. Best-effort: a Redis error is swallowed (with a
+/// warn) so a transient blip never reverts the primary cleanup the
+/// caller already did.
+async fn unlink_progress_and_log(pool: &Pool, queue_name: &str, job_ids: &[String]) {
+    if job_ids.is_empty() {
+        return;
+    }
+    let client = pool.next_connected();
+    let pipeline = client.pipeline();
+    let unlink_cmd = CustomCommand::new_static("UNLINK", ClusterHash::FirstKey, false);
+    for id in job_ids {
+        let p_key = progress_key(queue_name, id);
+        let l_key = log_key(queue_name, id);
+        if let Err(e) = pipeline
+            .custom::<Value, _>(unlink_cmd.clone(), vec![Value::from(p_key)])
+            .await
+        {
+            tracing::warn!(error = %e, "maintenance: queue UNLINK progress failed");
+            return;
+        }
+        if let Err(e) = pipeline
+            .custom::<Value, _>(unlink_cmd.clone(), vec![Value::from(l_key)])
+            .await
+        {
+            tracing::warn!(error = %e, "maintenance: queue UNLINK log failed");
+            return;
+        }
+    }
+    if let Err(e) = pipeline.all::<Value>().await {
+        tracing::warn!(error = %e, "maintenance: UNLINK progress+log pipeline failed");
+    }
+}
+
 /// Locate the stream entry id whose msgpack envelope carries `job_id`,
 /// scanning a single bounded `XRANGE` window. Returns `None` if the id is
 /// not in the first `MAINTENANCE_SCAN_PAGE` entries — callers treat that
@@ -445,15 +484,22 @@ pub(super) async fn clean(
         return Ok(Vec::new());
     }
     let cutoff = now_ms().saturating_sub(grace_ms);
-    match state {
-        JobState::Waiting => clean_stream(pool, stream_key, group, cutoff, limit, false).await,
-        JobState::Failed => clean_stream(pool, dlq_key, group, cutoff, limit, true).await,
-        JobState::Delayed => clean_delayed(pool, queue_name, delayed_key, cutoff, limit).await,
-        JobState::Completed => clean_completed(pool, queue_name, limit).await,
+    let removed = match state {
+        JobState::Waiting => clean_stream(pool, stream_key, group, cutoff, limit, false).await?,
+        JobState::Failed => clean_stream(pool, dlq_key, group, cutoff, limit, true).await?,
+        JobState::Delayed => clean_delayed(pool, queue_name, delayed_key, cutoff, limit).await?,
+        JobState::Completed => clean_completed(pool, queue_name, limit).await?,
         // Active jobs are in-flight; removing one mid-execution is a
         // footgun. `remove(id)` is the deliberate per-job escape hatch.
-        JobState::Active | JobState::Unknown => Ok(Vec::new()),
-    }
+        JobState::Active | JobState::Unknown => return Ok(Vec::new()),
+    };
+    // Mirror `remove(id)`'s tail: every removed job's per-job progress
+    // key + log stream must also go. The per-state helpers above only
+    // touch the primary surface (stream / DLQ / delayed ZSET / result
+    // key); without this sweep the auxiliary keys would outlive the
+    // job and only be reclaimed by `obliterate`.
+    unlink_progress_and_log(pool, queue_name, &removed).await;
+    Ok(removed)
 }
 
 /// `XPENDING <key> <group> - + <count>` → the set of entry ids currently
