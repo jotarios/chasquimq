@@ -390,14 +390,20 @@ impl Introspector {
 
         // Translate negative `start` and "to-end" `end` against the
         // current XLEN. After resolution, `(lo, hi)` is an inclusive
-        // index window in the requested ordering.
+        // index window in the requested ordering. Saturating arithmetic
+        // because callers can hand in `i64::MIN` — plain `+` panics in
+        // debug and silently wraps in release.
         let total_i = total as i64;
         let mut lo = if start < 0 {
-            (total_i + start).max(0)
+            total_i.saturating_add(start).max(0)
         } else {
             start
         };
-        let mut hi = if end < 0 { total_i - 1 } else { end };
+        let mut hi = if end < 0 {
+            total_i.saturating_add(end).max(-1)
+        } else {
+            end
+        };
         if lo > hi || lo >= total_i {
             return Ok((Vec::new(), total));
         }

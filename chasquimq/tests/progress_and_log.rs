@@ -475,6 +475,49 @@ async fn log_key_has_ttl_matching_result_ttl_secs() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires REDIS_URL"]
+async fn get_job_logs_handles_extreme_negative_offsets() {
+    let admin = admin().await;
+    let queue = "progress_log_g3";
+    flush_all(&admin, queue).await;
+    flush_progress_log(&admin, queue, "job-extreme").await;
+
+    let handle = make_handle(queue, "job-extreme", 60, 1000, 4096).await;
+    for i in 0..3 {
+        handle.log(&format!("line-{i}")).await.expect("log");
+    }
+
+    let inspector = Introspector::connect(&redis_url(), queue, &ConnectionTuning::default(), None)
+        .await
+        .expect("introspector");
+
+    // `i64::MIN` as `start` historically panicked in debug
+    // (`attempt to add with overflow`) and wrapped in release. With
+    // saturating arithmetic, start clamps to 0 and we get every entry.
+    let (lines, total) = inspector
+        .get_job_logs("job-extreme", i64::MIN, -1, true)
+        .await
+        .expect("get_job_logs must not panic on i64::MIN start");
+    assert_eq!(total, 3);
+    assert_eq!(lines, vec!["line-0", "line-1", "line-2"]);
+
+    // `i64::MIN` as `end` saturates below 0 → window is empty, return
+    // `(vec![], total)` rather than overflow.
+    let (lines, total) = inspector
+        .get_job_logs("job-extreme", 0, i64::MIN, true)
+        .await
+        .expect("get_job_logs must not panic on i64::MIN end");
+    assert_eq!(total, 3);
+    assert!(
+        lines.is_empty(),
+        "i64::MIN end clamps to a below-zero hi → empty window"
+    );
+
+    inspector.shutdown().await.ok();
+    let _: () = admin.quit().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires REDIS_URL"]
 async fn get_job_logs_empty_returns_zero_count() {
     let admin = admin().await;
     let queue = "progress_log_g2";
