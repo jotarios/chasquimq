@@ -14,7 +14,11 @@ import logging as _logging
 _logging.getLogger("chasquimq").addHandler(_logging.NullHandler())
 
 from ._native import Consumer, Producer, Scheduler, version
-from .errors import NotSupportedError, UnrecoverableError
+from .errors import (
+    NotSupportedError,
+    UnrecoverableError,
+    WaitUntilFinishedTimeoutError,
+)
 from .job import Job
 from .queue import Queue
 from .queue_events import QueueEvent, QueueEvents
@@ -37,6 +41,7 @@ __all__ = [
     "RepeatableMeta",
     "Scheduler",
     "UnrecoverableError",
+    "WaitUntilFinishedTimeoutError",
     "Worker",
     "version",
 ]
