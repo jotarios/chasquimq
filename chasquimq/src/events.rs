@@ -33,6 +33,7 @@
 //! |--------------------|--------------------------------------------|
 //! | `waiting`          | `n` (opt)                                  |
 //! | `active`           | `attempt`, `n` (opt)                       |
+//! | `progress`         | `progress` (0..=100), `n` (opt)            |
 //! | `completed`        | `attempt`, `duration_us`, `n` (opt)        |
 //! | `failed`           | `attempt`, `reason`, `duration_us` (opt), `n` (opt) |
 //! | `retry-scheduled`  | `attempt` (next attempt), `backoff_ms`, `n` (opt) |
@@ -211,6 +212,18 @@ impl EventsWriter {
             .await;
     }
 
+    /// Emit a `progress` event (handler called `JobHandle::update_progress`).
+    /// `progress` is the clamped 0..=100 value the engine persisted to
+    /// the progress key. `name` is the dispatch name (`None` for unnamed
+    /// jobs — the field is omitted on the wire, matching the existing
+    /// convention).
+    pub(crate) async fn emit_progress(&self, id: &str, name: Option<&str>, progress: u8) {
+        let progress_s = progress.to_string();
+        let name = name.unwrap_or("");
+        self.xadd("progress", id, name, &[("progress", &progress_s)])
+            .await;
+    }
+
     /// Emit a `dlq` event after a successful DLQ relocate.
     pub(crate) async fn emit_dlq(&self, id: &str, name: &str, reason: &str, attempt: u32) {
         let attempt_s = attempt.to_string();
@@ -280,5 +293,138 @@ impl EventsWriter {
                 "events: XADD failed; event dropped"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ConnectionTuning;
+    use crate::redis::conn::connect;
+    use crate::redis::keys::events_key;
+
+    fn redis_url() -> String {
+        std::env::var("REDIS_URL")
+            .expect("REDIS_URL must be set to run integration tests")
+    }
+
+    async fn flush_events(client: &Client, queue: &str) {
+        let cmd = CustomCommand::new_static("DEL", ClusterHash::FirstKey, false);
+        let _: Value = client
+            .custom(cmd, vec![Value::from(events_key(queue))])
+            .await
+            .expect("DEL events");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires REDIS_URL"]
+    async fn emits_progress_event_with_progress_field_and_name() {
+        let url = redis_url();
+        let queue = "events_emit_progress";
+
+        let admin = connect(&url, &ConnectionTuning::default())
+            .await
+            .expect("admin");
+        flush_events(&admin, queue).await;
+
+        let writer_client = connect(&url, &ConnectionTuning::default())
+            .await
+            .expect("writer client");
+        let writer = EventsWriter::new(writer_client, queue, 1_000);
+
+        writer.emit_progress("job-A", Some("send-email"), 42).await;
+        writer.emit_progress("job-B", None, 100).await;
+
+        // Read back via XRANGE.
+        let cmd = CustomCommand::new_static("XRANGE", ClusterHash::FirstKey, false);
+        let v: Value = admin
+            .custom(
+                cmd,
+                vec![
+                    Value::from(events_key(queue)),
+                    Value::from("-"),
+                    Value::from("+"),
+                ],
+            )
+            .await
+            .expect("XRANGE");
+        let items = match v {
+            Value::Array(items) => items,
+            other => panic!("XRANGE unexpected: {other:?}"),
+        };
+        let mut progress_events: Vec<std::collections::HashMap<String, String>> = Vec::new();
+        for entry in items {
+            let Value::Array(pair) = entry else { continue };
+            let Some(Value::Array(fields)) = pair.into_iter().nth(1) else {
+                continue;
+            };
+            let mut kv = std::collections::HashMap::new();
+            let mut iter = fields.into_iter();
+            while let (Some(k), Some(v)) = (iter.next(), iter.next()) {
+                let ks = match k {
+                    Value::String(s) => s.to_string(),
+                    Value::Bytes(b) => String::from_utf8_lossy(&b).to_string(),
+                    other => format!("{other:?}"),
+                };
+                let vs = match v {
+                    Value::String(s) => s.to_string(),
+                    Value::Bytes(b) => String::from_utf8_lossy(&b).to_string(),
+                    other => format!("{other:?}"),
+                };
+                kv.insert(ks, vs);
+            }
+            if kv.get("e").map(|s| s.as_str()) == Some("progress") {
+                progress_events.push(kv);
+            }
+        }
+        assert_eq!(progress_events.len(), 2, "two progress events emitted");
+
+        let job_a = progress_events
+            .iter()
+            .find(|e| e.get("id").map(|s| s.as_str()) == Some("job-A"))
+            .expect("job-A");
+        assert_eq!(job_a.get("progress").map(|s| s.as_str()), Some("42"));
+        assert_eq!(job_a.get("n").map(|s| s.as_str()), Some("send-email"));
+        assert!(job_a.contains_key("ts"));
+
+        let job_b = progress_events
+            .iter()
+            .find(|e| e.get("id").map(|s| s.as_str()) == Some("job-B"))
+            .expect("job-B");
+        assert_eq!(job_b.get("progress").map(|s| s.as_str()), Some("100"));
+        // Empty name → `n` field omitted entirely, same convention as the
+        // other per-job events.
+        assert!(!job_b.contains_key("n"), "unnamed job omits the n field");
+
+        let _: () = admin.quit().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires REDIS_URL"]
+    async fn disabled_writer_skips_progress_event() {
+        let url = redis_url();
+        let queue = "events_emit_progress_disabled";
+
+        let admin = connect(&url, &ConnectionTuning::default())
+            .await
+            .expect("admin");
+        flush_events(&admin, queue).await;
+
+        let writer = EventsWriter::disabled();
+        writer.emit_progress("job-X", Some("name"), 50).await;
+
+        // No XADD should have happened.
+        let cmd = CustomCommand::new_static("XLEN", ClusterHash::FirstKey, false);
+        let v: Value = admin
+            .custom(cmd, vec![Value::from(events_key(queue))])
+            .await
+            .expect("XLEN");
+        match v {
+            Value::Integer(n) => assert_eq!(n, 0, "disabled writer must not XADD"),
+            Value::Null => {}
+            other => panic!("XLEN unexpected: {other:?}"),
+        }
+
+        let _: () = admin.quit().await.unwrap();
     }
 }

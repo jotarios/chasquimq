@@ -188,15 +188,17 @@ impl JobHandle {
             .await
             .map_err(Error::Redis)?;
 
-        // Event emission is wired in a follow-up commit; the `events` /
-        // `events_progress_enabled` / `job_name` fields are pre-plumbed
-        // here so the emit can land without changing the constructor.
-        let _ = (
-            &self.events,
-            self.events_progress_enabled,
-            self.job_name.as_deref(),
-            clamped,
-        );
+        // SET-first-then-emit: the persisted progress value is the
+        // source of truth; a failed event-emit must never leave
+        // subscribers ahead of (or behind) what an introspector would
+        // read. Event emission itself is best-effort — `xadd` swallows
+        // errors and warns at the events module.
+        if self.events_progress_enabled
+            && let Some(events) = &self.events
+        {
+            let name = self.job_name.as_deref();
+            events.emit_progress(&self.job_id, name, clamped).await;
+        }
 
         Ok(())
     }
