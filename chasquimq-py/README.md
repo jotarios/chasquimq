@@ -65,9 +65,9 @@ asyncio.run(main())
 | Surface | What it does |
 |---|---|
 | `Queue` | Producer + queue inspection. `add` / `add_bulk` / `add_unique` / `get_job` / `get_jobs` / `get_jobs_page` / `get_job_state` / `get_job_counts` / `get_waiting_count` / `get_active_count` / `get_delayed_count` / `get_completed_count` / `get_failed_count` / `count` / `get_job_result` / `peek_dlq` / `replay_dlq` / `cancel_delayed` / `get_repeatable_jobs` / `remove_repeatable_by_key` / `pause` / `resume` / `is_paused` / `remove` / `remove_report` / `drain` / `clean` / `obliterate`. Async context manager. |
-| `Worker` | Consumer pool. asyncio-first dispatch, opt-in result storage (`store_results=True`), graceful shutdown, `pause` / `resume` / `is_paused`. Async context manager. |
-| `Job` | Frozen dataclass returned by `Queue.add`. Has `id`, `name`, `data`, `attempts_made`, `wait_for_result(timeout=)`. |
-| `QueueEvents` | Asyncio iterator over the engine events stream. Cross-process pub/sub for `completed` / `failed` / `dlq` / `retry-scheduled` / `delayed`. |
+| `Worker` | Consumer pool. asyncio-first dispatch, opt-in result storage (`store_results=True`), graceful shutdown, `pause` / `resume` / `is_paused`, listener API (`on`/`off`/`once` for `ready` / `active` / `completed` / `failed` / `error` / `closing` / `closed` / `drained` / `paused` / `resumed`). Async context manager. |
+| `Job` | Dataclass returned by `Queue.add`. Has `id`, `name`, `data`, `attempts_made`, `wait_for_result(timeout=)`, `wait_until_finished(queue_events, timeout=)`. |
+| `QueueEvents` | Async-iterator + listener API over the engine events stream. Cross-process pub/sub for `waiting` / `active` / `completed` / `failed` / `dlq` / `retry-scheduled` / `delayed` / `drained` / `retries-exhausted`, plus per-id channels (`completed:<jobId>` / `failed:<jobId>` / `active:<jobId>`) for targeted subscribers. |
 | `BackoffSpec` | Builders: `.fixed(delay_ms)` / `.exponential(initial_ms, multiplier, max_ms, jitter_ms)`. |
 | `RepeatPattern` | Builders: `.cron(expr, tz=)` / `.every(interval_ms)`. DST-aware via IANA tz names. |
 | `MissedFiresPolicy` | `.skip()` / `.fire_once()` / `.fire_all(max_catchup)` for cron catch-up after scheduler downtime. |
@@ -214,6 +214,92 @@ async with Queue("emails", redis_url=url) as queue:
 ```
 
 The same durable flag is what the CLI's `chasqui pause <queue>` / `chasqui resume <queue>` toggle. Both surfaces are idempotent — double-pause / double-resume are no-ops.
+
+### Subscribing to events
+
+Two layered surfaces: per-worker listeners for in-process observation, and the cross-process `QueueEvents` stream for fan-out across workers, dashboards, and ops tooling. Listener callbacks may be plain functions or `async def` coroutines — async callbacks are scheduled on the running loop.
+
+In-process `Worker` events fire on the local worker only:
+
+```python
+async with Worker("emails", handler, redis_url=url) as worker:
+    worker.on("ready",     lambda: print("engine loop started"))
+    worker.on("active",    lambda job: print("running", job.id))
+    worker.on("completed", lambda job, result: print("ok", job.id, result))
+    worker.on("failed",    lambda job, err: print("failed", job.id, err))
+    worker.on("error",     lambda err: print("engine error", err))
+    worker.on("drained",   lambda: print("queue is empty"))
+    worker.on("paused",    lambda: print("worker parked"))
+    worker.on("resumed",   lambda: print("worker resumed"))
+    worker.on("closing",   lambda: print("shutting down"))
+    worker.on("closed",    lambda: print("shutdown complete"))
+    await worker.run()
+```
+
+`drained` is the only `Worker` event that requires a cross-process subscription (the engine emits it on the events stream, since "no jobs left" is a queue-wide observation). It's lazily wired: the first `worker.on('drained', ...)` call spawns an embedded `QueueEvents` subscriber, torn down on `worker.close()`. Workers that never subscribe pay no extra Redis connections.
+
+Cross-process `QueueEvents` listens on the events stream — every process running a `QueueEvents` instance for the same queue sees every transition, regardless of which worker emitted it. Two surfaces are available; pick one (they share the same Redis connection but only one consumer of XREAD at a time):
+
+```python
+from chasquimq import QueueEvents
+
+# Listener API (EventEmitter-shaped)
+events = QueueEvents("emails", redis_url=url)
+events.on("waiting",          lambda payload, eid: ...)
+events.on("active",           lambda payload, eid: ...)
+events.on("completed",        lambda payload, eid: ...)
+events.on("failed",           lambda payload, eid: ...)  # payload['failedReason']
+events.on("drained",          lambda eid: ...)
+events.on("retry-scheduled",  lambda payload, eid: ...)
+events.on("dlq",              lambda payload, eid: ...)
+events.on("retries-exhausted", lambda payload, eid: ...)
+# Per-id channels — fire only for the named job. Used internally by
+# Job.wait_until_finished; useful for targeted UI updates without
+# filtering every broadcast event by jobId.
+events.on(f"completed:{job_id}", lambda payload, eid: ...)
+events.on(f"failed:{job_id}",    lambda payload, eid: ...)
+await events.wait_until_ready()   # subscriber's first XREAD BLOCK is in flight
+# ... do work ...
+await events.close()
+
+# Async-iterator surface (the original; one consumer)
+events = QueueEvents("emails", redis_url=url)
+async for ev in events:
+    print(ev.name, ev.job_id, ev.fields)
+```
+
+`completed` payloads from the events stream do **not** carry the handler's return value (that would double-allocate the payload onto every subscriber). To read the value, pair `QueueEvents` with `Queue.get_job_result(job_id)` and run the worker with `store_results=True`. The next section's `Job.wait_until_finished` does this for you.
+
+`progress` and `stalled` listeners are accepted on `Worker` for parity but are currently no-op — the engine doesn't emit those transitions yet. Attach them safely; they'll start firing when the corresponding engine work lands.
+
+### Awaiting a single job's completion
+
+`Job.wait_until_finished(queue_events, timeout=...)` is the event-driven completion-wait, mirroring the Node shim. Subscribes to the per-id `completed:<job_id>` / `failed:<job_id>` channels and resolves / raises on the first to fire:
+
+```python
+events = QueueEvents("emails", redis_url=url)
+# Force the subscriber loop to start so wait_until_ready is awaitable.
+events.on("completed", lambda *_a: None)
+await events.wait_until_ready()
+
+job = await queue.add("send", {"to": "ada@example.com"})
+
+try:
+    # Returns the handler's return value (requires store_results=True
+    # on the worker; otherwise returns None). Raises
+    # RuntimeError(failedReason) on failure.
+    # `timeout` in seconds — omit for an unbounded wait.
+    result = await job.wait_until_finished(events, timeout=30.0)
+    print("sent:", result)
+except WaitUntilFinishedTimeoutError:
+    print("no terminal event within deadline")
+except RuntimeError as err:
+    print("job failed:", err)
+finally:
+    await events.close()
+```
+
+Distinct from `Job.wait_for_result(timeout=...)`: that one polls the `Queue.get_job_result` Redis key and **requires** `store_results=True` to detect completion at all. `wait_until_finished` is event-driven, so it detects completion even when no result key was written — but it cannot tell you a job that already finished before the call wired up. Pick `wait_until_finished` for low-latency awaits of jobs you're about to enqueue; pick `wait_for_result` for "did this id ever finish".
 
 ### Inspect jobs
 

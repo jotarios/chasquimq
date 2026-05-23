@@ -314,6 +314,32 @@ Tests: 19 engine integration cases (live Redis) covering every state plus the id
 
 Doc surfaces synced: this slice, `docs/engine.md` (new "Job maintenance" section), both shim READMEs (symmetric maintenance sections), `site/src/content/docs/reference/{node-api,python-api,rust-api,cli}.md`, a new `guides/clean-and-obliterate.mdx` registered in `site/astro.config.mjs`, and the root `README.md` feature table.
 
+## Event listeners on Worker, Queue, Job (cross-FFI slice)
+
+**BullMQ-shaped event-listener surface shipped, cross-FFI, May 2026.** Closes the parity gap for event-driven consumption. The engine already emits a cross-process events stream covering `waiting / active / completed / failed / retry-scheduled / delayed / dlq / drained`; this slice finishes the high-level shim surfaces on top so application code mirrors BullMQ exactly. **Zero engine changes.**
+
+Engine: no diff. The events stream wire format and emit sites were already in place from the post-Phase-4 polish (slice 5 of name-on-wire and the events-emission work in `chasquimq/src/events.rs`). The eng-review locked the call to *not* extend the wire format to carry the handler's `returnvalue` on `completed` events — keeping subscriber fan-out cheap was the right trade-off (1 MB result on a queue with 50 dashboards = 50 MB per job otherwise). `Job.waitUntilFinished` instead composes the existing `completed` event with `Queue.getJobResult` to surface the value when `storeResults=true`.
+
+Node shim (`chasquimq-node`):
+
+- `QueueEvents` gains per-id channels (`active:<jobId>` / `completed:<jobId>` / `failed:<jobId>`) emitted alongside the existing broadcast channels. Targeted subscribers (notably `Job.waitUntilFinished`) wire onto these without paying the O(N-listeners) broadcast dispatch cost. Same payload shape as the broadcast.
+- `Worker` gains `'drained'` / `'paused'` / `'resumed'` events. `'drained'` lazily spawns an embedded `QueueEvents` subscriber on the first `worker.on('drained', ...)` call (zero-cost when unused, torn down on `close()`). The subscriber uses `blockingTimeout: 1000` for snappy shutdown vs the QueueEvents 10s default. `pause()` / `resume()` emit synchronously after the native trip. `'progress'` / `'stalled'` documented as accepted-but-no-op for BullMQ-API parity (engine doesn't emit those transitions yet).
+- `Job.waitUntilFinished(queueEvents, ttl?)` — BullMQ-parity event-driven wait. Resolves with the stored handler return value via `queue.getJobResult(id)` (requires `storeResults=true`; falls back to `undefined` when off). Rejects with `new Error(failedReason)` on `failed`, throws new `WaitUntilFinishedTimeoutError` on `ttl` elapse. Distinct from existing `waitForResult` which polls — `waitUntilFinished` is event-driven and detects completion without `storeResults`. Includes a small retry loop on the `getJobResult` fetch because the engine emits `completed` *before* the per-entry `JOB_OK_SCRIPT` writes the result key (events emit lives off the ack hot path).
+
+Python shim (`chasquimq-py`):
+
+- `QueueEvents` gains a `.on()` / `.off()` / `.once()` listener API alongside the existing async-iterator. Sync and async callbacks both supported; async callbacks are scheduled on the running loop, sync callback exceptions are logged and swallowed so a buggy listener cannot crash the subscriber. Per-id channels emit symmetric to Node. New `await wait_until_ready()` so callers can deterministically gate on subscriber-is-listening.
+- `Worker` gains the same `.on()` / `.off()` / `.once()` listener API. Events: `ready`, `active`, `completed`, `failed`, `error`, `closing`, `closed`, `drained`, `paused`, `resumed`. Same lazy-drained-subscriber pattern as Node. `progress`/`stalled` accepted for parity.
+- `Job.wait_until_finished(queue_events, *, timeout=None)` — mirrors Node. Returns the stored value or `None`, raises `RuntimeError(failedReason)` on failed, raises new `WaitUntilFinishedTimeoutError` (subclass of `TimeoutError`) on deadline. Same brief retry loop on `get_job_result` to handle the events-emit-before-result-write race.
+
+Design call locked: BullMQ's `Job.waitUntilFinished` exposes the return value because BullMQ JSON-encodes the value onto the events stream itself. Re-implementing that on ChasquiMQ would either (a) JSON-encode (regression on the msgpack wire-format invariant) or (b) msgpack-encode and force every subscriber to depend on the msgpack crate. Composing event + `getJobResult` keeps the events stream small, keeps subscribers msgpack-free, and works without the result backend for "just detect completion" cases. Documented as a deliberate cross-shim contract.
+
+Tests: 9 vitest cases (Node, `__test__/event-listeners.test.ts`) + 11 pytest cases (Python, `tests/test_event_listeners.py`) covering every new listener, both shims of the per-id channels, sync + async callback dispatch (Python), `waitUntilFinished` happy path / no-store-results fallback / failure / timeout, and the zero-cost "no drained listener attached" path. Full suites green: **194 Node** (185 before + 9 new) + **160 Python** (149 before + 11 new), no engine regressions.
+
+Bench (same-host, no engine changes — empty `git diff main -- chasquimq/src` so the host-load gate applies): TBD by the orchestrator run; the engine ceiling is unchanged because the slice adds zero round trips and zero allocations on the producer / consumer / promoter / scheduler / events-emit hot paths.
+
+Doc surfaces synced: this slice, both shim READMEs (symmetric "Subscribing to events" + "Awaiting a single job's completion" sections), `site/src/content/docs/reference/{node-api,python-api}.md` (Worker events table extended; new `waitUntilFinished` / `wait_until_finished` sections; QueueEvents per-id channels documented; `WaitUntilFinishedTimeoutError` in the errors section), a new `concepts/events-and-listeners.md` registered in `site/astro.config.mjs` (+ a link in `concepts/index.md`), and the root `README.md` feature table.
+
 ## Deferred follow-ups for 1.x
 
 - **Opt-in result-write bench scenario.** The PR #75 bench guard locked in the no-overhead-when-off claim (`store_results=false` regresses 0%). The opt-in path (`store_results=true` under sustained load) is not yet measured.
