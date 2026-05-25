@@ -566,6 +566,9 @@ export class Queue<
     if (info.progress !== undefined && info.progress !== null) {
       job.progress = info.progress;
     }
+    if (info.stalledCount !== undefined && info.stalledCount !== null) {
+      job.stalledCount = info.stalledCount;
+    }
     return job;
   }
 

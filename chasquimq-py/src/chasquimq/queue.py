@@ -749,6 +749,8 @@ class Queue:
                 data = raw_payload
         progress_raw = info.get("progress")
         progress = int(progress_raw) if progress_raw is not None else None
+        stalled_raw = info.get("stalled_count")
+        stalled = int(stalled_raw) if stalled_raw is not None else None
         return Job(
             id=info["id"],
             name=info.get("name") or "",
@@ -757,6 +759,7 @@ class Queue:
             created_at_ms=int(info.get("created_at_ms", 0)),
             _queue=self,
             progress=progress,
+            stalled_count=stalled,
         )
 
     async def close(self) -> None:

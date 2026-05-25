@@ -201,5 +201,6 @@ fn job_info_to_dict<'py>(py: Python<'py>, info: &EngineJobInfo) -> PyResult<Boun
     d.set_item("failure_detail", info.failure_detail.clone())?;
     d.set_item("decode_failed", info.decode_failed)?;
     d.set_item("progress", info.progress.map(|n| n as u32))?;
+    d.set_item("stalled_count", info.stalled_count)?;
     Ok(d)
 }

@@ -68,6 +68,14 @@ pub struct JobInfo {
     /// decoded as a `u8`. Only populated by `getJob`; `getJobs` leaves
     /// it `undefined` to keep paginated listings off the per-id GET tax.
     pub progress: Option<u32>,
+    /// Number of times the stalled-job detector has observed this entry
+    /// idle past `idle_threshold_ms` without being acked. `undefined`
+    /// when the job is not in the `Active` state (the counter only
+    /// exists while the entry sits in the consumer group's PEL) or when
+    /// it has been DEL'd by a successful ack / DLQ replay. Only
+    /// populated by `getJob` on Active jobs; `getJobs` leaves it
+    /// `undefined` to keep paginated listings off the per-id GET tax.
+    pub stalled_count: Option<u32>,
 }
 
 /// Result of [`Introspector::getJobLogs`]: the captured `line` field
@@ -233,6 +241,7 @@ fn engine_info_into_napi(info: chasquimq::JobInfo) -> JobInfo {
         failure_detail: info.failure_detail,
         decode_failed: info.decode_failed,
         progress: info.progress.map(|n| n as u32),
+        stalled_count: info.stalled_count,
     }
 }
 

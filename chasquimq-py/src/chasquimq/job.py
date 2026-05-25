@@ -57,6 +57,18 @@ class Job:
         default=None, repr=False, compare=False, hash=False
     )
 
+    # Number of times the stalled-job detector has observed this entry
+    # idle past ``idle_threshold_ms`` without being acked. ``None`` when
+    # the job is not in the ``"active"`` state (the counter only exists
+    # while the entry sits in the consumer group's PEL) or when it has
+    # been DEL'd by a successful ack / DLQ replay. Only populated on
+    # Jobs synthesized from :meth:`Queue.get_job` for Active jobs; Jobs
+    # dispatched to a Worker handler leave this ``None`` (the live
+    # counter is internal to the engine's stalled detector).
+    stalled_count: Optional[int] = field(
+        default=None, repr=False, compare=False, hash=False
+    )
+
     # Opaque native handle. Set by the :class:`Worker` shim's native
     # handler bridge before the user processor sees this :class:`Job`
     # instance — :meth:`update_progress` and :meth:`log` then forward to
