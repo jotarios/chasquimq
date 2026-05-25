@@ -11,7 +11,7 @@
 
 use super::{
     DlqReason, DlqRouted, JobOutcome, JobOutcomeKind, LockOutcome, MetricsSink, PromoterTick,
-    ReaderBatch, RetryScheduled,
+    ReaderBatch, RetryScheduled, StalledTick,
 };
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -23,6 +23,7 @@ pub struct InMemorySink {
     job_outcomes: Mutex<Vec<JobOutcome>>,
     retry_events: Mutex<Vec<RetryScheduled>>,
     dlq_events: Mutex<Vec<DlqRouted>>,
+    stalled_ticks: Mutex<Vec<StalledTick>>,
     acquired: AtomicU64,
     held: AtomicU64,
     jobs_completed: AtomicU64,
@@ -177,5 +178,35 @@ impl MetricsSink for InMemorySink {
 
     fn dlq_routed(&self, dlq: DlqRouted) {
         self.dlq_events.lock().expect("poisoned").push(dlq);
+    }
+
+    fn stalled_tick(&self, tick: StalledTick) {
+        self.stalled_ticks.lock().expect("poisoned").push(tick);
+    }
+}
+
+impl InMemorySink {
+    // -------- stalled --------
+
+    pub fn stalled_ticks(&self) -> Vec<StalledTick> {
+        self.stalled_ticks.lock().expect("poisoned").clone()
+    }
+
+    pub fn stalled_relocated_total(&self) -> u64 {
+        self.stalled_ticks
+            .lock()
+            .expect("poisoned")
+            .iter()
+            .map(|t| t.relocated)
+            .sum()
+    }
+
+    pub fn stalled_incremented_total(&self) -> u64 {
+        self.stalled_ticks
+            .lock()
+            .expect("poisoned")
+            .iter()
+            .map(|t| t.incremented)
+            .sum()
     }
 }

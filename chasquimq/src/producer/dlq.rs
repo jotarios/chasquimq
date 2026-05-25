@@ -90,8 +90,8 @@ where
         return Ok(0);
     }
 
-    let triples = reset_attempts::<T>(entries)?;
-    if triples.is_empty() {
+    let quads = reset_attempts::<T>(entries)?;
+    if quads.is_empty() {
         return Ok(0);
     }
 
@@ -114,7 +114,7 @@ where
     };
 
     let evalsha_cmd = CustomCommand::new_static("EVALSHA", ClusterHash::FirstKey, false);
-    let args = evalsha_replay_args(&sha, dlq_key, stream_key, max_stream_len, &triples);
+    let args = evalsha_replay_args(&sha, dlq_key, stream_key, max_stream_len, &quads);
     let res: std::result::Result<Value, _> = client.custom(evalsha_cmd, args).await;
     let count_value = match res {
         Ok(v) => v,
@@ -125,7 +125,7 @@ where
                 dlq_key,
                 stream_key,
                 max_stream_len,
-                &triples,
+                &quads,
             );
             client.custom(cmd, args).await.map_err(Error::Redis)?
         }
@@ -133,15 +133,20 @@ where
     };
     match count_value {
         Value::Integer(n) => Ok(n.max(0) as usize),
-        _ => Ok(triples.len()),
+        _ => Ok(quads.len()),
     }
 }
 
-fn reset_attempts<T>(entries: Vec<XrangeEntry>) -> Result<Vec<(String, Bytes, String)>>
+/// Reset Job::attempt on each entry and emit the per-entry quads the
+/// slice-12 [`REPLAY_DLQ_SCRIPT`] expects: `(dlq_id, re-encoded payload,
+/// name, job_id)`. The `job_id` slot lets the script DEL the per-job
+/// stall counter on a successful replay so a previously-stalled job
+/// doesn't inherit its old streak.
+fn reset_attempts<T>(entries: Vec<XrangeEntry>) -> Result<Vec<(String, Bytes, String, String)>>
 where
     T: Serialize + DeserializeOwned,
 {
-    let mut triples: Vec<(String, Bytes, String)> = Vec::with_capacity(entries.len());
+    let mut quads: Vec<(String, Bytes, String, String)> = Vec::with_capacity(entries.len());
     for entry in entries {
         let dlq_id = entry.id.clone();
         let parsed = parse_dlq_entry(entry);
@@ -162,8 +167,18 @@ where
         // replayed job should still respect whatever `JobRetryOverride`
         // the producer attached, not silently revert to queue-wide config.
         job.attempt = 0;
+        // Plumb the envelope's `id` through to the script so the
+        // stall-counter DEL targets the right key. (Falls back to
+        // `parsed.source_id` if for some reason the envelope id is
+        // empty — that's the DLQ entry's `source_id` field, the same
+        // job id under a slightly different decode path.)
+        let job_id = if !job.id.is_empty() {
+            job.id.clone()
+        } else {
+            parsed.source_id.clone()
+        };
         let bytes = Bytes::from(rmp_serde::to_vec(&job)?);
-        triples.push((dlq_id, bytes, parsed.name));
+        quads.push((dlq_id, bytes, parsed.name, job_id));
     }
-    Ok(triples)
+    Ok(quads)
 }

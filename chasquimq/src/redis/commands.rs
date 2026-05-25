@@ -183,32 +183,52 @@ return 1
 /// Replays up to ARGV[1] entries from the DLQ stream (KEYS[1]) back into the
 /// main stream (KEYS[2]). For each entry, the caller has already decoded the
 /// DLQ payload, reset Job::attempt to 0, re-encoded, and read the source
-/// entry's `n` field — the script just does the move atomically.
+/// entry's `n` field + `job_id` — the script just does the move atomically.
 ///
 /// ARGV[1] = max_stream_len (for XADD MAXLEN ~)
-/// ARGV[2..] = triples of (dlq_entry_id, replay_payload_bytes, name)
+/// ARGV[2..] = **quads** of (dlq_entry_id, replay_payload_bytes, name, job_id)
 ///   where `name` is the source DLQ entry's `n` field, or the empty string
 ///   if the source had no `n` (pre-name-on-wire producers, or reader-side
-///   DLQ routes for malformed entries). An empty `name` is omitted from the
-///   re-emitted XADD entirely so the replay shape matches an unnamed
-///   producer's path byte-for-byte.
+///   DLQ routes for malformed entries). `job_id` is the envelope's `Job.id`
+///   so the script can DEL the per-job stall counter (slice 12) — if the
+///   replayed entry was originally stalled, leaving the counter in place
+///   would let a fresh stall streak inherit the old count. Empty `job_id`
+///   collapses to "no counter to DEL" (reader-side DLQ routes for entries
+///   whose envelope never decoded).
+///
+/// **Wire-format note (slice 12 ARGV shape change)**: pre-slice-12, this
+/// script took triples of `(dlq_id, payload, name)`. Slice 12 widened to
+/// quads to carry `job_id`. The Lua and the matching Rust argument builders
+/// must roll together — there is no rolling-deploy skew window. Same
+/// contract as every other engine script (the script body and its caller
+/// are versioned as one unit, not independently).
 ///
 /// **Concurrent-replay safety**: XDEL is checked first; XADD only happens if
 /// XDEL returned 1 (the entry actually existed and was removed). If a second
 /// concurrent replay reaches the same dlq_id, its XDEL returns 0 and that
-/// triple is skipped — no duplicate XADD to the main stream. The atomic
+/// quad is skipped — no duplicate XADD to the main stream. The atomic
 /// ordering (XDEL gate, then XADD inside the same script invocation) is what
 /// makes concurrent replays correct without an external lock.
+///
+/// **Cluster hash-tag note**: the stall counter key shares the queue's
+/// `{chasqui:<queue>}` hash tag with the stream/dlq keys, so the per-quad
+/// DEL stays on the same Cluster slot as the XDEL + XADD pair.
 pub(crate) const REPLAY_DLQ_SCRIPT: &str = r#"
 local dlq = KEYS[1]
 local stream = KEYS[2]
 local max_stream_len = ARGV[1]
 local replayed = 0
+-- Extract the {chasqui:<queue>} hash tag from KEYS[1] so we can
+-- synthesize the per-job stall-counter key for the DEL without an
+-- extra ARGV slot per quad.
+local tag_start, tag_end = string.find(dlq, '{[^}]+}')
+local tag = tag_start and string.sub(dlq, tag_start, tag_end) or ''
 local i = 2
 while i <= #ARGV do
   local dlq_id = ARGV[i]
   local payload = ARGV[i + 1]
   local name = ARGV[i + 2]
+  local job_id = ARGV[i + 3]
   local deleted = redis.call('XDEL', dlq, dlq_id)
   if deleted == 1 then
     if name ~= nil and name ~= '' then
@@ -216,9 +236,18 @@ while i <= #ARGV do
     else
       redis.call('XADD', stream, 'MAXLEN', '~', max_stream_len, '*', 'd', payload)
     end
+    -- Best-effort DEL of the slice-12 stall counter. A replayed
+    -- entry that was originally stalled would otherwise inherit the
+    -- previous streak (TTL is sliding on INCR; an old counter under
+    -- TTL would let the new dispatch hit threshold prematurely).
+    -- Empty job_id (reader-side DLQ routes with undecodable
+    -- envelopes) and missing-key DEL both no-op.
+    if tag ~= '' and job_id ~= nil and job_id ~= '' then
+      redis.call('DEL', tag .. ':stalls:' .. job_id)
+    end
     replayed = replayed + 1
   end
-  i = i + 3
+  i = i + 4
 end
 return replayed
 "#;
@@ -244,10 +273,19 @@ return replayed
 /// consistent with the documented `Producer::get_result` contract that
 /// `None` collapses "expired" and "never written."
 ///
-/// KEYS[1] = stream_key, KEYS[2] = result_key
+/// KEYS[1] = stream_key, KEYS[2] = result_key, KEYS[3] = stall_counter_key
 /// ARGV[1] = group, ARGV[2] = entry_id, ARGV[3] = result_bytes, ARGV[4] = ttl_secs
 ///
 /// Returns the XACKDEL count (1 if the entry was acked, 0 otherwise).
+///
+/// **Slice 12 (stall-counter cleanup)**: KEYS[3] is the per-job stall
+/// counter key. On a successful ack (`first == 1`) the script DELs it
+/// unconditionally — a one-off stall followed by success should start
+/// fresh counter on the next stall, not inherit the previous streak
+/// under the sliding TTL. `redis.pcall` swallows OOM/maxmemory
+/// rejections so the ack still commits. Non-existent counters DEL to
+/// `0` and don't surface as errors — the common path (job never
+/// stalled) costs one cheap DEL of a missing key.
 pub(crate) const JOB_OK_SCRIPT: &str = r#"#!lua flags=allow-oom
 local result = redis.call('XACKDEL', KEYS[1], ARGV[1], 'IDS', 1, ARGV[2])
 local first
@@ -265,8 +303,13 @@ end
 -- ack commits and the entry doesn't stay pending. The result is lost,
 -- which matches the documented `None == expired-or-never-written`
 -- contract on `Producer::get_result`.
-if first == 1 and #ARGV[3] > 0 then
-  redis.pcall('SET', KEYS[2], ARGV[3], 'EX', tonumber(ARGV[4]))
+if first == 1 then
+  if #ARGV[3] > 0 then
+    redis.pcall('SET', KEYS[2], ARGV[3], 'EX', tonumber(ARGV[4]))
+  end
+  -- Slice 12: clear the per-job stall counter on the ack-success
+  -- path so a one-off stall doesn't leave a stale streak under TTL.
+  redis.pcall('DEL', KEYS[3])
 end
 return first
 "#;
@@ -528,6 +571,101 @@ end
 return {fired_now, removed}
 "#;
 
+/// Slice 12 — stalled-job detector tick.
+///
+/// One round trip that, for a batch of pending-and-idle entries the
+/// Rust caller already pre-decoded via XPENDING + pipelined XRANGE,
+/// atomically:
+///
+/// 1. INCRs each entry's per-job stall counter
+///    (`{chasqui:<queue>}:stalls:<job_id>`).
+/// 2. EXPIREs the counter at `counter_ttl_secs` (sliding TTL — a job
+///    that genuinely keeps stalling doesn't have its counter evicted
+///    between ticks).
+/// 3. If `n < max_stalled_attempts`: records the entry's INCR so the
+///    Rust caller can emit `e=stalled` (best-effort).
+/// 4. Else: tries to XACKDEL the entry from the consumer group's PEL.
+///    The XACKDEL is the gate — if it returns 1, the entry is now ours
+///    to relocate to the DLQ; the Rust caller fetches the payload and
+///    sends onto `dlq_tx`. If it returns 0/-1, a concurrent
+///    CLAIM/replay/manual-ack already removed the entry; we DEL the
+///    counter (it's stale) and the threshold-hit slot stays empty so
+///    no Rust-side relocate fires.
+///
+/// **Why the script doesn't XADD into the DLQ itself**: the DLQ write
+/// reuses the existing `run_relocator` pipeline so the IDMP-XADD wire
+/// shape, the `e=dlq` emit, the dlq_inflight backpressure budget, and
+/// the per-element retry are all reused. One canonical write path
+/// instead of two.
+///
+/// **Cluster correctness**: the script extracts the `{chasqui:<queue>}`
+/// hash tag from `KEYS[1]` (the stream key) and synthesizes every
+/// stall counter key from that tag. Every key the script touches
+/// shares the same hash tag, so the whole Lua call routes to one
+/// slot under Redis Cluster.
+///
+/// **Reply shape (must match `chasquimq::stalled::parse_stalled_reply`):**
+/// ```text
+/// {
+///   scanned_count,                              -- ARGV[4] (echo)
+///   [{arg_index, n}, ...],                      -- incremented (n < threshold)
+///   [{arg_index, n}, ...],                      -- threshold_hits (gate held)
+/// }
+/// ```
+/// `arg_index` is the 0-based index into the `(entry_id, job_id)` pair
+/// array the caller sent in; Rust correlates back to the full
+/// `(entry_id, job_id, name, payload)` triple it has.
+///
+/// KEYS[1] = stream_key
+/// ARGV[1] = group
+/// ARGV[2] = max_stalled_attempts (counter ceiling)
+/// ARGV[3] = counter_ttl_secs (sliding EXPIRE)
+/// ARGV[4] = entry_count (N)
+/// ARGV[5..4+2N] = interleaved pairs of (entry_id, job_id)
+pub(crate) const STALLED_SCAN_SCRIPT: &str = r#"
+local tag_start, tag_end = string.find(KEYS[1], '{[^}]+}')
+if not tag_start then
+  return redis.error_reply('stream_key missing {chasqui:<queue>} hash tag')
+end
+local tag = string.sub(KEYS[1], tag_start, tag_end)
+local group = ARGV[1]
+local max_attempts = tonumber(ARGV[2])
+local ttl_secs = tonumber(ARGV[3])
+local n_entries = tonumber(ARGV[4])
+
+local incremented = {}
+local threshold_hits = {}
+local i = 0
+while i < n_entries do
+  local entry_id = ARGV[5 + i * 2]
+  local job_id = ARGV[6 + i * 2]
+  local stall_key = tag .. ':stalls:' .. job_id
+  local n = redis.call('INCR', stall_key)
+  redis.call('EXPIRE', stall_key, ttl_secs)
+
+  if n < max_attempts then
+    incremented[#incremented + 1] = {i, n}
+  else
+    -- Threshold hit: try to gate the entry out of the PEL. XACKDEL
+    -- returns 1 (acked + removed), -1 (id not found), or 0 (not in
+    -- group). Only `1` means we own this delivery and the DLQ
+    -- relocate should fire; anything else is a "gate lost" and we
+    -- DEL the counter (it's stale) and skip the threshold-hit slot.
+    local ackdel = redis.call('XACKDEL', KEYS[1], group, 'IDS', 1, entry_id)
+    local first
+    if type(ackdel) == 'table' then first = tonumber(ackdel[1])
+    else first = tonumber(ackdel) end
+    redis.call('DEL', stall_key)
+    if first == 1 then
+      threshold_hits[#threshold_hits + 1] = {i, n}
+    end
+  end
+  i = i + 1
+end
+
+return {n_entries, incremented, threshold_hits}
+"#;
+
 pub(crate) const ACQUIRE_LOCK_SCRIPT: &str = r#"
 local cur = redis.call('GET', KEYS[1])
 if cur == false then
@@ -786,44 +924,53 @@ pub(crate) fn xrange_args(stream_key: &str, limit: usize) -> Vec<Value> {
     ]
 }
 
+/// EVALSHA argument vector for [`REPLAY_DLQ_SCRIPT`]. Slice 12 widened
+/// the per-entry tuple from triples `(dlq_id, payload, name)` to **quads**
+/// `(dlq_id, payload, name, job_id)` so the script can DEL the per-job
+/// stall counter (`{chasqui:<queue>}:stalls:<job_id>`). The script and
+/// this builder roll together — no rolling-deploy skew.
 pub(crate) fn evalsha_replay_args(
     sha: &str,
     dlq_key: &str,
     stream_key: &str,
     max_stream_len: u64,
-    triples: &[(String, Bytes, String)],
+    quads: &[(String, Bytes, String, String)],
 ) -> Vec<Value> {
-    let mut args: Vec<Value> = Vec::with_capacity(5 + triples.len() * 3);
+    let mut args: Vec<Value> = Vec::with_capacity(5 + quads.len() * 4);
     args.push(Value::from(sha));
     args.push(Value::from(2_i64));
     args.push(Value::from(dlq_key));
     args.push(Value::from(stream_key));
     args.push(Value::from(max_stream_len as i64));
-    for (id, bytes, name) in triples {
+    for (id, bytes, name, job_id) in quads {
         args.push(Value::from(id.as_str()));
         args.push(Value::Bytes(bytes.clone()));
         args.push(Value::from(name.as_str()));
+        args.push(Value::from(job_id.as_str()));
     }
     args
 }
 
+/// EVAL fallback for [`REPLAY_DLQ_SCRIPT`]. See [`evalsha_replay_args`]
+/// for the slice-12 ARGV-shape change.
 pub(crate) fn eval_replay_args(
     script: &str,
     dlq_key: &str,
     stream_key: &str,
     max_stream_len: u64,
-    triples: &[(String, Bytes, String)],
+    quads: &[(String, Bytes, String, String)],
 ) -> Vec<Value> {
-    let mut args: Vec<Value> = Vec::with_capacity(5 + triples.len() * 3);
+    let mut args: Vec<Value> = Vec::with_capacity(5 + quads.len() * 4);
     args.push(Value::from(script));
     args.push(Value::from(2_i64));
     args.push(Value::from(dlq_key));
     args.push(Value::from(stream_key));
     args.push(Value::from(max_stream_len as i64));
-    for (id, bytes, name) in triples {
+    for (id, bytes, name, job_id) in quads {
         args.push(Value::from(id.as_str()));
         args.push(Value::Bytes(bytes.clone()));
         args.push(Value::from(name.as_str()));
+        args.push(Value::from(job_id.as_str()));
     }
     args
 }
@@ -1178,10 +1325,15 @@ pub(crate) fn eval_schedule_repeatable_args(
     args
 }
 
+/// EVALSHA argument vector for [`JOB_OK_SCRIPT`]. Slice 12 added
+/// `stall_counter_key` as KEYS[3] so the script can DEL the per-job
+/// stall counter on a successful ack.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn evalsha_job_ok_args(
     sha: &str,
     stream_key: &str,
     result_key: &str,
+    stall_counter_key: &str,
     group: &str,
     entry_id: &str,
     result_bytes: Bytes,
@@ -1189,9 +1341,10 @@ pub(crate) fn evalsha_job_ok_args(
 ) -> Vec<Value> {
     vec![
         Value::from(sha),
-        Value::from(2_i64),
+        Value::from(3_i64),
         Value::from(stream_key),
         Value::from(result_key),
+        Value::from(stall_counter_key),
         Value::from(group),
         Value::from(entry_id),
         Value::Bytes(result_bytes),
@@ -1199,10 +1352,14 @@ pub(crate) fn evalsha_job_ok_args(
     ]
 }
 
+/// EVAL fallback for [`JOB_OK_SCRIPT`]. See [`evalsha_job_ok_args`] for
+/// the slice-12 KEYS layout change.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn eval_job_ok_args(
     script: &str,
     stream_key: &str,
     result_key: &str,
+    stall_counter_key: &str,
     group: &str,
     entry_id: &str,
     result_bytes: Bytes,
@@ -1210,14 +1367,99 @@ pub(crate) fn eval_job_ok_args(
 ) -> Vec<Value> {
     vec![
         Value::from(script),
-        Value::from(2_i64),
+        Value::from(3_i64),
         Value::from(stream_key),
         Value::from(result_key),
+        Value::from(stall_counter_key),
         Value::from(group),
         Value::from(entry_id),
         Value::Bytes(result_bytes),
         Value::from(ttl_secs as i64),
     ]
+}
+
+/// `XPENDING <stream> <group> IDLE <idle_ms> - + <count>` extended-form.
+/// Used by the stalled-detector to find PEL entries that have sat idle
+/// past the detector's threshold. `NOGROUP` (fresh queue, no consumer
+/// group yet) surfaces as a `fred::error::Error` the caller treats as
+/// "empty scan, sleep tick" — same posture as `DRAIN_STREAM_SCRIPT`'s
+/// `redis.pcall(XPENDING)` branch.
+pub(crate) fn xpending_idle_args(
+    stream_key: &str,
+    group: &str,
+    idle_ms: u64,
+    count: u64,
+) -> Vec<Value> {
+    vec![
+        Value::from(stream_key),
+        Value::from(group),
+        Value::from("IDLE"),
+        Value::from(idle_ms as i64),
+        Value::from("-"),
+        Value::from("+"),
+        Value::from(count as i64),
+    ]
+}
+
+/// `XRANGE <stream> <id> <id>` — single-entry fetch by stream entry id.
+/// Used by the stalled-detector for the per-entry envelope decode pass
+/// (pipelined across the batch).
+pub(crate) fn xrange_id_args(stream_key: &str, entry_id: &str) -> Vec<Value> {
+    vec![
+        Value::from(stream_key),
+        Value::from(entry_id),
+        Value::from(entry_id),
+    ]
+}
+
+/// EVALSHA argument vector for [`STALLED_SCAN_SCRIPT`]. `pairs` are the
+/// `(entry_id, job_id)` tuples the Rust caller already pre-decoded from
+/// the XPENDING + pipelined XRANGE round.
+pub(crate) fn evalsha_stalled_scan_args(
+    sha: &str,
+    stream_key: &str,
+    group: &str,
+    max_stalled_attempts: u32,
+    counter_ttl_secs: u64,
+    pairs: &[(String, String)],
+) -> Vec<Value> {
+    let mut args: Vec<Value> = Vec::with_capacity(6 + pairs.len() * 2);
+    args.push(Value::from(sha));
+    args.push(Value::from(1_i64));
+    args.push(Value::from(stream_key));
+    args.push(Value::from(group));
+    args.push(Value::from(max_stalled_attempts as i64));
+    args.push(Value::from(counter_ttl_secs as i64));
+    args.push(Value::from(pairs.len() as i64));
+    for (entry_id, job_id) in pairs {
+        args.push(Value::from(entry_id.as_str()));
+        args.push(Value::from(job_id.as_str()));
+    }
+    args
+}
+
+/// EVAL fallback for [`STALLED_SCAN_SCRIPT`].
+pub(crate) fn eval_stalled_scan_args(
+    script: &str,
+    stream_key: &str,
+    group: &str,
+    max_stalled_attempts: u32,
+    counter_ttl_secs: u64,
+    pairs: &[(String, String)],
+) -> Vec<Value> {
+    let mut args: Vec<Value> = Vec::with_capacity(6 + pairs.len() * 2);
+    args.push(Value::from(script));
+    args.push(Value::from(1_i64));
+    args.push(Value::from(stream_key));
+    args.push(Value::from(group));
+    args.push(Value::from(max_stalled_attempts as i64));
+    args.push(Value::from(counter_ttl_secs as i64));
+    args.push(Value::from(pairs.len() as i64));
+    for (entry_id, job_id) in pairs {
+        args.push(Value::from(entry_id.as_str()));
+        args.push(Value::from(job_id.as_str()));
+    }
+    args
 }
 
 pub(crate) fn evalsha_acquire_lock_args(

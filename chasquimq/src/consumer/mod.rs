@@ -1,4 +1,4 @@
-mod dlq;
+pub(crate) mod dlq;
 mod pause;
 mod reader;
 mod retry;
@@ -9,7 +9,7 @@ pub use pause::PauseControl;
 use crate::ack::{
     AckFlusherConfig, JobOk, OkResultWriterConfig, run_ack_flusher, run_ok_result_writer,
 };
-use crate::config::{ConsumerConfig, PromoterConfig, SchedulerConfig};
+use crate::config::{ConsumerConfig, PromoterConfig, SchedulerConfig, StalledDetectorConfig};
 use crate::error::{HandlerError, Result};
 use crate::events::EventsWriter;
 use crate::job::Job;
@@ -19,6 +19,7 @@ use crate::redis::group::ensure_group;
 use crate::redis::keys::{delayed_key, dlq_key, paused_key, stream_key};
 use crate::redis::parse::StreamEntryId;
 use crate::scheduler::Scheduler;
+use crate::stalled::StalledDetector;
 use bytes::Bytes;
 use dlq::{DlqRelocatorConfig, run_relocator};
 use reader::{ReadState, reader_loop};
@@ -203,6 +204,14 @@ where
 
         let promoter_handle = self.spawn_promoter(shutdown.clone(), events.clone());
         let scheduler_handle = self.spawn_scheduler::<T>(shutdown.clone());
+        // The detector holds its own clone of `dlq_tx` so threshold-hit
+        // entries flow through the consumer's existing `run_relocator`
+        // (sharing the `dlq_inflight` budget and IDMP producer_id). The
+        // clone is dropped explicitly after the detector's join handle
+        // resolves; otherwise the relocator could close while the
+        // detector still had threshold-hits queued.
+        let stalled_handle =
+            self.spawn_stalled_detector(shutdown.clone(), events.clone(), dlq_tx.clone());
 
         // Shared per-handler progress + log Pool. Sized
         // `(concurrency / 8).max(2).min(8)` so a small worker pool gets a
@@ -277,6 +286,24 @@ where
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "scheduler join error");
+                }
+            }
+        }
+
+        // Same posture as the scheduler: a detector that erred out is a
+        // monitoring problem, not a reason to take the consumer down.
+        // Awaited BEFORE the workers / ack flusher / relocators drain so
+        // any in-flight threshold-hit `dlq_tx.send` lands on the still-
+        // open channel; the detector's own `dlq_tx` clone is dropped at
+        // join time so the relocator can close cleanly.
+        if let Some(h) = stalled_handle {
+            match h.await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    tracing::error!(error = %e, "embedded stalled detector stopped with error");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "stalled detector join error");
                 }
             }
         }
@@ -361,5 +388,36 @@ where
         };
         let scheduler = Scheduler::<U>::new(self.redis_url.clone(), scheduler_cfg);
         Some(tokio::spawn(scheduler.run(shutdown)))
+    }
+
+    fn spawn_stalled_detector(
+        &self,
+        shutdown: CancellationToken,
+        events: Arc<crate::events::EventsWriter>,
+        dlq_tx: tokio::sync::mpsc::Sender<crate::consumer::dlq::DlqRelocate>,
+    ) -> Option<tokio::task::JoinHandle<Result<()>>> {
+        if !self.cfg.stalled_detector_enabled {
+            return None;
+        }
+        // Forward the parent's queue_name + group + metrics + connection.
+        // CRITICAL: override `tick_interval_ms` and `idle_threshold_ms`
+        // from `claim_min_idle_ms` so the per-crash counting invariant
+        // (`tick == idle == claim_min_idle`) is automatic — the embedded
+        // path must never depend on the operator mirroring three fields.
+        let claim_idle = self.cfg.claim_min_idle_ms;
+        let detector_cfg = StalledDetectorConfig {
+            queue_name: self.cfg.queue_name.clone(),
+            tick_interval_ms: claim_idle,
+            idle_threshold_ms: claim_idle,
+            metrics: self.cfg.metrics.clone(),
+            connection: self.cfg.connection.clone(),
+            ..self.cfg.stalled_detector.clone()
+        };
+        let detector =
+            StalledDetector::new(self.redis_url.clone(), detector_cfg, self.cfg.group.clone())
+                .with_shared_events(events)
+                .with_shared_dlq_tx(dlq_tx);
+        tracing::debug!(queue = %self.cfg.queue_name, "consumer spawning embedded stalled detector");
+        Some(tokio::spawn(detector.run(shutdown)))
     }
 }

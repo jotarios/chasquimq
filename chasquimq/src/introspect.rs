@@ -34,7 +34,7 @@ use crate::error::{Error, Result};
 use crate::payload::peek_envelope;
 use crate::redis::keys::{
     delayed_index_key, delayed_key, dlq_key, log_key, paused_key, progress_key, result_key,
-    stream_key,
+    stall_counter_key, stream_key,
 };
 use crate::redis::parse::{XrangeEntry, parse_xrange_response};
 use crate::{ConnectionTuning, config::ConsumerConfig};
@@ -155,6 +155,18 @@ pub struct JobInfo {
     /// pipelined alongside the existing `get_job` lookups so the field
     /// adds no extra round trip.
     pub progress: Option<u8>,
+    /// Current stalled-detector count for this job, when the entry is
+    /// in the [`JobState::Active`] state (PEL-resident). **Probed only
+    /// in the Active state** — the counter key is `DEL`'d on successful
+    /// ack (`JOB_OK_SCRIPT`) and on DLQ replay (`REPLAY_DLQ_SCRIPT`),
+    /// both terminal, so it's never live outside the active window;
+    /// probing in other states would add a sequential round trip that
+    /// always returns nil. `None` for any non-active lookup (Waiting /
+    /// Delayed / Completed / Failed / Unknown), and `None` for active
+    /// jobs that the stalled detector hasn't observed yet (the common
+    /// path on a healthy queue — most jobs complete well within
+    /// `idle_threshold_ms` and never get a counter written).
+    pub stalled_count: Option<u32>,
 }
 
 /// One page of [`Introspector::get_jobs`] results. `next_cursor` is
@@ -303,9 +315,15 @@ impl Introspector {
     /// the matched probe, so `JobInfo::progress` is populated without
     /// adding a sequential RTT on the admin path.
     pub async fn get_job(&self, id: &str) -> Result<Option<JobInfo>> {
-        // 1. Active (PEL hit).
+        // 1. Active (PEL hit). The stalled_count probe lives on this
+        //    branch only — the per-job counter is `DEL`'d on successful
+        //    ack and on DLQ replay (both terminal), so it is never live
+        //    outside the active window; probing on Waiting / Delayed /
+        //    Completed / Failed / Unknown would always return nil and
+        //    burn one extra round trip on every admin lookup.
         if let Some(found) = self.lookup_in_pel(id).await? {
-            return Ok(Some(self.with_progress(found, id).await?));
+            let with_progress = self.with_progress(found, id).await?;
+            return Ok(Some(self.with_stalled_count(with_progress, id).await?));
         }
         // 2. Delayed.
         if self.delayed_member(id).await?.is_some() {
@@ -339,6 +357,7 @@ impl Introspector {
                 failure_detail: None,
                 decode_failed: false,
                 progress: None,
+                stalled_count: None,
             };
             return Ok(Some(self.with_progress(info, id).await?));
         }
@@ -351,6 +370,28 @@ impl Introspector {
     async fn with_progress(&self, mut info: JobInfo, id: &str) -> Result<JobInfo> {
         info.progress = self.progress_for(id).await?;
         Ok(info)
+    }
+
+    /// One GET on the per-job stall counter key, used by `get_job` on
+    /// the Active state branch only. See [`JobInfo::stalled_count`] for
+    /// the active-only rationale. `Ok(None)` for missing keys or
+    /// non-decimal values; the introspector intentionally swallows
+    /// shape mismatches so a forward-compat extension can't break
+    /// admin lookups.
+    async fn with_stalled_count(&self, mut info: JobInfo, id: &str) -> Result<JobInfo> {
+        info.stalled_count = self.stalled_count_for(id).await?;
+        Ok(info)
+    }
+
+    async fn stalled_count_for(&self, id: &str) -> Result<Option<u32>> {
+        let key = stall_counter_key(self.queue_name.as_ref(), id);
+        let client = self.pool.next_connected();
+        let cmd = CustomCommand::new_static("GET", ClusterHash::FirstKey, false);
+        let v: Value = client
+            .custom(cmd, vec![Value::from(key)])
+            .await
+            .map_err(Error::Redis)?;
+        Ok(value_as_stalled_count(&v))
     }
 
     /// One GET on the per-job progress key. `Ok(None)` for missing keys
@@ -643,6 +684,7 @@ impl Introspector {
             failure_detail: None,
             decode_failed: false,
             progress: None,
+            stalled_count: None,
         }))
     }
 
@@ -794,6 +836,7 @@ impl Introspector {
                 failure_detail: None,
                 decode_failed: false,
                 progress: None,
+                stalled_count: None,
             });
             match last_score {
                 Some(prev) if prev == score => {
@@ -875,6 +918,7 @@ impl Introspector {
                     failure_detail: None,
                     decode_failed: false,
                     progress: None,
+                    stalled_count: None,
                 });
             }
         }
@@ -1006,6 +1050,22 @@ fn value_as_progress(v: &Value) -> Option<u8> {
     s.trim().parse::<u8>().ok().map(|n| n.min(100))
 }
 
+/// Decode the per-job stall-counter `GET` reply into the introspector's
+/// `Option<u32>` surface. Redis returns the value as a string for keys
+/// written by `INCR` (which serializes the counter as ASCII), as bytes
+/// over RESP3, or as `Nil` for missing keys. Any non-decimal value
+/// collapses to `None` — matches the defensive shape of
+/// `value_as_progress`.
+fn value_as_stalled_count(v: &Value) -> Option<u32> {
+    let s = match v {
+        Value::String(s) => s.to_string(),
+        Value::Bytes(b) => std::str::from_utf8(b).ok()?.to_string(),
+        Value::Integer(n) => n.to_string(),
+        _ => return None,
+    };
+    s.trim().parse::<u32>().ok()
+}
+
 async fn xrange_window(
     pool: &Pool,
     key: &str,
@@ -1085,6 +1145,7 @@ fn entry_to_info_if_match(entry: &XrangeEntry, id: &str, state: JobState) -> Opt
         failure_detail: None,
         decode_failed: false,
         progress: None,
+        stalled_count: None,
     })
 }
 
@@ -1105,6 +1166,7 @@ fn stream_entry_to_info_any(entry: &XrangeEntry, state: JobState) -> Option<JobI
             failure_detail: None,
             decode_failed: false,
             progress: None,
+            stalled_count: None,
         }),
         None => {
             tracing::warn!(
@@ -1124,6 +1186,7 @@ fn stream_entry_to_info_any(entry: &XrangeEntry, state: JobState) -> Option<JobI
                 failure_detail: None,
                 decode_failed: true,
                 progress: None,
+                stalled_count: None,
             })
         }
     }
@@ -1164,6 +1227,7 @@ fn dlq_parsed_to_info(parsed: DlqFields, entry: &XrangeEntry) -> JobInfo {
         failure_detail: parsed.detail,
         decode_failed,
         progress: None,
+        stalled_count: None,
     }
 }
 
