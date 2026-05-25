@@ -455,6 +455,127 @@ jobs:
             docker exec "$REDIS_CID" redis-cli --scan --pattern "{chasqui:${QUEUE}}:result:*" || true
           } | tee /tmp/phase8-redis-state.log
 
+      # ----------------------------------------------------------------
+      # Phases 9–10: progress + log contract across both shim directions.
+      #
+      # For each direction:
+      #   1. Producer enqueues COUNT jobs, capturing the engine-minted ids
+      #      to JOB_IDS_FILE.
+      #   2. Worker (other shim) drains with `EMIT_PROGRESS=1` so the
+      #      handler calls `update_progress(75)` + appends two log lines
+      #      before returning. `STORE_RESULT=1` keeps the completed jobs
+      #      discoverable by the introspector's result-key probe.
+      #   3. Verifier (producer's shim) reads each id back via
+      #      `Queue.getJob(id).progress` + `Queue.getJobLogs(id)` and
+      #      asserts deep-equality with EXPECT_PROGRESS / EXPECT_LOGS.
+      #
+      # Pinning a numeric progress (75) plus a two-line log sequence
+      # exercises the ASCII-decimal `u8` STRING wire format and the
+      # bounded-XRANGE log Stream read path in one round trip.
+      # ----------------------------------------------------------------
+
+      - name: Flush Redis between phases (phase 8 -> phase 9)
+        shell: bash
+        run: |
+          REDIS_CID=$(docker ps -qf 'ancestor=redis:8.6.2' | head -n1)
+          docker exec "$REDIS_CID" redis-cli FLUSHDB
+
+      - name: Phase 9 — Node producer -> Python worker (progress + logs round-trip)
+        id: phase9
+        working-directory: .github/cross-shim-tests
+        env:
+          QUEUE: cross-shim-phase9-${{ github.run_id }}-${{ github.run_attempt }}
+          COUNT: '5'
+          TAG: node
+          JOB_NAME: cross-progress-node-py
+          EXPECT_TAG: node
+          EXPECT_JOB_NAME: cross-progress-node-py
+          MODE: immediate
+          STORE_RESULT: '1'
+          RESULT_VALUE: '1'
+          EMIT_PROGRESS: '1'
+          JOB_IDS_FILE: /tmp/phase9-ids.txt
+          EXPECT_PROGRESS: '75'
+          EXPECT_LOGS: '["step 1","step 2"]'
+          TIMEOUT_SECS: '30'
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx tsx producer.ts 2>&1 | tee /tmp/phase9-producer.log
+          python worker.py 2>&1 | tee /tmp/phase9-worker.log
+          npx tsx verify_progress.ts 2>&1 | tee /tmp/phase9-verify.log
+
+      - name: Dump Redis state on Phase 9 failure
+        if: failure() && steps.phase9.outcome == 'failure'
+        env:
+          QUEUE: cross-shim-phase9-${{ github.run_id }}-${{ github.run_attempt }}
+        shell: bash
+        run: |
+          REDIS_CID=$(docker ps -qf 'ancestor=redis:8.6.2' | head -n1)
+          {
+            echo "=== XINFO STREAM ==="
+            docker exec "$REDIS_CID" redis-cli XINFO STREAM "{chasqui:${QUEUE}}:stream" || true
+            echo "=== XLEN main ==="
+            docker exec "$REDIS_CID" redis-cli XLEN "{chasqui:${QUEUE}}:stream" || true
+            echo "=== KEYS progress ==="
+            docker exec "$REDIS_CID" redis-cli --scan --pattern "{chasqui:${QUEUE}}:progress:*" || true
+            echo "=== KEYS log ==="
+            docker exec "$REDIS_CID" redis-cli --scan --pattern "{chasqui:${QUEUE}}:log:*" || true
+            echo "=== KEYS result ==="
+            docker exec "$REDIS_CID" redis-cli --scan --pattern "{chasqui:${QUEUE}}:result:*" || true
+          } | tee /tmp/phase9-redis-state.log
+
+      - name: Flush Redis between phases (phase 9 -> phase 10)
+        shell: bash
+        run: |
+          REDIS_CID=$(docker ps -qf 'ancestor=redis:8.6.2' | head -n1)
+          docker exec "$REDIS_CID" redis-cli FLUSHDB
+
+      - name: Phase 10 — Python producer -> Node worker (progress + logs round-trip)
+        id: phase10
+        working-directory: .github/cross-shim-tests
+        env:
+          QUEUE: cross-shim-phase10-${{ github.run_id }}-${{ github.run_attempt }}
+          COUNT: '5'
+          TAG: py
+          JOB_NAME: cross-progress-py-node
+          EXPECT_TAG: py
+          EXPECT_JOB_NAME: cross-progress-py-node
+          MODE: immediate
+          STORE_RESULT: '1'
+          RESULT_VALUE: '1'
+          EMIT_PROGRESS: '1'
+          JOB_IDS_FILE: /tmp/phase10-ids.txt
+          EXPECT_PROGRESS: '75'
+          EXPECT_LOGS: '["step 1","step 2"]'
+          TIMEOUT_SECS: '30'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python producer.py 2>&1 | tee /tmp/phase10-producer.log
+          npx tsx worker.ts 2>&1 | tee /tmp/phase10-worker.log
+          python verify_progress.py 2>&1 | tee /tmp/phase10-verify.log
+
+      - name: Dump Redis state on Phase 10 failure
+        if: failure() && steps.phase10.outcome == 'failure'
+        env:
+          QUEUE: cross-shim-phase10-${{ github.run_id }}-${{ github.run_attempt }}
+        shell: bash
+        run: |
+          REDIS_CID=$(docker ps -qf 'ancestor=redis:8.6.2' | head -n1)
+          {
+            echo "=== XINFO STREAM ==="
+            docker exec "$REDIS_CID" redis-cli XINFO STREAM "{chasqui:${QUEUE}}:stream" || true
+            echo "=== XLEN main ==="
+            docker exec "$REDIS_CID" redis-cli XLEN "{chasqui:${QUEUE}}:stream" || true
+            echo "=== KEYS progress ==="
+            docker exec "$REDIS_CID" redis-cli --scan --pattern "{chasqui:${QUEUE}}:progress:*" || true
+            echo "=== KEYS log ==="
+            docker exec "$REDIS_CID" redis-cli --scan --pattern "{chasqui:${QUEUE}}:log:*" || true
+            echo "=== KEYS result ==="
+            docker exec "$REDIS_CID" redis-cli --scan --pattern "{chasqui:${QUEUE}}:result:*" || true
+          } | tee /tmp/phase10-redis-state.log
+
       - name: Upload phase logs
         if: always()
         uses: actions/upload-artifact@v7
@@ -489,4 +610,12 @@ jobs:
             /tmp/phase8-worker.log
             /tmp/phase8-verify.log
             /tmp/phase8-redis-state.log
+            /tmp/phase9-producer.log
+            /tmp/phase9-worker.log
+            /tmp/phase9-verify.log
+            /tmp/phase9-redis-state.log
+            /tmp/phase10-producer.log
+            /tmp/phase10-worker.log
+            /tmp/phase10-verify.log
+            /tmp/phase10-redis-state.log
           if-no-files-found: warn

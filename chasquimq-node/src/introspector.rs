@@ -61,6 +61,21 @@ pub struct JobInfo {
     pub failure_reason: Option<String>,
     pub failure_detail: Option<String>,
     pub decode_failed: bool,
+    /// Latest progress value the handler reported via
+    /// `Job.updateProgress`, clamped to `0..=100`. `undefined` when the
+    /// handler never called `updateProgress`, the progress key has
+    /// already expired (TTL `resultTtlMs`), or the value couldn't be
+    /// decoded as a `u8`. Only populated by `getJob`; `getJobs` leaves
+    /// it `undefined` to keep paginated listings off the per-id GET tax.
+    pub progress: Option<u32>,
+}
+
+/// Result of [`Introspector::getJobLogs`]: the captured `line` field
+/// values plus the current XLEN of the per-job log stream.
+#[napi(object)]
+pub struct JobLogs {
+    pub logs: Vec<String>,
+    pub count: u32,
 }
 
 /// One page of [`Introspector::getJobs`] results.
@@ -141,6 +156,36 @@ impl Introspector {
         Ok(opt.map(engine_info_into_napi))
     }
 
+    /// Read up to `count` lines from the per-job log stream
+    /// (`{chasqui:<queue>}:log:<id>`). `start` / `end` are inclusive
+    /// entry offsets in the requested order; `end = -1` means "to end";
+    /// negative `start` is "this many from the end" (translated via
+    /// XLEN), matching BullMQ's `getLogs` convention. `asc = true`
+    /// returns lines in append order, `false` in reverse.
+    #[napi]
+    pub async fn get_job_logs(
+        &self,
+        id: String,
+        start: Option<i32>,
+        end: Option<i32>,
+        asc: Option<bool>,
+    ) -> napi::Result<JobLogs> {
+        let (lines, count) = self
+            .inner
+            .get_job_logs(
+                &id,
+                start.unwrap_or(0) as i64,
+                end.unwrap_or(-1) as i64,
+                asc.unwrap_or(true),
+            )
+            .await
+            .map_err(map_engine_err)?;
+        Ok(JobLogs {
+            logs: lines,
+            count: count.min(u32::MAX as u64) as u32,
+        })
+    }
+
     /// `state`: one of `"waiting" | "active" | "delayed" | "completed" | "failed"`.
     /// Pagination shape per state — see `chasquimq::Introspector::get_jobs`
     /// doc for the canonical semantics.
@@ -187,6 +232,7 @@ fn engine_info_into_napi(info: chasquimq::JobInfo) -> JobInfo {
         failure_reason: info.failure_reason,
         failure_detail: info.failure_detail,
         decode_failed: info.decode_failed,
+        progress: info.progress.map(|n| n as u32),
     }
 }
 

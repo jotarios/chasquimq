@@ -388,6 +388,33 @@ and the job's creation time for `"delayed"`. `grace_ms` is **ignored**
 for `"completed"` — a stored result has no creation timestamp; rely on
 the result TTL for time-based expiry.
 
+### `await queue.get_job_logs(job_id, *, start=0, end=-1, asc=True)`
+
+```python
+async def get_job_logs(
+    self,
+    job_id: str,
+    *,
+    start: int = 0,
+    end: int = -1,
+    asc: bool = True,
+) -> tuple[list[str], int]
+```
+
+Read up to `end - start + 1` lines from a job's log stream
+(`{chasqui:<queue>}:log:<id>` STREAM, populated by
+[`Job.log`](#await-joblogline) inside a processor). `start` /
+`end` are inclusive entry offsets in the requested order;
+`end = -1` means "to end"; negative `start` is "this many from
+the end" (translated via XLEN), matching BullMQ's
+`Queue.getJobLogs` convention. `asc` defaults to `True`
+(chronological).
+
+Returns `(lines, count)` where `count` is the current XLEN of
+the log stream (**not** `len(lines)`) — lets paginating callers
+know how many entries exist without walking the whole stream.
+Jobs that never called `Job.log` resolve with `([], 0)`.
+
 ### `await queue.obliterate()`
 
 ```python
@@ -455,6 +482,9 @@ class Worker:
         scheduler_tick_ms: int | None = None,
         store_results: bool = False,
         result_ttl_ms: int | None = None,
+        log_max_stream_len: int | None = None,
+        log_max_line_bytes: int | None = None,
+        events_progress_enabled: bool | None = None,
     ) -> None: ...
 ```
 
@@ -479,6 +509,19 @@ on `{chasqui:<queue>}:scheduler:lock`.
 - `scheduler_tick_ms` — scheduler tick interval. **Default engine: `1000`.**
 - `store_results` — persist handler return values to the result key. **Default `False`.**
 - `result_ttl_ms` — TTL for stored results. **Default engine: `3_600_000` (1h).** Rounded up to whole seconds at the FFI boundary.
+- `log_max_stream_len` — `MAXLEN ~` cap on each per-job log
+  stream (`{chasqui:<queue>}:log:<id>`). **Default engine: `1000`.**
+  Must be `>= 16` (`Consumer::run` rejects sub-minimum values —
+  below that, the `MAXLEN ~` rounding can leave the stream
+  effectively empty).
+- `log_max_line_bytes` — per-line byte cap for [`Job.log`](#await-joblogline).
+  Lines exceeding this are truncated on a UTF-8 char boundary
+  with a `[…truncated]` marker appended. **Default engine: `4096`.**
+- `events_progress_enabled` — gates the `e=progress`
+  events-stream entry emitted by [`Job.update_progress`](#await-jobupdate_progressn).
+  The persisted progress key is always written; this only mutes
+  the events fan-out a `QueueEvents` subscriber would observe.
+  **Default engine: `True`.**
 
 ### `await worker.run()`
 
@@ -556,12 +599,12 @@ swallowed so a buggy listener cannot crash the worker.
 | `drained` | `()` | Engine observed a full→empty transition on the main stream. **Cross-process scope.** Lazily wires an embedded `QueueEvents` subscriber on the first `worker.on('drained', ...)` call; torn down on `close()`. |
 | `paused` | `()` | `pause()` was called. Process-local. |
 | `resumed` | `()` | `resume()` was called. Process-local. |
+| `progress` | `(job: Job, progress: int)` | Handler called [`job.update_progress(n)`](#await-jobupdate_progressn). **Cross-process scope.** Same lazy embedded `QueueEvents` subscriber as `drained` (zero-cost when no listener is attached). The worker re-uses the in-flight `Job` instance so handler-side `job.progress` and the callback observe identical state. Disable the events fan-out (and therefore this event) by passing `Worker(events_progress_enabled=False)`. |
 
 Names accepted for parity but currently never fire (engine doesn't
 emit the underlying transition yet — safe to wire up, will start
 firing when the corresponding engine work lands):
 
-- `progress` — `(job: Job, progress)`.
 - `stalled` — `(job_id: str, prev: str)`.
 
 ```python
@@ -588,12 +631,16 @@ class Job:
     data: Any
     attempt: int
     created_at_ms: int
+    progress: int | None = None
 ```
 
 The lightweight value type passed to user handlers and returned
-from `Queue.add`. v1 deliberately does not round-trip through
-Redis for any field on this object — the engine streams jobs and
-does not persist progress, return values, or per-job state.
+from `Queue.add`. The engine streams jobs via `XREADGROUP` /
+`XACK` and does not persist return values by default (opt in
+with `Worker(store_results=True)`). Progress and log lines *are*
+persisted to side-channel keys when the handler calls
+[`update_progress`](#await-jobupdate_progressn) or
+[`log`](#await-joblogline).
 
 ### Properties
 
@@ -603,12 +650,58 @@ does not persist progress, return values, or per-job state.
 - `attempt` — 1-indexed attempt counter on the consumer side; `0` on the producer side.
 - `created_at_ms` — submission time in epoch ms.
 - `attempts_made` — alias of `attempt`, matches BullMQ naming.
+- `progress` — latest value set via [`update_progress`](#await-jobupdate_progressn), or read back by the introspector when this Job was returned by [`Queue.get_job`](#await-queueget_jobjob_id) / [`Queue.get_jobs`](#await-queueget_jobsstatewaiting-offset0-limit100-cursornone). `None` until a progress value has been recorded.
 
 The dataclass is frozen-by-equality on the public fields; an
 optional internal `_queue` backreference is set when the job is
 returned by `Queue.add` so [`wait_for_result`](#await-jobwait_for_resulttimeoutpoll_interval)
 works without an extra connection. It is excluded from `repr` and
 `__eq__` to keep the dataclass shape stable.
+
+### `await job.update_progress(n)`
+
+```python
+async def update_progress(self, n: int) -> None
+```
+
+Persist a `0..=100` progress value for this job under the
+engine's per-job progress key (`{chasqui:<queue>}:progress:<id>`
+STRING, TTL = `result_ttl_secs`), mirror it on the local
+`progress` attribute, and (when
+`Worker(events_progress_enabled=True)`, the default) emit an
+`e=progress` events-stream entry that `QueueEvents` re-fans onto
+the broadcast `'progress'` channel and the per-id
+`'progress:<job_id>'` channel.
+
+Values outside `0..=100` are clamped to `100` at the engine
+boundary (no raise; the first clamp per handle logs a single
+warn-once).
+
+**Read-only Job guard.** Raises `RuntimeError` when called on a
+Job returned by [`Queue.get_job`](#await-queueget_jobjob_id) /
+[`Queue.get_jobs`](#await-queueget_jobsstatewaiting-offset0-limit100-cursornone)
+or constructed from [`Queue.add`](#await-queueaddname-data-delay_ms-delay-attempts-backoff-job_id-repeat-missed_fires) —
+those instances are synthesized from introspector /
+producer-side data and carry no per-handler connection. Only
+Jobs handed to a `Worker` processor have a live backref.
+
+### `await job.log(line)`
+
+```python
+async def log(self, line: str) -> int
+```
+
+Append `line` to the per-job log stream
+(`{chasqui:<queue>}:log:<id>` STREAM) and return the new XLEN.
+The stream is bounded by `Worker(log_max_stream_len=...)`
+(default `1000`) via `MAXLEN ~` and expires alongside the result
+key (TTL = `result_ttl_secs`). Oversize lines
+(`> log_max_line_bytes`, default `4096`) truncate on a UTF-8
+char boundary with a `[…truncated]` marker appended; first
+truncation per handle logs a single warn-once.
+
+Same read-only Job guard as [`update_progress`](#await-jobupdate_progressn).
+Read back via [`Queue.get_job_logs`](#await-queueget_job_logsjob_id-start0-end-1-asctrue).
 
 ### `await job.wait_for_result(*, timeout, poll_interval)`
 
@@ -760,6 +853,7 @@ Event names accepted:
 | `delayed` | `(payload, event_id)` | Producer enqueued with `delay > 0`. |
 | `dlq` | `(payload, event_id)` | DLQ relocator wrote the entry to the DLQ stream. |
 | `retries-exhausted` | `(payload, event_id)` | Synthetic alias of `dlq` (chasquimq-specific). |
+| `progress` | `(payload, event_id)` | Handler called [`Job.update_progress(n)`](#await-jobupdate_progressn). `payload['progress']` is the clamped `0..=100` value the engine persisted. |
 | `drained` | `(event_id,)` | Engine drained (queue-scoped, no `jobId`). |
 
 Per-id channels fire alongside the broadcast channel for events
@@ -772,6 +866,7 @@ Used internally by
 | `active:<job_id>` | `(payload, event_id)` | `active` |
 | `completed:<job_id>` | `(payload, event_id)` | `completed` |
 | `failed:<job_id>` | `(payload, event_id)` | `failed` |
+| `progress:<job_id>` | `(payload, event_id)` | `progress` |
 
 `await wait_until_ready()` blocks until the listener subscriber has
 issued its first `XREAD BLOCK` (i.e. the subscription window is

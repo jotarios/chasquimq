@@ -6,9 +6,11 @@ use crate::error::HandlerError;
 use crate::events::EventsWriter;
 use crate::job::{Job, now_ms};
 use crate::metrics::{self, JobOutcome, JobOutcomeKind, MetricsSink};
+use crate::progress::JobHandle;
 use crate::redis::delayed_member::encode_delayed_member;
 use crate::redis::parse::StreamEntryId;
 use bytes::Bytes;
+use fred::clients::Pool;
 use futures_util::FutureExt;
 use serde::Serialize;
 use std::future::Future;
@@ -44,6 +46,24 @@ pub(crate) struct WorkerWiring {
     /// the worker's match unconditionally takes the existing batched ack
     /// branch.
     pub ok_result_tx: Option<mpsc::Sender<JobOk>>,
+    /// Shared `Pool` used by every per-dispatch [`JobHandle`] for SET
+    /// (progress) and XADD/XLEN (log). Sized `(concurrency / 8).max(2).min(8)`
+    /// at `Consumer::run` so a busy worker pool doesn't open one Redis
+    /// client per concurrent worker.
+    pub progress_log_pool: Pool,
+    /// Queue name copied here as `Arc<str>` so per-dispatch `JobHandle`
+    /// construction is a refcount bump, not a string clone, on the hot
+    /// path.
+    pub queue_name: Arc<str>,
+    /// `MAXLEN ~` cap forwarded to each [`JobHandle::log`] call.
+    pub log_max_stream_len: u64,
+    /// Per-line byte cap forwarded to each [`JobHandle::log`] call.
+    pub log_max_line_bytes: usize,
+    /// Toggle for the per-progress `e=progress` event emission. The SET
+    /// to the progress key always fires; this only gates the events-stream
+    /// XADD so a high-rate handler can opt out of the events flood while
+    /// keeping persisted progress.
+    pub events_progress_enabled: bool,
 }
 
 pub(crate) fn spawn_workers<T, H, Fut>(
@@ -65,7 +85,7 @@ where
         let rx = job_rx.clone();
         let wiring = wiring.clone();
         set.spawn(async move {
-            while let Ok(dispatched) = rx.recv().await {
+            while let Ok(mut dispatched) = rx.recv().await {
                 let entry_id = dispatched.entry_id.clone();
                 let job_id = dispatched.job.id.clone();
                 let job_name = dispatched.job.name.clone();
@@ -75,7 +95,32 @@ where
                 // the JobOutcome event (where it's "the run that just executed"
                 // by the time the event fires) and human-readable log lines.
                 let attempt_index = dispatched.job.attempt.saturating_add(1);
-                let job_for_retry = dispatched.job.clone();
+                // Clone before the handler mutates / consumes `dispatched.job`
+                // (the retry path needs a copy with `handle = None`).
+                let mut job_for_retry = dispatched.job.clone();
+                job_for_retry.handle = None;
+
+                // Wire the per-dispatch progress + log handle onto the job
+                // *before* the user handler sees it. The handle borrows the
+                // shared `progress_log_pool` so the per-call SET / XADD don't
+                // contend with the reader / ack / retry hot paths.
+                let job_name_arc: Option<Arc<str>> = if job_name.is_empty() {
+                    None
+                } else {
+                    Some(Arc::from(job_name.as_str()))
+                };
+                let handle = JobHandle::new(
+                    Arc::from(job_id.as_str()),
+                    wiring.queue_name.clone(),
+                    wiring.progress_log_pool.clone(),
+                    wiring.result_ttl_secs,
+                    wiring.log_max_stream_len,
+                    wiring.log_max_line_bytes,
+                    Some(wiring.events.clone()),
+                    job_name_arc,
+                    wiring.events_progress_enabled,
+                );
+                dispatched.job.handle = Some(Arc::new(handle));
 
                 // Emit `active` *before* the handler runs so subscribers can
                 // build a "currently running" view that's correct even for

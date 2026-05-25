@@ -81,11 +81,20 @@ class Worker:
       ``drained``, not just this one.
     * ``paused``    — ``()``. Fired when :meth:`pause` is called.
     * ``resumed``   — ``()``. Fired when :meth:`resume` is called.
+    * ``progress``  — ``(job: Job, progress: int)``. Fired every time a
+      processor calls ``await job.update_progress(n)``. The engine
+      writes the persisted progress key first, then emits an
+      ``e=progress`` event onto the events stream; the worker
+      subscribes to its own :class:`QueueEvents` (lazily spawned the
+      first time a ``progress`` listener attaches) and re-emits onto
+      this EE so callers see ``(job, n)`` in the same process that ran
+      the handler. Disable the events fan-out (and therefore this
+      event) by passing ``Worker(events_progress_enabled=False)``.
 
     Listener names accepted for parity but currently no-op (engine
-    doesn't emit the underlying transition yet): ``progress``,
-    ``stalled``. These can be wired up without raising; promoted to
-    active events when the corresponding engine work lands.
+    doesn't emit the underlying transition yet): ``stalled``. These
+    can be wired up without raising; promoted to active events when
+    the corresponding engine work lands.
     """
 
     def __init__(
@@ -112,6 +121,9 @@ class Worker:
         result_ttl_ms: Optional[int] = None,
         reconnect_max_attempts: Optional[int] = None,
         credential_provider: Optional[CredentialProvider] = None,
+        log_max_stream_len: Optional[int] = None,
+        log_max_line_bytes: Optional[int] = None,
+        events_progress_enabled: Optional[bool] = None,
     ) -> None:
         self._queue_name = queue_name
         self._handler = handler
@@ -148,6 +160,12 @@ class Worker:
         # ``credential_provider`` gives up instead of looping forever.
         if reconnect_max_attempts is not None:
             consumer_kwargs["reconnect_max_attempts"] = reconnect_max_attempts
+        if log_max_stream_len is not None:
+            consumer_kwargs["log_max_stream_len"] = log_max_stream_len
+        if log_max_line_bytes is not None:
+            consumer_kwargs["log_max_line_bytes"] = log_max_line_bytes
+        if events_progress_enabled is not None:
+            consumer_kwargs["events_progress_enabled"] = events_progress_enabled
 
         if credential_provider is not None:
             # The native consumer captures the running asyncio loop at
@@ -178,12 +196,20 @@ class Worker:
         # buggy listener cannot crash the worker.
         self._listeners: dict[str, list[WorkerListener]] = defaultdict(list)
         # Lazy embedded :class:`QueueEvents` subscriber for the
-        # cross-process ``drained`` event. ``None`` until a ``drained``
-        # listener attaches; torn down in :meth:`close`. Workers that
-        # never subscribe to ``drained`` pay no extra Redis connections.
-        self._drained_events: Optional[QueueEvents] = None
-        self._drained_redis_url = redis_url
-        self._drained_tls = tls
+        # cross-process ``drained`` + ``progress`` events. ``None`` until
+        # a listener for either attaches; torn down in :meth:`close`.
+        # Workers that never subscribe pay no extra Redis connections.
+        self._internal_events: Optional[QueueEvents] = None
+        self._internal_redis_url = redis_url
+        self._internal_tls = tls
+        # In-flight :class:`Job` instances by id, populated for the
+        # duration of each handler invocation so the ``progress``
+        # forwarder can surface the same :class:`Job` reference the
+        # handler is holding (so ``worker.on('progress', (job, n) ->
+        # ...)`` and the handler observe identical state). Entries are
+        # removed in the handler's ``finally`` so the map stays bounded
+        # to current concurrency.
+        self._inflight: dict[str, Job] = {}
 
     @property
     def name(self) -> str:
@@ -219,14 +245,14 @@ class Worker:
         self._running = True
         self._emit("ready")
 
-        # If a ``drained`` listener attached before ``run()`` was
-        # called, hold the engine start until the subscriber's first
-        # ``XREAD BLOCK`` is in flight. Best-effort: cancellation /
-        # error on the subscriber side resolves the wait so the
-        # worker startup is never wedged.
-        if self._drained_events is not None:
+        # If a ``drained`` or ``progress`` listener attached before
+        # ``run()`` was called, hold the engine start until the
+        # subscriber's first ``XREAD BLOCK`` is in flight. Best-effort:
+        # cancellation / error on the subscriber side resolves the
+        # wait so the worker startup is never wedged.
+        if self._internal_events is not None:
             try:
-                await self._drained_events.wait_until_ready()
+                await self._internal_events.wait_until_ready()
             except Exception:
                 pass
 
@@ -238,32 +264,41 @@ class Worker:
                 data=data,
                 attempt=native_job.attempt,
                 created_at_ms=native_job.created_at_ms,
+                _handle=native_job,
             )
+            self._inflight[native_job.id] = job
             # ``active`` fires before the handler runs so subscribers
             # building a "currently running" view see jobs even for
             # long-running handlers. Mirrors the Node shim.
             self._emit("active", job)
             try:
-                result = await self._handler(job)
-            except asyncio.CancelledError:
-                # Cancellation (from shutdown / shield bypass) is a
-                # control-flow signal, not a handler failure. The
-                # engine treats the cancelled handler as in-progress
-                # at shutdown; no ``failed`` event fires (a cancelled
-                # handler is not a handler failure).
-                raise
-            except BaseException as exc:
-                # ``failed`` fires before re-raising so subscribers see
-                # the exception that triggered the routing decision
-                # (retry vs. DLQ-unrecoverable). The native binding
-                # detects ``UnrecoverableError`` via MRO; this emit
-                # path stays agnostic.
-                self._emit("failed", job, exc)
-                raise
-            self._emit("completed", job, result)
-            if result is None:
-                return None
-            return encode_payload(result)
+                try:
+                    result = await self._handler(job)
+                except asyncio.CancelledError:
+                    # Cancellation (from shutdown / shield bypass) is a
+                    # control-flow signal, not a handler failure. The
+                    # engine treats the cancelled handler as in-progress
+                    # at shutdown; no ``failed`` event fires (a cancelled
+                    # handler is not a handler failure).
+                    raise
+                except BaseException as exc:
+                    # ``failed`` fires before re-raising so subscribers see
+                    # the exception that triggered the routing decision
+                    # (retry vs. DLQ-unrecoverable). The native binding
+                    # detects ``UnrecoverableError`` via MRO; this emit
+                    # path stays agnostic.
+                    self._emit("failed", job, exc)
+                    raise
+                self._emit("completed", job, result)
+                if result is None:
+                    return None
+                return encode_payload(result)
+            finally:
+                # Drop the inflight entry so the map stays bounded to
+                # current concurrency; a late ``progress`` event arriving
+                # after the handler resolved finds no live Job and is
+                # silently dropped (matches the Node shim).
+                self._inflight.pop(native_job.id, None)
 
         self._consumer_task = asyncio.ensure_future(
             self._consumer.run(native_handler)
@@ -304,15 +339,15 @@ class Worker:
         # there is nothing to drain, so just flag closed.
         if self._consumer is not None:
             self._consumer.shutdown()
-        # Tear down the lazy drained subscriber if one was started.
+        # Tear down the lazy internal subscriber if one was started.
         # Best-effort: swallow errors so a transient Redis blip on
         # close doesn't mask the worker's own shutdown path.
-        if self._drained_events is not None:
+        if self._internal_events is not None:
             try:
-                await self._drained_events.close()
+                await self._internal_events.close()
             except Exception:
                 pass
-            self._drained_events = None
+            self._internal_events = None
         self._emit("closed")
 
     def pause(self) -> None:
@@ -369,17 +404,17 @@ class Worker:
 
         See the class docstring for the supported event names. Callbacks
         may be plain functions or ``async def`` coroutines. Listeners
-        for ``'drained'`` lazily spawn an internal cross-process
-        events-stream subscriber the first time one attaches; the
-        subscriber is torn down in :meth:`close`.
+        for ``'drained'`` or ``'progress'`` lazily spawn an internal
+        cross-process events-stream subscriber the first time one
+        attaches; the subscriber is torn down in :meth:`close`.
         """
         self._listeners[event_name].append(callback)
         if (
-            event_name == "drained"
-            and self._drained_events is None
+            event_name in ("drained", "progress")
+            and self._internal_events is None
             and not self._closed
         ):
-            self._spawn_drained_subscriber()
+            self._spawn_internal_subscriber()
 
     def off(self, event_name: str, callback: WorkerListener) -> None:
         """Remove a previously-registered callback.
@@ -439,12 +474,20 @@ class Worker:
                 task = asyncio.ensure_future(result)
                 task.add_done_callback(_log_listener_task_exception)
 
-    def _spawn_drained_subscriber(self) -> None:
+    def _spawn_internal_subscriber(self) -> None:
         """Lazily start a :class:`QueueEvents` subscriber that forwards
-        the engine's cross-process ``drained`` event onto this worker's
-        listener registry. Idempotent. Errors from the subscriber are
-        forwarded to this worker's ``error`` channel so application
-        code only needs one error subscription.
+        the engine's cross-process ``drained`` and ``progress`` events
+        onto this worker's listener registry. Idempotent.
+
+        Progress event semantics: the engine emits one ``e=progress``
+        entry per ``Job.update_progress`` call. This forwarder looks the
+        live :class:`Job` up by id in :attr:`_inflight` (populated for
+        the duration of the handler's run) so subscribers receive the
+        same :class:`Job` reference the handler is holding — identical
+        to BullMQ's ``(job, progress)`` shape. Progress events for jobs
+        whose handlers have already resolved are dropped silently;
+        they would race the cleanup of the inflight map and arrive
+        with no live :class:`Job` to dispatch on.
 
         ``block_ms=1000`` keeps :meth:`close` snappy — the QueueEvents
         default 5s would mean every worker shutdown drags for up to
@@ -452,22 +495,43 @@ class Worker:
         """
         events = QueueEvents(
             self._queue_name,
-            redis_url=self._drained_redis_url,
-            tls=self._drained_tls,
+            redis_url=self._internal_redis_url,
+            tls=self._internal_tls,
             block_ms=1000,
         )
 
         def _on_drained(_event_id: str) -> None:
             self._emit("drained")
 
+        def _on_progress(payload: dict, _event_id: str) -> None:
+            job_id = payload.get("jobId")
+            progress = payload.get("progress")
+            if job_id is None or progress is None:
+                return
+            job = self._inflight.get(job_id)
+            if job is None:
+                return
+            try:
+                progress_int = int(progress)
+            except (TypeError, ValueError):
+                return
+            # Mirror the persisted progress onto the local Job so
+            # listeners and the handler observe consistent state. The
+            # handler itself already set this via ``update_progress``;
+            # this branch covers listeners that fire before the
+            # handler awaits.
+            job.progress = progress_int
+            self._emit("progress", job, progress_int)
+
         events.on("drained", _on_drained)
+        events.on("progress", _on_progress)
         # Note: :class:`QueueEvents` does not currently expose an
         # explicit ``error`` channel the way Node's ``EventEmitter``
         # does; transient subscriber errors are logged inside the
         # ``_listener_loop``. If a future slice adds one, wire it onto
         # this Worker's ``error`` emitter the same way the Node shim
         # does.
-        self._drained_events = events
+        self._internal_events = events
 
     async def __aenter__(self) -> "Worker":
         return self

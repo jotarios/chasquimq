@@ -359,6 +359,117 @@ async fn remove_nonexistent_is_idempotent() {
 
 #[tokio::test]
 #[ignore = "requires REDIS_URL"]
+async fn remove_also_purges_progress_and_log_keys() {
+    let admin = admin().await;
+    let queue = "mnt_remove_progress_log";
+    flush_all(&admin, queue).await;
+
+    let id = "remove-target";
+    let progress_key = format!("{{chasqui:{queue}}}:progress:{id}");
+    let log_key = format!("{{chasqui:{queue}}}:log:{id}");
+    let result_key = format!("{{chasqui:{queue}}}:result:{id}");
+
+    // Plant a progress key, a log entry, and a result key — all
+    // three are independent surfaces `remove` should sweep.
+    let _: Value = admin
+        .custom(
+            CustomCommand::new_static("SET", ClusterHash::FirstKey, false),
+            vec![Value::from(progress_key.clone()), Value::from("42")],
+        )
+        .await
+        .expect("SET progress");
+    let _: Value = admin
+        .custom(
+            CustomCommand::new_static("XADD", ClusterHash::FirstKey, false),
+            vec![
+                Value::from(log_key.clone()),
+                Value::from("*"),
+                Value::from("line"),
+                Value::from("first log"),
+            ],
+        )
+        .await
+        .expect("XADD log");
+    let _: Value = admin
+        .custom(
+            CustomCommand::new_static("SET", ClusterHash::FirstKey, false),
+            vec![Value::from(result_key.clone()), Value::from("r")],
+        )
+        .await
+        .expect("SET result");
+
+    assert!(exists(&admin, &progress_key).await);
+    assert!(exists(&admin, &log_key).await);
+    assert!(exists(&admin, &result_key).await);
+
+    let producer: Producer<Sample> = Producer::connect(&redis_url(), producer_cfg(queue))
+        .await
+        .expect("connect");
+    let report = producer
+        .remove(&id.to_string(), "default")
+        .await
+        .expect("remove");
+    assert!(report.result, "result key removed");
+
+    assert!(!exists(&admin, &progress_key).await, "progress purged");
+    assert!(!exists(&admin, &log_key).await, "log stream purged");
+    assert!(!exists(&admin, &result_key).await, "result purged");
+
+    producer.shutdown().await.ok();
+    admin.quit().await.ok();
+}
+
+#[tokio::test]
+#[ignore = "requires REDIS_URL"]
+async fn obliterate_sweeps_progress_and_log_keys() {
+    let admin = admin().await;
+    let queue = "mnt_obliterate_progress_log";
+    flush_all(&admin, queue).await;
+
+    // SCAN MATCH `{chasqui:<q>}:*` already covers progress + log keys
+    // because they share the queue hash tag — pin that here so a
+    // future change to the key shape (or to obliterate's pattern)
+    // can't silently regress.
+    let progress_key = format!("{{chasqui:{queue}}}:progress:job-A");
+    let log_key = format!("{{chasqui:{queue}}}:log:job-A");
+    let _: Value = admin
+        .custom(
+            CustomCommand::new_static("SET", ClusterHash::FirstKey, false),
+            vec![Value::from(progress_key.clone()), Value::from("17")],
+        )
+        .await
+        .expect("SET progress");
+    let _: Value = admin
+        .custom(
+            CustomCommand::new_static("XADD", ClusterHash::FirstKey, false),
+            vec![
+                Value::from(log_key.clone()),
+                Value::from("*"),
+                Value::from("line"),
+                Value::from("only line"),
+            ],
+        )
+        .await
+        .expect("XADD log");
+
+    assert!(exists(&admin, &progress_key).await);
+    assert!(exists(&admin, &log_key).await);
+
+    let producer: Producer<Sample> = Producer::connect(&redis_url(), producer_cfg(queue))
+        .await
+        .expect("connect");
+    let _removed = producer.obliterate("default").await.expect("obliterate");
+
+    assert!(!exists(&admin, &progress_key).await, "progress swept");
+    assert!(!exists(&admin, &log_key).await, "log swept");
+    assert_eq!(count_keys(&admin, queue).await, 0, "entire keyspace nuked");
+
+    producer.shutdown().await.ok();
+    admin.quit().await.ok();
+}
+
+#[tokio::test]
+#[ignore = "requires REDIS_URL"]
 async fn remove_active_pending_job() {
     let admin = admin().await;
     let queue = "mnt_remove_active";
@@ -732,6 +843,76 @@ async fn clean_waiting_removes_old_entries() {
         .expect("clean");
     assert_eq!(removed.len(), 5, "all 5 waiting cleaned");
     assert_eq!(xlen(&admin, &stream).await, 0);
+
+    producer.shutdown().await.ok();
+    admin.quit().await.ok();
+}
+
+#[tokio::test]
+#[ignore = "requires REDIS_URL"]
+async fn clean_purges_progress_and_log_keys() {
+    let admin = admin().await;
+    let queue = "mnt_clean_progress_log";
+    flush_all(&admin, queue).await;
+
+    let producer: Producer<Sample> = Producer::connect(&redis_url(), producer_cfg(queue))
+        .await
+        .expect("connect");
+
+    // Enqueue three waiting jobs and plant a progress key + a log
+    // stream entry against each one — the same per-job surfaces
+    // `remove(id)` is responsible for sweeping. `clean()` must do the
+    // same for every job it removes.
+    let mut ids: Vec<String> = Vec::new();
+    for n in 0..3_u32 {
+        let id = producer
+            .add(Sample { n, s: "w".into() })
+            .await
+            .expect("add");
+        let progress_key = format!("{{chasqui:{queue}}}:progress:{id}");
+        let log_key = format!("{{chasqui:{queue}}}:log:{id}");
+        let _: Value = admin
+            .custom(
+                CustomCommand::new_static("SET", ClusterHash::FirstKey, false),
+                vec![Value::from(progress_key.clone()), Value::from("17")],
+            )
+            .await
+            .expect("SET progress");
+        let _: Value = admin
+            .custom(
+                CustomCommand::new_static("XADD", ClusterHash::FirstKey, false),
+                vec![
+                    Value::from(log_key.clone()),
+                    Value::from("*"),
+                    Value::from("line"),
+                    Value::from("first"),
+                ],
+            )
+            .await
+            .expect("XADD log");
+        assert!(exists(&admin, &progress_key).await);
+        assert!(exists(&admin, &log_key).await);
+        ids.push(id);
+    }
+
+    let removed = producer
+        .clean("default", 0, 1000, JobState::Waiting)
+        .await
+        .expect("clean");
+    assert_eq!(removed.len(), 3, "all 3 waiting cleaned");
+
+    for id in &ids {
+        let progress_key = format!("{{chasqui:{queue}}}:progress:{id}");
+        let log_key = format!("{{chasqui:{queue}}}:log:{id}");
+        assert!(
+            !exists(&admin, &progress_key).await,
+            "progress key purged by clean for {id}"
+        );
+        assert!(
+            !exists(&admin, &log_key).await,
+            "log stream purged by clean for {id}"
+        );
+    }
 
     producer.shutdown().await.ok();
     admin.quit().await.ok();

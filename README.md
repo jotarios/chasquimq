@@ -206,6 +206,8 @@ In-repo: [`docs/engine.md`](docs/engine.md) (engine internals), [`docs/history.m
 | Result backends (`getJobResult` / `waitForResult`) | ✓ | ✓ | ✓ | — |
 | Event-driven completion wait (`waitUntilFinished`) | ✓ | ✓ | ✓ | — |
 | Worker / Queue / Job event listeners (`EventEmitter`-style) | ✓ | ✓ | ✓ | partial |
+| Persistent job progress (`updateProgress` / `progress` event) | ✓ | ✓ | ✓ | — |
+| Per-job log stream (`Job.log` / `Queue.getJobLogs`) | ✓ | ✓ | ✓ | — |
 | Delayed jobs | ✓ | ✓ | ✓ | — |
 | Idempotent delayed scheduling | ✓ | — | — | — |
 | Cancel scheduled job | ✓ | ✓ | ✓ | — |

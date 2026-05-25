@@ -208,6 +208,15 @@ export class QueueEvents extends EventEmitter {
       case 'delayed':
         this.emit('delayed', { jobId, name, delay: parseIntSafe(f['delay_ms']) }, eventId)
         break
+      case 'progress': {
+        // Persisted progress lives at `{chasqui:<queue>}:progress:<id>` as
+        // an ASCII decimal `u8`; the events-stream entry carries the same
+        // value so per-job subscribers don't need a second GET round trip.
+        const progress = parseIntSafe(f['progress'])
+        this.emit('progress', { jobId, name, progress }, eventId)
+        if (jobId) this.emit(`progress:${jobId}`, { jobId, name, progress }, eventId)
+        break
+      }
       case 'dlq':
         // The engine already emitted a `failed` event from the worker
         // before relocating to the DLQ — fanning out a second synthetic

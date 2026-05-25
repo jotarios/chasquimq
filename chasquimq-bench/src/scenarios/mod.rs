@@ -1,4 +1,5 @@
 pub(crate) mod preload;
+pub mod progress_throughput;
 pub mod queue_add;
 pub mod queue_add_bulk;
 pub mod queue_add_delayed;

@@ -48,7 +48,7 @@ use crate::redis::commands::{
     eval_remove_stream_entry_args, evalsha_cancel_delayed_args, evalsha_clean_stream_args,
     evalsha_drain_stream_args, evalsha_remove_stream_entry_args, script_load_args,
 };
-use crate::redis::keys::{dedup_marker_key, delayed_index_key};
+use crate::redis::keys::{dedup_marker_key, delayed_index_key, log_key, progress_key};
 use crate::redis::parse::{XrangeEntry, parse_xrange_response};
 use bytes::Bytes;
 use fred::clients::{Client, Pool};
@@ -171,6 +171,45 @@ fn entry_payload(entry: &XrangeEntry) -> Option<Bytes> {
 /// timestamp. Used as the age basis for `clean` on stream / DLQ entries.
 fn stream_id_ms(id: &str) -> Option<u64> {
     id.split('-').next()?.parse::<u64>().ok()
+}
+
+/// Unlink the per-job `progress` + `log` keys for each id in `job_ids`,
+/// pipelined into a single round trip per call. Mirrors the
+/// `UNLINK progress + UNLINK log` tail of `remove(id)` so the
+/// bulk-removal paths (`clean_stream` / `clean_delayed` /
+/// `clean_completed`) leave no orphaned auxiliary keys behind. All
+/// per-job keys share the `{chasqui:<queue>}` hash tag so the pipeline
+/// is Cluster-correct. Best-effort: a Redis error is swallowed (with a
+/// warn) so a transient blip never reverts the primary cleanup the
+/// caller already did.
+async fn unlink_progress_and_log(pool: &Pool, queue_name: &str, job_ids: &[String]) {
+    if job_ids.is_empty() {
+        return;
+    }
+    let client = pool.next_connected();
+    let pipeline = client.pipeline();
+    let unlink_cmd = CustomCommand::new_static("UNLINK", ClusterHash::FirstKey, false);
+    for id in job_ids {
+        let p_key = progress_key(queue_name, id);
+        let l_key = log_key(queue_name, id);
+        if let Err(e) = pipeline
+            .custom::<Value, _>(unlink_cmd.clone(), vec![Value::from(p_key)])
+            .await
+        {
+            tracing::warn!(error = %e, "maintenance: queue UNLINK progress failed");
+            return;
+        }
+        if let Err(e) = pipeline
+            .custom::<Value, _>(unlink_cmd.clone(), vec![Value::from(l_key)])
+            .await
+        {
+            tracing::warn!(error = %e, "maintenance: queue UNLINK log failed");
+            return;
+        }
+    }
+    if let Err(e) = pipeline.all::<Value>().await {
+        tracing::warn!(error = %e, "maintenance: UNLINK progress+log pipeline failed");
+    }
 }
 
 /// Locate the stream entry id whose msgpack envelope carries `job_id`,
@@ -303,16 +342,41 @@ pub(super) async fn remove(
         }
     }
 
-    // 4. Result key — a plain DEL. DEL returns the count of keys removed.
+    // 4. Result key + progress + log stream — pipelined so all three
+    //    Redis calls share one round trip. The result key keeps its DEL
+    //    (so we can attribute its removal count to the report's
+    //    `result` field, unchanged public contract); the progress key
+    //    and the log stream ride along as `UNLINK` (async reclaim — a
+    //    multi-MB log stream never stalls the call). All three keys
+    //    share the `{chasqui:<queue>}` hash tag so the pipeline is
+    //    Cluster-correct.
     {
-        let key = crate::redis::keys::result_key(queue_name, job_id);
+        let r_key = crate::redis::keys::result_key(queue_name, job_id);
+        let p_key = progress_key(queue_name, job_id);
+        let l_key = log_key(queue_name, job_id);
         let client = pool.next_connected();
-        let cmd = CustomCommand::new_static("DEL", ClusterHash::FirstKey, false);
-        let v: Value = client
-            .custom(cmd, vec![Value::from(key)])
+
+        let pipeline = client.pipeline();
+        let del_cmd = CustomCommand::new_static("DEL", ClusterHash::FirstKey, false);
+        pipeline
+            .custom::<Value, _>(del_cmd, vec![Value::from(r_key.as_str())])
             .await
             .map_err(Error::Redis)?;
-        report.result = lua_int(&v) >= 1;
+        let unlink_cmd = CustomCommand::new_static("UNLINK", ClusterHash::FirstKey, false);
+        pipeline
+            .custom::<Value, _>(unlink_cmd.clone(), vec![Value::from(p_key)])
+            .await
+            .map_err(Error::Redis)?;
+        pipeline
+            .custom::<Value, _>(unlink_cmd, vec![Value::from(l_key)])
+            .await
+            .map_err(Error::Redis)?;
+        let replies = pipeline.all::<Value>().await.map_err(Error::Redis)?;
+        // First reply is the DEL count for the result key.
+        report.result = match &replies {
+            Value::Array(items) => items.first().map(lua_int).unwrap_or(0) >= 1,
+            single => lua_int(single) >= 1,
+        };
     }
 
     Ok(report)
@@ -420,15 +484,22 @@ pub(super) async fn clean(
         return Ok(Vec::new());
     }
     let cutoff = now_ms().saturating_sub(grace_ms);
-    match state {
-        JobState::Waiting => clean_stream(pool, stream_key, group, cutoff, limit, false).await,
-        JobState::Failed => clean_stream(pool, dlq_key, group, cutoff, limit, true).await,
-        JobState::Delayed => clean_delayed(pool, queue_name, delayed_key, cutoff, limit).await,
-        JobState::Completed => clean_completed(pool, queue_name, limit).await,
+    let removed = match state {
+        JobState::Waiting => clean_stream(pool, stream_key, group, cutoff, limit, false).await?,
+        JobState::Failed => clean_stream(pool, dlq_key, group, cutoff, limit, true).await?,
+        JobState::Delayed => clean_delayed(pool, queue_name, delayed_key, cutoff, limit).await?,
+        JobState::Completed => clean_completed(pool, queue_name, limit).await?,
         // Active jobs are in-flight; removing one mid-execution is a
         // footgun. `remove(id)` is the deliberate per-job escape hatch.
-        JobState::Active | JobState::Unknown => Ok(Vec::new()),
-    }
+        JobState::Active | JobState::Unknown => return Ok(Vec::new()),
+    };
+    // Mirror `remove(id)`'s tail: every removed job's per-job progress
+    // key + log stream must also go. The per-state helpers above only
+    // touch the primary surface (stream / DLQ / delayed ZSET / result
+    // key); without this sweep the auxiliary keys would outlive the
+    // job and only be reclaimed by `obliterate`.
+    unlink_progress_and_log(pool, queue_name, &removed).await;
+    Ok(removed)
 }
 
 /// `XPENDING <key> <group> - + <count>` → the set of entry ids currently

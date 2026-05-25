@@ -25,6 +25,13 @@ Env vars:
                    ``json.loads(RESULT_VALUE)`` instead of ``None``. The
                    verifier asserts this value round-trips through the
                    shim's msgpack wire format.
+  EMIT_PROGRESS — optional. When ``"1"`` the handler calls
+                   ``job.update_progress(75)`` and appends two log lines
+                   (``"step 1"``, ``"step 2"``) before returning so a
+                   ``verify_progress`` step in the opposite shim can read
+                   them back via ``Queue.get_job`` / ``Queue.get_job_logs``.
+                   Pair with ``STORE_RESULT=1`` to keep completed jobs
+                   discoverable by the introspector.
   EXPECT_TAG, TIMEOUT_SECS, REDIS_URL — optional.
 """
 
@@ -48,6 +55,7 @@ async def main() -> int:
     store_results = os.environ.get("STORE_RESULT", "") == "1"
     result_value_raw = os.environ.get("RESULT_VALUE", "")
     result_value = json.loads(result_value_raw) if result_value_raw else None
+    emit_progress = os.environ.get("EMIT_PROGRESS", "") == "1"
 
     seen: set[int] = set()
     done = asyncio.Event()
@@ -75,6 +83,15 @@ async def main() -> int:
             )
             done.set()
             return None
+        if emit_progress:
+            try:
+                await job.update_progress(75)
+                await job.log("step 1")
+                await job.log("step 2")
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"emit_progress failed: {exc!r}")
+                done.set()
+                return None
         seen.add(i)
         if len(seen) >= count:
             done.set()

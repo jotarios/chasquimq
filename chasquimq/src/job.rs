@@ -1,4 +1,6 @@
+use crate::progress::JobHandle;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub type JobId = String;
@@ -147,6 +149,17 @@ pub struct Job<T> {
     /// - DLQ replay (`Producer::replay_dlq` re-emits `n` on the new XADD).
     #[serde(default, skip)]
     pub name: String,
+    /// Per-handler progress + log surface. `Some` when the consumer
+    /// dispatched this job to a user handler (the worker wires a fresh
+    /// [`JobHandle`] in just before the handler runs); `None` on
+    /// `Job<T>` instances synthesized by the introspector or constructed
+    /// by hand for tests.
+    ///
+    /// `#[serde(skip)]` is load-bearing the same way as `name`: the
+    /// handle is a runtime-only Redis-connection backref, never part of
+    /// the on-wire payload. Decoding always defaults it to `None`.
+    #[serde(default, skip)]
+    pub handle: Option<Arc<JobHandle>>,
 }
 
 impl<T> Job<T> {
@@ -162,6 +175,7 @@ impl<T> Job<T> {
             attempt: 0,
             retry: None,
             name: String::new(),
+            handle: None,
         }
     }
 

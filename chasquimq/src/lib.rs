@@ -8,6 +8,7 @@ pub mod job;
 pub mod metrics;
 pub(crate) mod payload;
 pub mod producer;
+pub mod progress;
 pub mod promoter;
 pub(crate) mod redis;
 pub mod repeat;
@@ -26,6 +27,7 @@ pub use metrics::{
     PromoterTick, ReaderBatch, RetryScheduled, noop_sink,
 };
 pub use producer::{DlqEntry, DrainOptions, Producer, RemovalReport};
+pub use progress::JobHandle;
 pub use promoter::Promoter;
 pub use repeat::{MissedFiresPolicy, RepeatPattern, RepeatableMeta, RepeatableSpec};
 pub use scheduler::Scheduler;

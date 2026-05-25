@@ -107,3 +107,72 @@ pub fn delayed_index_key(queue_name: &str, job_id: &str) -> String {
 pub fn paused_key(queue_name: &str) -> String {
     format!("{{chasqui:{queue_name}}}:paused")
 }
+
+/// Per-queue, per-job-id progress key. Holds the latest progress value
+/// (`0..=100`, written as a plain ASCII decimal string by the engine so
+/// every shim can `parseInt` / `int(str(...))` it without a msgpack
+/// dependency) with TTL `result_ttl_secs` so it disappears alongside the
+/// result key after a successful job completes. Written by
+/// [`crate::JobHandle::update_progress`] from inside a worker; read by
+/// the introspector and by shim-side `Job.progress` / `Queue.getJob`
+/// callers. Same `{chasqui:<queue>}` hash tag so it co-locates on the
+/// same Redis Cluster slot as the stream and result key.
+pub fn progress_key(queue_name: &str, job_id: &str) -> String {
+    format!("{{chasqui:{queue_name}}}:progress:{job_id}")
+}
+
+/// Per-queue, per-job-id log stream. Each call to
+/// [`crate::JobHandle::log`] appends one entry under field `line`. The
+/// stream is `MAXLEN ~`-trimmed by `ConsumerConfig::log_max_stream_len`
+/// so a chatty handler can't grow Redis unbounded. Read back via
+/// `Introspector::get_job_logs` (XRANGE / XREVRANGE + XLEN). Same
+/// `{chasqui:<queue>}` hash tag so it co-locates on the same Redis
+/// Cluster slot as the stream and result key.
+pub fn log_key(queue_name: &str, job_id: &str) -> String {
+    format!("{{chasqui:{queue_name}}}:log:{job_id}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every per-queue key must carry the `{chasqui:<queue>}` hash tag
+    /// so Redis Cluster routes the whole keyspace to a single slot. The
+    /// engine's CustomCommand calls use `ClusterHash::FirstKey`, which
+    /// relies on this invariant — losing it would scatter a queue's keys
+    /// across slots and break atomic multi-key Lua.
+    #[test]
+    fn progress_and_log_keys_share_queue_hash_tag() {
+        let pk = progress_key("demo", "job-abc");
+        let lk = log_key("demo", "job-abc");
+        assert_eq!(pk, "{chasqui:demo}:progress:job-abc");
+        assert_eq!(lk, "{chasqui:demo}:log:job-abc");
+
+        // The hash tag content (between the braces) must match the other
+        // per-queue keys exactly — otherwise Cluster places them on
+        // different slots than the stream / result key.
+        let stream = stream_key("demo");
+        let tag = |s: &str| {
+            let start = s.find('{').unwrap();
+            let end = s.find('}').unwrap();
+            s[start..=end].to_string()
+        };
+        assert_eq!(tag(&pk), tag(&stream));
+        assert_eq!(tag(&lk), tag(&stream));
+        assert_eq!(tag(&pk), tag(&result_key("demo", "job-abc")));
+    }
+
+    /// Job ids with `:` characters (legacy slug ids, user-supplied ids
+    /// from `add_with_id`) must not interfere with the hash tag or the
+    /// `progress:` / `log:` prefix — the tag is closed before the id is
+    /// concatenated, and the prefix is fixed.
+    #[test]
+    fn job_ids_with_colons_are_safe() {
+        let pk = progress_key("q", "user:42:retry");
+        let lk = log_key("q", "user:42:retry");
+        assert_eq!(pk, "{chasqui:q}:progress:user:42:retry");
+        assert_eq!(lk, "{chasqui:q}:log:user:42:retry");
+        assert!(pk.starts_with("{chasqui:q}:progress:"));
+        assert!(lk.starts_with("{chasqui:q}:log:"));
+    }
+}

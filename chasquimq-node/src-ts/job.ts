@@ -8,6 +8,7 @@
 // rewriting a stream entry (e.g. `update`) throw — Streams are append-only.
 
 import type { JobsOptions, JobState, JobProgress } from "./types.js";
+import type { Job as NativeJob } from "../index.js";
 import {
   NotSupportedError,
   WaitForResultTimeoutError,
@@ -15,6 +16,22 @@ import {
 } from "./errors.js";
 import type { Queue } from "./queue.js";
 import type { QueueEvents } from "./queue-events.js";
+
+/**
+ * Read-only `Job` guard. Thrown by {@link Job.updateProgress} and
+ * {@link Job.log} when the instance has no native handle backref —
+ * `Queue.getJob()` / `Queue.getJobs()` return synthesized `Job`s
+ * built from introspector data, with no per-handler connection. The
+ * write path requires the engine's per-dispatch `JobHandle`, which
+ * is attached only when the consumer hands a job to a `Worker`
+ * processor. Catch via `err.name === 'ReadOnlyJobError'`.
+ */
+const READ_ONLY_PROGRESS_MSG =
+  "Job.updateProgress() requires the Job be passed to your Worker handler; " +
+  "Jobs returned by Queue.getJob() are read-only";
+const READ_ONLY_LOG_MSG =
+  "Job.log() requires the Job be passed to your Worker handler; " +
+  "Jobs returned by Queue.getJob() are read-only";
 
 /**
  * Options for {@link Job.waitForResult}.
@@ -69,6 +86,15 @@ export class Job<
    */
   queue?: Queue<DataType, ResultType, NameType>;
 
+  /**
+   * Live native handle for in-handler progress + log writes. Set only
+   * when the engine's worker dispatched this `Job` to a processor —
+   * `Queue.getJob()` / `Queue.add()` paths leave this `undefined`, and
+   * `updateProgress` / `log` throw a clear "read-only Job" error to
+   * surface the contract violation early.
+   */
+  private _native?: NativeJob;
+
   constructor(
     name: NameType,
     data: DataType,
@@ -86,16 +112,53 @@ export class Job<
   }
 
   /**
-   * In-memory progress update. The engine does not persist progress yet;
-   * the Worker shim will surface this via its `progress` event when called
-   * from inside a processor.
+   * @internal — wires the native `Job` handle in before the user
+   * processor sees this instance. The high-level `Worker` shim is the
+   * only call site; application code should not touch this.
+   */
+  _attachNative(native: NativeJob): void {
+    this._native = native;
+  }
+
+  /**
+   * Persist a `0..=100` progress value for this job under the engine's
+   * per-job progress key, mirror it on the local `progress` field, and
+   * (when `WorkerOptions.eventsProgressEnabled !== false`) emit an
+   * `e=progress` events-stream entry that `QueueEvents` re-fans onto
+   * the broadcast `'progress'` channel and the per-id
+   * `'progress:<jobId>'` channel.
+   *
+   * Values outside `0..=100` are clamped to `100` at the engine
+   * boundary (no throw). Throws when called on a Job returned by
+   * {@link Queue.getJob} / {@link Queue.getJobs} — those instances are
+   * synthesized from introspector data and carry no per-handler
+   * connection; only Jobs handed to a `Worker` processor have a live
+   * backref.
    */
   async updateProgress(progress: JobProgress): Promise<void> {
+    if (!this._native) {
+      throw new Error(READ_ONLY_PROGRESS_MSG);
+    }
+    const n = Math.max(0, Math.floor(progress));
+    await this._native.updateProgress(n);
     this.progress = progress;
   }
 
-  async log(_row: string): Promise<number> {
-    throw new NotSupportedError("Job logs are not supported in v1");
+  /**
+   * Append `line` to the per-job log stream
+   * (`{chasqui:<queue>}:log:<id>`) and return the new XLEN. Oversize
+   * lines are truncated on a UTF-8 char boundary with a
+   * `[…truncated]` marker; the per-line cap is set by
+   * `WorkerOptions.logMaxLineBytes` (default 4096). Read back via
+   * {@link Queue.getJobLogs}.
+   *
+   * Same read-only Job guard as {@link Job.updateProgress}.
+   */
+  async log(line: string): Promise<number> {
+    if (!this._native) {
+      throw new Error(READ_ONLY_LOG_MSG);
+    }
+    return this._native.log(line);
   }
 
   async getState(): Promise<JobState | "unknown"> {

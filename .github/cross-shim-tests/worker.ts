@@ -14,6 +14,13 @@
 //                 read back. Default off.
 // RESULT_VALUE  — optional, JSON-encoded. When set, the handler returns
 //                 `JSON.parse(RESULT_VALUE)` instead of `undefined`.
+// EMIT_PROGRESS — optional. When '1' the handler calls
+//                 `job.updateProgress(75)` and appends two log lines
+//                 ('step 1', 'step 2') before returning so a
+//                 `verify_progress` step in the opposite shim can read
+//                 them back via `Queue.getJob` / `Queue.getJobLogs`.
+//                 Pair with `STORE_RESULT=1` to keep completed jobs
+//                 discoverable by the introspector.
 
 import { Worker } from '../../chasquimq-node/dist/index.js'
 
@@ -29,6 +36,7 @@ async function main(): Promise<number> {
   const resultValue: unknown = resultValueRaw
     ? JSON.parse(resultValueRaw)
     : undefined
+  const emitProgress = process.env.EMIT_PROGRESS === '1'
 
   const seen = new Set<number>()
   const errors: string[] = []
@@ -61,6 +69,17 @@ async function main(): Promise<number> {
         errors.push(`name mismatch: got '${job.name}', want '${expectJobName}'`)
         resolveDone()
         return resultValue
+      }
+      if (emitProgress) {
+        try {
+          await job.updateProgress(75)
+          await job.log('step 1')
+          await job.log('step 2')
+        } catch (err) {
+          errors.push(`emitProgress failed: ${(err as Error).message}`)
+          resolveDone()
+          return resultValue
+        }
       }
       seen.add(i)
       if (seen.size >= count) {

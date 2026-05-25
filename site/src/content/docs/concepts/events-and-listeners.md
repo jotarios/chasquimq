@@ -25,26 +25,29 @@ The events stream carries these transitions, all best-effort (a network blip on 
 | `failed` | Worker, after the processor raises. | `jobId`, `name`, `failedReason`, `attempt` |
 | `retry-scheduled` | Retry relocator, after an atomic reschedule onto the delayed ZSET. | `jobId`, `name`, `attempt`, `backoffMs` |
 | `dlq` | DLQ relocator, after writing the entry to the DLQ stream. | `jobId`, `name`, `reason`, `attempt` |
+| `progress` | Worker, after the handler's `updateProgress(n)` SET succeeds. | `jobId`, `name`, `progress` |
 | `drained` | Reader, on a full→empty transition (not on every empty poll). | (queue-scoped) |
 
 `retries-exhausted` is a synthetic alias of `dlq` (with the `reason` carried as the engine's `DlqReason` string) that the Node shim emits to match existing high-level-shim subscribers.
 
-Two listener names are accepted on both shims for API stability but are currently no-op — the engine does not emit the underlying transition yet:
+`progress` is best-effort fan-out — the persisted progress key (`{chasqui:<queue>}:progress:<id>`) is the source of truth. A failed events XADD never propagates back to the handler. High-rate progress reporters that don't need cross-process fan-out can mute the events with `WorkerOptions.eventsProgressEnabled: false` (Node) / `Worker(events_progress_enabled=False)` (Python); the persisted key is still written.
 
-- `progress` — requires engine support for in-handler progress updates.
+One listener name is accepted on both shims for API stability but is currently no-op — the engine does not emit the underlying transition yet:
+
 - `stalled` — requires a stalled-detector in the engine.
 
-Wire them up safely; they'll start firing when the corresponding engine work lands.
+Wire it up safely; it'll start firing when the corresponding engine work lands.
 
 ## Per-id channels
 
-For events that carry a `jobId` (`active`, `completed`, `failed`), `QueueEvents` also fans the event onto a per-id channel named `<event>:<jobId>`. Targeted subscribers (like `Job.waitUntilFinished` / `Job.wait_until_finished`) listen there directly instead of filtering every broadcast event by id — at large fan-out this is the difference between an `O(N-listeners)` dispatch tax and an `O(1)` one.
+For events that carry a `jobId` (`active`, `completed`, `failed`, `progress`), `QueueEvents` also fans the event onto a per-id channel named `<event>:<jobId>`. Targeted subscribers (like `Job.waitUntilFinished` / `Job.wait_until_finished`) listen there directly instead of filtering every broadcast event by id — at large fan-out this is the difference between an `O(N-listeners)` dispatch tax and an `O(1)` one.
 
-The channel naming convention is `<event>:<jobId>` (e.g. `completed:<jobId>` / `failed:<jobId>`). Power users can subscribe directly:
+The channel naming convention is `<event>:<jobId>` (e.g. `completed:<jobId>` / `failed:<jobId>` / `progress:<jobId>`). Power users can subscribe directly:
 
 ```ts
 events.on(`completed:${jobId}`, ({ jobId }) => { /* this job, done */ });
 events.on(`failed:${jobId}`, ({ failedReason }) => { /* this job, failed */ });
+events.on(`progress:${jobId}`, ({ progress }) => { /* this job, 0..=100 */ });
 ```
 
 ## The return-value choice
@@ -67,9 +70,20 @@ For low-latency awaits of jobs you just enqueued, `waitUntilFinished` is the rig
 
 ## Lazy subscriber lifecycle
 
-The `Worker.on('drained', ...)` listener is the only `Worker` event that requires cross-process traffic. The shim lazily spawns an embedded `QueueEvents` subscriber the first time a `drained` listener attaches; it's torn down on `Worker.close()`. Workers that never subscribe to `drained` pay no extra Redis connections — this is a strict zero-overhead-when-unused contract.
+`Worker.on('drained', ...)` and `Worker.on('progress', ...)` are the only `Worker` events that require cross-process traffic. The shim lazily spawns one embedded `QueueEvents` subscriber the first time *either* listener attaches; it's torn down on `Worker.close()`. Workers that never subscribe pay no extra Redis connections — this is a strict zero-overhead-when-unused contract.
 
 The same lazy pattern applies on the Python `Worker`. Cross-shim symmetric.
+
+## Muting the `progress` event for high-rate handlers
+
+`Job.updateProgress(n)` always writes the persisted progress key (`{chasqui:<queue>}:progress:<id>` STRING, TTL = `result_ttl_secs`). On top of that, by default it also emits a cross-process `e=progress` events-stream entry so subscribers see live updates.
+
+For a handler that reports progress hundreds of times per job — a large file upload reporting per-chunk percent, a streaming media transcode, an ML training loop — the events fan-out can dominate Redis traffic without adding observability value (operators rarely watch sub-second progress). Mute the fan-out without losing the persisted state:
+
+- Node: `new Worker(name, handler, { eventsProgressEnabled: false, ... })`
+- Python: `Worker(queue_name, handler, events_progress_enabled=False, ...)`
+
+The persisted progress key still updates on every call, so `Queue.getJob(id).progress` (introspector) returns the latest value. Only the events-stream `progress` channel (broadcast and per-id) goes quiet.
 
 ## Lost-event race
 

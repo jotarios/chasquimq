@@ -17,7 +17,7 @@ use crate::producer::map_engine_err;
 use bytes::Bytes;
 use chasquimq::config::{ConsumerConfig, RetryConfig};
 use chasquimq::consumer::Consumer as EngineConsumer;
-use chasquimq::{HandlerError, Job as EngineJob, PauseControl};
+use chasquimq::{HandlerError, Job as EngineJob, JobHandle as EngineJobHandle, PauseControl};
 use napi::bindgen_prelude::*;
 use napi::sys;
 use napi::threadsafe_function::{ErrorStrategy, ThreadsafeFunction};
@@ -64,22 +64,118 @@ pub struct ConsumerOpts {
     /// rejecting `credentialProvider` gives up instead of looping
     /// forever on reconnect. Maps to `ConnectionTuning::reconnect_max_attempts`.
     pub reconnect_max_attempts: Option<u32>,
+    /// `MAXLEN ~` cap on the per-job log stream
+    /// (`{chasqui:<queue>}:log:<id>`). Default `1000`. Must be `>= 16`;
+    /// below that, Redis's `MAXLEN ~` rounding can leave the stream
+    /// effectively empty between writes. Maps to
+    /// `ConsumerConfig::log_max_stream_len`.
+    pub log_max_len: Option<u32>,
+    /// Per-line byte cap for `Job.log`. Oversize lines are truncated on
+    /// a UTF-8 char boundary with a `[…truncated]` marker appended.
+    /// Default `4096`. Maps to `ConsumerConfig::log_max_line_bytes`.
+    pub log_max_line_bytes: Option<u32>,
+    /// Gate on the engine's `e=progress` events-stream entry. The
+    /// persisted progress key is always written; setting this to `false`
+    /// only mutes the events fan-out (useful when a hot-loop handler
+    /// would otherwise flood the events stream). Default `true`. Maps
+    /// to `ConsumerConfig::events_progress_enabled`.
+    pub events_progress_enabled: Option<bool>,
 }
 
-#[napi(object)]
+/// `Job` is a `#[napi]` class (not a plain object) so it can carry the
+/// engine's `Arc<JobHandle>` opaquely across the FFI boundary and expose
+/// `updateProgress` / `log` as async instance methods. The data fields
+/// are surfaced via `#[napi(getter)]` to preserve the same JS-side
+/// `(job.id, job.name, ...)` access shape the previous plain-object
+/// binding had — high-level shim consumers do not need to change.
+///
+/// `payload` is stored as `Vec<u8>` (not `Buffer`) so the class is
+/// `Send + Sync` and the async `updateProgress` / `log` methods can
+/// await across thread boundaries; a fresh `Buffer` is materialized in
+/// the getter (one copy per JS access, same per-job-dispatch cost as
+/// before — the previous binding also copied once at the FFI edge).
+#[napi]
 pub struct Job {
-    pub id: String,
+    id: String,
+    name: String,
+    payload: Vec<u8>,
+    created_at_ms: i64,
+    attempt: u32,
+    /// `Some` for jobs the engine's worker dispatched to a handler
+    /// (the only path the consumer runs through). `None` would only
+    /// occur on synthesized `Job` instances — none exist on the NAPI
+    /// surface today, but the read-only branch is mirrored in the
+    /// TypeScript shim's `Job` so users get a clear "this Job came from
+    /// getJob() and is read-only" error.
+    handle: Option<Arc<EngineJobHandle>>,
+}
+
+#[napi]
+impl Job {
+    #[napi(getter)]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
     /// Dispatch name from the source stream entry's `n` field. Empty when
     /// the entry had no `n` (legacy producers, delayed-path re-encodes,
     /// repeatable scheduler fires).
-    pub name: String,
-    pub payload: Buffer,
+    #[napi(getter)]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[napi(getter)]
+    pub fn payload(&self) -> Buffer {
+        Buffer::from(self.payload.clone())
+    }
+
     /// `i64` so JS can read it as a regular `number` (safe up to 2^53-1
     /// ms ≈ year 287396; far past any realistic Job timestamp). Using
     /// BigInt here would force every JS handler to do `Number(ts)`
     /// arithmetic, which we'd rather not impose on the hot path.
-    pub created_at_ms: i64,
-    pub attempt: u32,
+    #[napi(getter, js_name = "createdAtMs")]
+    pub fn created_at_ms(&self) -> i64 {
+        self.created_at_ms
+    }
+
+    #[napi(getter)]
+    pub fn attempt(&self) -> u32 {
+        self.attempt
+    }
+
+    /// Update the persisted progress key for this job. Values outside
+    /// `0..=100` are clamped at the engine boundary; the call resolves
+    /// once the SET round trip completes. A `JobHandle` is attached only
+    /// when the engine's worker dispatched this job to a handler; this
+    /// rejects with an error when the job has no backref (the high-level
+    /// shim then re-throws as the read-only-Job guard).
+    #[napi(js_name = "updateProgress")]
+    pub async fn update_progress(&self, n: u32) -> napi::Result<()> {
+        let handle = self.handle.as_ref().ok_or_else(|| {
+            napi::Error::from_reason(
+                "Job.updateProgress() requires a live JobHandle (this Job has none)",
+            )
+        })?;
+        let clamped = n.min(u8::MAX as u32) as u8;
+        handle
+            .update_progress(clamped)
+            .await
+            .map_err(map_engine_err)
+    }
+
+    /// Append `line` to the per-job log stream and return the new XLEN
+    /// (one XADD + XLEN, pipelined). Oversize lines are truncated on a
+    /// UTF-8 char boundary with a `[…truncated]` marker; the engine
+    /// reads the cap from `ConsumerConfig::log_max_line_bytes`.
+    #[napi]
+    pub async fn log(&self, line: String) -> napi::Result<u32> {
+        let handle = self.handle.as_ref().ok_or_else(|| {
+            napi::Error::from_reason("Job.log() requires a live JobHandle (this Job has none)")
+        })?;
+        let len = handle.log(&line).await.map_err(map_engine_err)?;
+        Ok(len.min(u32::MAX as u64) as u32)
+    }
 }
 
 #[napi]
@@ -182,9 +278,10 @@ impl Consumer {
                         let js_job = Job {
                             id: job.id,
                             name: job.name,
-                            payload: Buffer::from(job.payload.0.to_vec()),
+                            payload: job.payload.0.to_vec(),
                             created_at_ms: clamp_u64_to_i64(job.created_at_ms),
                             attempt: job.attempt,
+                            handle: job.handle,
                         };
 
                         // `call_async::<Promise<HandlerReturn>>` resolves
@@ -359,6 +456,15 @@ fn build_consumer_config(opts: Option<ConsumerOpts>) -> napi::Result<ConsumerCon
         }
         if let Some(n) = o.reconnect_max_attempts {
             cfg.connection.reconnect_max_attempts = n;
+        }
+        if let Some(v) = o.log_max_len {
+            cfg.log_max_stream_len = v as u64;
+        }
+        if let Some(v) = o.log_max_line_bytes {
+            cfg.log_max_line_bytes = v as usize;
+        }
+        if let Some(v) = o.events_progress_enabled {
+            cfg.events_progress_enabled = v;
         }
     }
     Ok(cfg)

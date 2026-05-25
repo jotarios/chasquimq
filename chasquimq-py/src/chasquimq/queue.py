@@ -682,6 +682,32 @@ class Queue:
         jobs = [self._native_info_to_job(info) for info in rows]
         return jobs, next_cursor
 
+    async def get_job_logs(
+        self,
+        job_id: str,
+        *,
+        start: int = 0,
+        end: int = -1,
+        asc: bool = True,
+    ) -> Tuple[list[str], int]:
+        """Read lines from a job's log stream
+        (``{chasqui:<queue>}:log:<id>``).
+
+        ``start`` / ``end`` are inclusive entry offsets in the requested
+        order; ``end = -1`` means "to end"; negative ``start`` is "this
+        many from the end" (translated via XLEN), matching BullMQ's
+        ``Queue.getJobLogs`` convention. ``asc`` defaults to ``True``
+        (chronological).
+
+        Returns ``(lines, count)`` where ``count`` is the current XLEN of
+        the log stream (NOT the number of lines returned — that's
+        ``len(lines)``). ``count`` lets paginating callers know how many
+        entries exist without walking the whole stream. Jobs that never
+        called :meth:`Job.log` resolve with ``([], 0)``.
+        """
+        insp = self._get_introspector()
+        return await insp.get_job_logs(job_id, start, end, asc)
+
     async def get_waiting_count(self) -> int:
         c = await self.get_job_counts("waiting")
         return c.get("waiting", 0)
@@ -721,6 +747,8 @@ class Queue:
                 data = decode_payload(raw_payload)
             except Exception:
                 data = raw_payload
+        progress_raw = info.get("progress")
+        progress = int(progress_raw) if progress_raw is not None else None
         return Job(
             id=info["id"],
             name=info.get("name") or "",
@@ -728,6 +756,7 @@ class Queue:
             attempt=int(info.get("attempt", 0)),
             created_at_ms=int(info.get("created_at_ms", 0)),
             _queue=self,
+            progress=progress,
         )
 
     async def close(self) -> None:

@@ -113,6 +113,14 @@ exists.
 | QueueEvents subscriber start id | `QueueEventsOptions.lastEventId` (**`"$"`**) | `QueueEvents(last_event_id="$")` | (build your own with `XREAD`) | Where to start tailing the events stream. |
 | QueueEvents block timeout (ms) | `QueueEventsOptions.blockingTimeout` (**10_000**) | `QueueEvents(block_ms=5000)` | n/a | `XREAD BLOCK` timeout. |
 
+## Progress and logs
+
+| Option | Node | Python | Rust | Controls |
+|---|---|---|---|---|
+| Per-job log stream `MAXLEN ~` | `WorkerOptions.logMaxLen` (**1000**) | `Worker(log_max_stream_len=...)` (default engine **1000**) | `ConsumerConfig::log_max_stream_len` (**1000**) | `MAXLEN ~` cap on each per-job log stream (`{chasqui:<queue>}:log:<id>`) written by [`Job.log`](/reference/rust-api/#jobhandle). Must be `≥ 16` (`Consumer::run` rejects sub-minimum values — below that, the `MAXLEN ~` rounding can leave the stream effectively empty between writes). The stream is also `EXPIRE`d to `result_ttl_secs` on every `log()` call so the key disappears alongside the result. |
+| Per-line byte cap | `WorkerOptions.logMaxLineBytes` (**4096**) | `Worker(log_max_line_bytes=...)` (default engine **4096**) | `ConsumerConfig::log_max_line_bytes` (**4096**) | Lines longer than this are truncated on a UTF-8 char boundary with a `[…truncated]` marker appended. First truncation per handle logs a single warn-once. |
+| Progress events fan-out | `WorkerOptions.eventsProgressEnabled` (**true**) | `Worker(events_progress_enabled=...)` (default engine **true**) | `ConsumerConfig::events_progress_enabled` (**true**) | Gates the `e=progress` events-stream entry emitted by `update_progress`. The persisted progress key (`{chasqui:<queue>}:progress:<id>` STRING) is always written; setting this to `false` only mutes the cross-process fan-out, which a `QueueEvents` subscriber would otherwise observe on the broadcast `progress` channel and the per-id `progress:<jobId>` channel. Useful for high-rate progress reporters that don't need cross-process fan-out. |
+
 ## Introspection
 
 | Option | Node | Python | Rust | Controls |

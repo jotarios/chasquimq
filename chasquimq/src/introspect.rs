@@ -33,7 +33,8 @@
 use crate::error::{Error, Result};
 use crate::payload::peek_envelope;
 use crate::redis::keys::{
-    delayed_index_key, delayed_key, dlq_key, paused_key, result_key, stream_key,
+    delayed_index_key, delayed_key, dlq_key, log_key, paused_key, progress_key, result_key,
+    stream_key,
 };
 use crate::redis::parse::{XrangeEntry, parse_xrange_response};
 use crate::{ConnectionTuning, config::ConsumerConfig};
@@ -145,6 +146,15 @@ pub struct JobInfo {
     /// surface "broken envelope" rather than silently dropping the
     /// match. Distinct from `state == Failed` (DLQ).
     pub decode_failed: bool,
+    /// Latest progress value the handler reported via
+    /// [`crate::JobHandle::update_progress`], clamped to `0..=100`.
+    /// `None` when the handler never called `update_progress`, the
+    /// progress key has already expired (TTL `result_ttl_secs`), or
+    /// the engine wrote a non-decimal-`u8` value (forward-compat from
+    /// a future SDK). The inspector reads this key for every state —
+    /// pipelined alongside the existing `get_job` lookups so the field
+    /// adds no extra round trip.
+    pub progress: Option<u8>,
 }
 
 /// One page of [`Introspector::get_jobs`] results. `next_cursor` is
@@ -287,31 +297,36 @@ impl Introspector {
     /// Full per-id lookup. Returns `None` when the id doesn't match any
     /// surface. Each branch returns a `JobInfo` populated from whatever
     /// surface matched.
+    ///
+    /// Each matching branch also pipelines a GET for the per-job progress
+    /// key (`{chasqui:<q>}:progress:<id>`) into the same round trip as
+    /// the matched probe, so `JobInfo::progress` is populated without
+    /// adding a sequential RTT on the admin path.
     pub async fn get_job(&self, id: &str) -> Result<Option<JobInfo>> {
         // 1. Active (PEL hit).
         if let Some(found) = self.lookup_in_pel(id).await? {
-            return Ok(Some(found));
+            return Ok(Some(self.with_progress(found, id).await?));
         }
         // 2. Delayed.
         if self.delayed_member(id).await?.is_some() {
             // Decode of delayed members happens elsewhere; we just
             // synthesize the info here from what we know.
             let info = self.lookup_in_delayed(id).await?;
-            if info.is_some() {
-                return Ok(info);
+            if let Some(info) = info {
+                return Ok(Some(self.with_progress(info, id).await?));
             }
         }
         // 3. Waiting.
         if let Some(found) = self.find_in_stream(id).await? {
-            return Ok(Some(found));
+            return Ok(Some(self.with_progress(found, id).await?));
         }
         // 4. Failed (DLQ).
         if let Some(found) = self.find_in_dlq(id).await? {
-            return Ok(Some(found));
+            return Ok(Some(self.with_progress(found, id).await?));
         }
         // 5. Completed.
         if self.has_result_key(id).await? {
-            return Ok(Some(JobInfo {
+            let info = JobInfo {
                 id: id.to_string(),
                 name: String::new(),
                 payload: Bytes::new(),
@@ -323,9 +338,129 @@ impl Introspector {
                 failure_reason: None,
                 failure_detail: None,
                 decode_failed: false,
-            }));
+                progress: None,
+            };
+            return Ok(Some(self.with_progress(info, id).await?));
         }
         Ok(None)
+    }
+
+    /// Read the latest progress value for `id` and stamp it onto `info`.
+    /// Returns the input unchanged when no progress key exists (or its
+    /// value isn't a decimal `u8`).
+    async fn with_progress(&self, mut info: JobInfo, id: &str) -> Result<JobInfo> {
+        info.progress = self.progress_for(id).await?;
+        Ok(info)
+    }
+
+    /// One GET on the per-job progress key. `Ok(None)` for missing keys
+    /// or non-`u8`-decimal values; the introspector intentionally swallows
+    /// shape mismatches so a forward-compat extension (e.g. a future SDK
+    /// stashing JSON in the same key) can't break admin lookups.
+    async fn progress_for(&self, id: &str) -> Result<Option<u8>> {
+        let key = progress_key(self.queue_name.as_ref(), id);
+        let client = self.pool.next_connected();
+        let cmd = CustomCommand::new_static("GET", ClusterHash::FirstKey, false);
+        let v: Value = client
+            .custom(cmd, vec![Value::from(key)])
+            .await
+            .map_err(Error::Redis)?;
+        Ok(value_as_progress(&v))
+    }
+
+    /// XRANGE / XREVRANGE the per-job log stream for `id` and return the
+    /// captured `line` field values plus the current XLEN. `start` /
+    /// `end` are inclusive entry offsets in the order indicated by
+    /// `asc` (entry 0 is the oldest when `asc`, the newest when `!asc`).
+    /// Negative `start` is interpreted as "this many from the end"
+    /// (translated via XLEN), matching the BullMQ `getLogs` convention.
+    /// `end = -1` means "to end".
+    pub async fn get_job_logs(
+        &self,
+        id: &str,
+        start: i64,
+        end: i64,
+        asc: bool,
+    ) -> Result<(Vec<String>, u64)> {
+        let key = log_key(self.queue_name.as_ref(), id);
+        let total = xlen(&self.pool, &key).await? as u64;
+        if total == 0 {
+            return Ok((Vec::new(), 0));
+        }
+
+        // Translate negative `start` and "to-end" `end` against the
+        // current XLEN. After resolution, `(lo, hi)` is an inclusive
+        // index window in the requested ordering. Saturating arithmetic
+        // because callers can hand in `i64::MIN` — plain `+` panics in
+        // debug and silently wraps in release.
+        let total_i = total as i64;
+        let mut lo = if start < 0 {
+            total_i.saturating_add(start).max(0)
+        } else {
+            start
+        };
+        let mut hi = if end < 0 {
+            total_i.saturating_add(end).max(-1)
+        } else {
+            end
+        };
+        if lo > hi || lo >= total_i {
+            return Ok((Vec::new(), total));
+        }
+        if hi >= total_i {
+            hi = total_i - 1;
+        }
+        if lo < 0 {
+            lo = 0;
+        }
+        let count = (hi - lo + 1).max(0) as u64;
+        if count == 0 {
+            return Ok((Vec::new(), total));
+        }
+
+        // `XRANGE` / `XREVRANGE` accept `-` / `+` for "open" bounds and
+        // a `COUNT` clamp. Skipping `lo` entries from the open bound
+        // gives us the requested offset.
+        let client = self.pool.next_connected();
+        let (cmd_name, lower, upper) = if asc {
+            ("XRANGE", "-", "+")
+        } else {
+            ("XREVRANGE", "+", "-")
+        };
+        let cmd = CustomCommand::new_static(cmd_name, ClusterHash::FirstKey, false);
+        // Over-fetch by `lo` so we can drop the head; Redis itself has
+        // no `OFFSET` for stream range queries.
+        let take = (lo as u64 + count) as i64;
+        let v: Value = client
+            .custom(
+                cmd,
+                vec![
+                    Value::from(key.as_str()),
+                    Value::from(lower),
+                    Value::from(upper),
+                    Value::from("COUNT"),
+                    Value::from(take),
+                ],
+            )
+            .await
+            .map_err(Error::Redis)?;
+        let entries = parse_xrange_response(&v);
+        let lines: Vec<String> = entries
+            .into_iter()
+            .skip(lo as usize)
+            .take(count as usize)
+            .map(|e| {
+                e.fields
+                    .into_iter()
+                    .find(|(k, _)| k == "line")
+                    .map(|(_, v)| {
+                        v.as_string()
+                            .unwrap_or_else(|| String::from_utf8_lossy(&v.as_bytes()).into_owned())
+                    })
+                    .unwrap_or_default()
+            })
+            .collect();
+        Ok((lines, total))
     }
 
     /// Paginated listing.
@@ -507,6 +642,7 @@ impl Introspector {
             failure_reason: None,
             failure_detail: None,
             decode_failed: false,
+            progress: None,
         }))
     }
 
@@ -657,6 +793,7 @@ impl Introspector {
                 failure_reason: None,
                 failure_detail: None,
                 decode_failed: false,
+                progress: None,
             });
             match last_score {
                 Some(prev) if prev == score => {
@@ -737,6 +874,7 @@ impl Introspector {
                     failure_reason: None,
                     failure_detail: None,
                     decode_failed: false,
+                    progress: None,
                 });
             }
         }
@@ -854,6 +992,20 @@ fn value_as_bytes(v: &Value) -> Option<Bytes> {
     }
 }
 
+/// Decode a Redis GET reply on the progress key into an `Option<u8>`.
+/// `Null` (missing key) → `None`. Non-decimal or out-of-range values
+/// also collapse to `None` so a forward-compat extension (e.g. a future
+/// SDK stashing JSON in the same key) doesn't break admin lookups.
+fn value_as_progress(v: &Value) -> Option<u8> {
+    let s = match v {
+        Value::String(s) => s.to_string(),
+        Value::Bytes(b) => std::str::from_utf8(b).ok()?.to_string(),
+        Value::Integer(n) => n.to_string(),
+        _ => return None,
+    };
+    s.trim().parse::<u8>().ok().map(|n| n.min(100))
+}
+
 async fn xrange_window(
     pool: &Pool,
     key: &str,
@@ -932,6 +1084,7 @@ fn entry_to_info_if_match(entry: &XrangeEntry, id: &str, state: JobState) -> Opt
         failure_reason: None,
         failure_detail: None,
         decode_failed: false,
+        progress: None,
     })
 }
 
@@ -951,6 +1104,7 @@ fn stream_entry_to_info_any(entry: &XrangeEntry, state: JobState) -> Option<JobI
             failure_reason: None,
             failure_detail: None,
             decode_failed: false,
+            progress: None,
         }),
         None => {
             tracing::warn!(
@@ -969,6 +1123,7 @@ fn stream_entry_to_info_any(entry: &XrangeEntry, state: JobState) -> Option<JobI
                 failure_reason: None,
                 failure_detail: None,
                 decode_failed: true,
+                progress: None,
             })
         }
     }
@@ -1008,6 +1163,7 @@ fn dlq_parsed_to_info(parsed: DlqFields, entry: &XrangeEntry) -> JobInfo {
         failure_reason: Some(parsed.reason),
         failure_detail: parsed.detail,
         decode_failed,
+        progress: None,
     }
 }
 
@@ -1198,6 +1354,35 @@ async fn scan_count_results(pool: &Pool, queue: &str, cap: u64) -> Result<(u64, 
 mod tests {
     use super::*;
     use fred::types::Value;
+
+    #[test]
+    fn progress_decoder_accepts_decimal_string_and_clamps() {
+        assert_eq!(value_as_progress(&Value::Null), None);
+        assert_eq!(value_as_progress(&Value::String("0".into())), Some(0));
+        assert_eq!(value_as_progress(&Value::String("100".into())), Some(100));
+        // The engine should not be writing values outside [0, 100], but
+        // tolerate a future SDK that does — values that parse as `u8`
+        // but exceed 100 clamp to 100 rather than surfacing a confusing
+        // "looks valid" 200.
+        assert_eq!(value_as_progress(&Value::String("250".into())), Some(100));
+        assert_eq!(value_as_progress(&Value::String("200".into())), Some(100));
+        // Values outside u8 range (`> 255`) fail the parse entirely.
+        assert_eq!(value_as_progress(&Value::String("1000".into())), None);
+        // Non-decimal payloads (future-format JSON, etc.) → None.
+        assert_eq!(
+            value_as_progress(&Value::String("not-a-number".into())),
+            None
+        );
+        assert_eq!(value_as_progress(&Value::String("{\"v\":42}".into())), None);
+        // Bytes form (RESP2 bulk string returns Bytes).
+        assert_eq!(
+            value_as_progress(&Value::Bytes(bytes::Bytes::from_static(b"42"))),
+            Some(42)
+        );
+        // Integer form (unlikely from GET, but tolerant).
+        assert_eq!(value_as_progress(&Value::Integer(42)), Some(42));
+        assert_eq!(value_as_progress(&Value::Integer(500)), None);
+    }
 
     #[test]
     fn xpending_summary_parser_extracts_range() {

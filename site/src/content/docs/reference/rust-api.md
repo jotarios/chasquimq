@@ -23,12 +23,12 @@ language shims so cross-references resolve.
 ## On this page
 
 - [Configs](#configs) — `ProducerConfig`, `ConsumerConfig`, `PromoterConfig`, `SchedulerConfig`, `RetryConfig`, `ConnectionTuning`.
-- [Job types](#job-types) — `Job<T>`, `JobId`, `JobRetryOverride`, `AddOptions`.
+- [Job types](#job-types) — `Job<T>`, `JobId`, `JobRetryOverride`, `AddOptions`, `JobHandle`.
 - [Producer](#producer) — every method.
 - [Consumer](#consumer) — constructor and `run`.
 - [Promoter](#promoter) — standalone delayed-job promoter.
 - [Scheduler](#scheduler) — standalone repeatable-spec scheduler.
-- [Introspector](#introspector) — read-only `get_job` / `get_jobs` / `get_job_state` / `get_job_counts`.
+- [Introspector](#introspector) — read-only `get_job` / `get_jobs` / `get_job_state` / `get_job_counts` / `get_job_logs`.
 - [Repeatable jobs](#repeatable-jobs) — `RepeatPattern`, `MissedFiresPolicy`, `RepeatableSpec`, `RepeatableMeta`.
 - [Backoff](#backoff) — `BackoffSpec`, `BackoffKind`.
 - [Errors](#errors) — `Error`, `HandlerError`, `Result`.
@@ -241,6 +241,7 @@ pub struct Job<T> {
     pub attempt: u32,
     pub retry: Option<JobRetryOverride>,
     pub name: String,
+    pub handle: Option<Arc<JobHandle>>,
 }
 
 impl<T> Job<T> {
@@ -254,7 +255,11 @@ impl<T> Job<T> {
 The msgpack-encoded envelope on the wire. `name` is `#[serde(skip)]`
 on the encode path — the dispatch name travels as a separate `n`
 field on the stream entry, not inside the msgpack body — and the
-read path populates `Job::name` from that field. See
+read path populates `Job::name` from that field. `handle` is also
+`#[serde(skip)]`: the consumer attaches a [`JobHandle`](#jobhandle)
+immediately before each dispatch so user handlers can call
+`update_progress` / `log`; jobs decoded outside the dispatch path
+(introspector, DLQ peek) leave it `None`. See
 [wire format](/reference/wire-format/) for the byte layout.
 
 ### `JobId`
@@ -299,6 +304,44 @@ impl AddOptions {
 Per-job options for the `*_with_options` family of producer methods.
 `name` is capped at 256 bytes; oversize names are rejected with
 `Error::Config` at the producer boundary.
+
+### `JobHandle`
+
+```rust
+pub struct JobHandle;
+
+impl JobHandle {
+    pub fn job_id(&self) -> &str;
+    pub async fn update_progress(&self, n: u8) -> Result<()>;
+    pub async fn log(&self, line: &str) -> Result<u64>;
+}
+```
+
+Per-handler write surface attached to `Job<T>::handle` (an
+`Option<JobHandle>`) by the consumer immediately before the user
+handler runs. Absent on Jobs returned by the introspector's
+read-only paths — call sites should `let Some(handle) =
+job.handle.as_ref()` and surface a "this Job has no live handle"
+error rather than panicking.
+
+- `update_progress(n)` writes `{chasqui:<queue>}:progress:<id>`
+  as an ASCII-decimal `u8` STRING with TTL = `result_ttl_secs`.
+  Values `> 100` clamp to 100 (warn-once per handle). When
+  `events_progress_enabled` is `true` (default), a best-effort
+  `e=progress` events-stream entry is emitted after the SET
+  succeeds — a failed XADD never propagates back to the handler.
+- `log(line)` `XADD`s one entry under field `line` to
+  `{chasqui:<queue>}:log:<id>` (STREAM, `MAXLEN ~
+  log_max_stream_len`), pipelined with `XLEN` (returned) and
+  `EXPIRE log_key result_ttl_secs`. Oversize lines
+  (`> log_max_line_bytes`) truncate on a UTF-8 char boundary
+  with a `[…truncated]` marker (warn-once per handle).
+
+Connection budget: the handle borrows a shared 2–8-sized
+`fred::clients::Pool` sized to consumer concurrency — never a
+client per worker. Handlers that never call these pay nothing.
+Read back the progress field via [`JobInfo::progress`](#jobinfo--jobspage)
+and the log lines via [`Introspector::get_job_logs`](#introspector).
 
 ## Producer
 
@@ -623,6 +666,13 @@ impl Introspector {
         limit: u64,
         cursor: Option<String>,
     ) -> Result<JobsPage>;
+    pub async fn get_job_logs(
+        &self,
+        id: &str,
+        start: i64,
+        end: i64,
+        asc: bool,
+    ) -> Result<(Vec<String>, u64)>;
 }
 ```
 
@@ -638,6 +688,17 @@ as `JobState::Waiting`, not `Completed`, during the race window.
 `group` is the consumer-group name whose PEL the inspector reads for
 `Active` state. Defaults to `ConsumerConfig::default().group`
 (`"default"`). Pass `None` to take the default.
+
+`get_job_logs(id, start, end, asc) -> (Vec<String>, u64)` reads the
+captured `line` field values from the per-job log stream
+(`{chasqui:<q>}:log:<id>`, populated by
+[`JobHandle::log`](#jobhandle)) and the current XLEN. `start` /
+`end` are inclusive entry offsets in the order indicated by `asc`
+(entry `0` is the oldest when `asc`, the newest when `!asc`).
+`start = -N` is interpreted as "this many from the end" (translated
+via XLEN, matching BullMQ's `getLogs` convention); `end = -1` means
+"to end". A non-existent or never-logged job resolves to
+`(Vec::new(), 0)`.
 
 ### `JobState`
 
@@ -691,6 +752,7 @@ pub struct JobInfo {
     pub failure_reason: Option<String>,
     pub failure_detail: Option<String>,
     pub decode_failed: bool,   // set when the entry's envelope didn't decode
+    pub progress: Option<u8>,  // latest JobHandle::update_progress value
 }
 
 pub struct JobsPage {

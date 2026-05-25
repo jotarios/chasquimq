@@ -563,7 +563,37 @@ export class Queue<
     if (info.decodeFailed) {
       job.failedReason = job.failedReason ?? "decode_failed";
     }
+    if (info.progress !== undefined && info.progress !== null) {
+      job.progress = info.progress;
+    }
     return job;
+  }
+
+  /**
+   * Read up to `count` lines from a job's log stream
+   * (`{chasqui:<queue>}:log:<id>`). `start` / `end` are inclusive
+   * entry offsets in the requested order; `end = -1` means "to end";
+   * negative `start` is "this many from the end" (translated via
+   * XLEN), matching BullMQ's `Queue.getJobLogs` convention. `asc`
+   * defaults to `true` (chronological).
+   *
+   * Returns `{ logs, count }` where `count` is the current XLEN of the
+   * log stream (NOT the number of lines returned — that's `logs.length`).
+   * `count` lets paginating callers know how many entries exist without
+   * walking the whole stream.
+   *
+   * Jobs that never called `Job.log` resolve with
+   * `{ logs: [], count: 0 }`.
+   */
+  async getJobLogs(
+    jobId: string,
+    start: number = 0,
+    end: number = -1,
+    asc: boolean = true,
+  ): Promise<{ logs: string[]; count: number }> {
+    const insp = await this.introspector();
+    const result = await insp.getJobLogs(jobId, start, end, asc);
+    return { logs: result.logs, count: result.count };
   }
 
   /**

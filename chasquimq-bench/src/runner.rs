@@ -24,7 +24,17 @@ pub async fn flush_queue(admin: &Client, queue: &str) {
     }
 }
 
-pub async fn run_scenario(name: &str, redis_url: &str, queue: &str, scale: u32) -> ScenarioReport {
+pub struct RunOptions {
+    pub progress_events_enabled: bool,
+}
+
+pub async fn run_scenario(
+    name: &str,
+    redis_url: &str,
+    queue: &str,
+    scale: u32,
+    opts: &RunOptions,
+) -> ScenarioReport {
     match name {
         "queue-add" => scenarios::queue_add::run(redis_url, queue, scale).await,
         "queue-add-bulk" => scenarios::queue_add_bulk::run(redis_url, queue, scale).await,
@@ -40,6 +50,36 @@ pub async fn run_scenario(name: &str, redis_url: &str, queue: &str, scale: u32) 
         }
         "worker-retry-throughput" => {
             scenarios::worker_retry_throughput::run(redis_url, queue, scale).await
+        }
+        "progress-throughput-1" => {
+            scenarios::progress_throughput::run(
+                redis_url,
+                queue,
+                scale,
+                1,
+                opts.progress_events_enabled,
+            )
+            .await
+        }
+        "progress-throughput-10" => {
+            scenarios::progress_throughput::run(
+                redis_url,
+                queue,
+                scale,
+                10,
+                opts.progress_events_enabled,
+            )
+            .await
+        }
+        "progress-throughput-100" => {
+            scenarios::progress_throughput::run(
+                redis_url,
+                queue,
+                scale,
+                100,
+                opts.progress_events_enabled,
+            )
+            .await
         }
         other => panic!("unknown scenario: {other}"),
     }
