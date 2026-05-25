@@ -206,9 +206,10 @@ async fn relocate_with_retry(
     Err(last_err.unwrap_or_else(|| Error::Config("DLQ relocation exhausted retries".into())))
 }
 
-/// Routes to either [`RELOCATE_DLQ_SCRIPT`] (default — does XACKDEL gate
-/// + XADD) or [`RELOCATE_DLQ_PRE_ACKED_SCRIPT`] (only XADD; for the
-/// stalled-detector path where the source entry is already XACKDEL'd).
+/// Routes to either [`RELOCATE_DLQ_SCRIPT`] (default — does XACKDEL
+/// gate + XADD) or [`RELOCATE_DLQ_PRE_ACKED_SCRIPT`] (only XADD; for
+/// the stalled-detector path where the source entry is already
+/// XACKDEL'd).
 async fn relocate_once(
     client: &Client,
     cfg: &DlqRelocatorConfig,

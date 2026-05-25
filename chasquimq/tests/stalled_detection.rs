@@ -127,6 +127,7 @@ fn fast_detector_cfg(
 /// then return the (stream_key, group, consumer_id, entry_id, job_id).
 /// Used by detector tests that exercise the standalone detector path
 /// (no Consumer wrapping, so no reader-CLAIM race against the detector).
+#[allow(dead_code)]
 async fn seed_pending_entry(
     admin: &fred::clients::Client,
     queue: &str,
@@ -499,10 +500,9 @@ async fn replay_dlq_quad_argv_shape_works() {
     let consumer = Consumer::<Sample>::new(redis_url(), cfg);
 
     let handler = move |_job: chasquimq::Job<Sample>| async move {
-        Err::<Bytes, _>(chasquimq::HandlerError::unrecoverable(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "poison",
-        )))
+        Err::<Bytes, _>(chasquimq::HandlerError::unrecoverable(
+            std::io::Error::other("poison"),
+        ))
     };
     let shutdown = CancellationToken::new();
     let consumer_task = tokio::spawn(consumer.run(handler, shutdown.clone()));
