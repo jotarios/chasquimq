@@ -180,6 +180,49 @@ redis.call('XADD', unpack(args))
 return 1
 "#;
 
+/// Pre-acked DLQ relocate (slice 12). Counterpart of [`RELOCATE_DLQ_SCRIPT`]
+/// for the stalled-detector path: the caller has already XACKDEL'd the
+/// source entry out of the PEL (in `STALLED_SCAN_SCRIPT`'s threshold-hit
+/// branch), so the relocator must NOT re-issue XACKDEL (which would
+/// return -1 / 0 → "gate lost" → DLQ write skipped → orphan ack).
+///
+/// This script does only the IDMP-XADD into the DLQ stream, mirroring
+/// the field shape of [`RELOCATE_DLQ_SCRIPT`]'s XADD half byte-for-byte
+/// so DLQ subscribers can't tell the two paths apart on the wire. The
+/// IDMP marker on the XADD provides the dedup guard — concurrent
+/// relocator retries of the same `source_id` are no-ops.
+///
+/// KEYS[1] = dlq_key (no stream_key — we don't touch the source stream)
+/// ARGV[1] = producer_id (IDMP scope)
+/// ARGV[2] = source_id (IDMP id + `source_id` field)
+/// ARGV[3] = payload bytes
+/// ARGV[4] = reason
+/// ARGV[5] = max_stream_len (XADD MAXLEN ~)
+/// ARGV[6] = name ('' = omit the `n` field)
+/// ARGV[7] = detail ('' = omit the `detail` field)
+///
+/// Returns 1 unconditionally — the IDMP-XADD has its own dedup, and
+/// reporting "did we relocate" with a script-level boolean would be
+/// misleading (Redis collapses dedup-suppressed XADDs into a successful
+/// reply too).
+pub(crate) const RELOCATE_DLQ_PRE_ACKED_SCRIPT: &str = r#"
+local args = {KEYS[1], 'IDMP', ARGV[1], ARGV[2], 'MAXLEN', '~', ARGV[5], '*', 'd', ARGV[3]}
+if ARGV[6] ~= nil and ARGV[6] ~= '' then
+  args[#args + 1] = 'n'
+  args[#args + 1] = ARGV[6]
+end
+args[#args + 1] = 'source_id'
+args[#args + 1] = ARGV[2]
+args[#args + 1] = 'reason'
+args[#args + 1] = ARGV[4]
+if ARGV[7] ~= nil and ARGV[7] ~= '' then
+  args[#args + 1] = 'detail'
+  args[#args + 1] = ARGV[7]
+end
+redis.call('XADD', unpack(args))
+return 1
+"#;
+
 /// Replays up to ARGV[1] entries from the DLQ stream (KEYS[1]) back into the
 /// main stream (KEYS[2]). For each entry, the caller has already decoded the
 /// DLQ payload, reset Job::attempt to 0, re-encoded, and read the source
@@ -1043,6 +1086,62 @@ pub(crate) fn evalsha_relocate_dlq_args(
         Value::from(dlq_key),
         Value::from(group),
         Value::from(entry_id),
+        Value::from(producer_id),
+        Value::from(source_id),
+        Value::Bytes(payload),
+        Value::from(reason),
+        Value::from(max_stream_len as i64),
+        Value::from(name),
+        Value::from(detail.unwrap_or("")),
+    ]
+}
+
+/// EVALSHA argument vector for [`RELOCATE_DLQ_PRE_ACKED_SCRIPT`].
+/// Used by the stalled-detector's relocate path where the source entry
+/// is already XACKDEL'd out of the PEL.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn evalsha_relocate_dlq_pre_acked_args(
+    sha: &str,
+    dlq_key: &str,
+    producer_id: &str,
+    source_id: &str,
+    payload: Bytes,
+    reason: &str,
+    max_stream_len: u64,
+    name: &str,
+    detail: Option<&str>,
+) -> Vec<Value> {
+    vec![
+        Value::from(sha),
+        Value::from(1_i64),
+        Value::from(dlq_key),
+        Value::from(producer_id),
+        Value::from(source_id),
+        Value::Bytes(payload),
+        Value::from(reason),
+        Value::from(max_stream_len as i64),
+        Value::from(name),
+        Value::from(detail.unwrap_or("")),
+    ]
+}
+
+/// EVAL fallback for [`RELOCATE_DLQ_PRE_ACKED_SCRIPT`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn eval_relocate_dlq_pre_acked_args(
+    script: &str,
+    dlq_key: &str,
+    producer_id: &str,
+    source_id: &str,
+    payload: Bytes,
+    reason: &str,
+    max_stream_len: u64,
+    name: &str,
+    detail: Option<&str>,
+) -> Vec<Value> {
+    vec![
+        Value::from(script),
+        Value::from(1_i64),
+        Value::from(dlq_key),
         Value::from(producer_id),
         Value::from(source_id),
         Value::Bytes(payload),

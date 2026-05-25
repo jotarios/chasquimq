@@ -421,7 +421,13 @@ impl StalledDetector {
                 for (idx, n) in &parsed.threshold_hits {
                     let i = *idx as usize;
                     let Some(entry) = valid.get(i) else { continue };
-                    dlq::enqueue(
+                    // `pre_acked = true` — the STALLED_SCAN_SCRIPT already
+                    // XACKDEL'd this entry out of the PEL at the threshold-
+                    // hit branch. Without this flag, the relocator's own
+                    // XACKDEL gate inside RELOCATE_DLQ_SCRIPT would return
+                    // 0 ("gate lost") and silently skip the DLQ write —
+                    // orphan ack, no DLQ entry.
+                    dlq::enqueue_with_mode(
                         tx,
                         entry.job_id.clone(),
                         entry.entry_id.clone().into(),
@@ -429,6 +435,7 @@ impl StalledDetector {
                         DlqReason::Stalled,
                         *n,
                         entry.name.clone(),
+                        true,
                     )
                     .await;
                     relocated_count += 1;
