@@ -438,10 +438,18 @@ async fn detector_disabled_skips_spawn() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires REDIS_URL"]
 async fn job_ok_script_acks_without_stall_counter() {
-    // REGRESSION-CRITICAL: the common path (job never stalled, no
-    // counter key) still acks. The slice-12 JOB_OK_SCRIPT change adds
-    // an unconditional DEL of the stall counter; a missing key DELs to
-    // `0` and must not surface as an error.
+    // REGRESSION-CRITICAL: two invariants on the JOB_OK_SCRIPT path.
+    //
+    // 1. The common case (job never stalled, no counter key) still
+    //    acks. Slice-12 added an unconditional DEL of the stall
+    //    counter; DEL on a missing key returns `0` and must not
+    //    surface as a handler failure.
+    // 2. When a live stall counter DOES exist for an in-flight job,
+    //    the JOB_OK_SCRIPT ack clears it — the counter must be gone
+    //    after the handler succeeds. This is the invariant a follow-up
+    //    successful run after a near-miss stall relies on; without it
+    //    the counter would carry over (sliding TTL) and a future minor
+    //    blip would trip threshold prematurely.
     let queue = unique_queue("ok_no_counter");
     let admin = admin().await;
     flush_stalled(&admin, &queue).await;
@@ -452,8 +460,28 @@ async fn job_ok_script_acks_without_stall_counter() {
     cfg.stalled_detector_enabled = false; // Isolate from detector races.
 
     let consumer = Consumer::<Sample>::new(redis_url(), cfg);
-    let handler = move |_job: chasquimq::Job<Sample>| async move {
-        Ok::<_, chasquimq::HandlerError>(Bytes::from_static(b"result"))
+    // Capture the job id the handler observes so the test can probe
+    // the corresponding stall counter key by name after the ack.
+    let observed_id = Arc::new(tokio::sync::Mutex::new(None::<String>));
+    let observed_id_clone = observed_id.clone();
+    let pre_seed_done = Arc::new(Notify::new());
+    let pre_seed_done_clone = pre_seed_done.clone();
+    let handler = move |job: chasquimq::Job<Sample>| {
+        let observed_id_clone = observed_id_clone.clone();
+        let pre_seed_done_clone = pre_seed_done_clone.clone();
+        async move {
+            // Capture the first job id we see; wait for the test
+            // thread to seed a fake stall counter against it before
+            // the handler resolves.
+            let id = job.id.clone();
+            let mut guard = observed_id_clone.lock().await;
+            if guard.is_none() {
+                *guard = Some(id);
+                drop(guard);
+                pre_seed_done_clone.notified().await;
+            }
+            Ok::<_, chasquimq::HandlerError>(Bytes::from_static(b"result"))
+        }
     };
 
     let shutdown = CancellationToken::new();
@@ -466,16 +494,53 @@ async fn job_ok_script_acks_without_stall_counter() {
         producer.add(Sample { n: 1 }).await.expect("add");
     }
 
+    // Wait for the handler to see the first job, then seed a fake
+    // stall counter under its id. Release the handler — the JOB_OK
+    // ack path must DEL the counter.
+    wait_until(Duration::from_secs(10), || async {
+        observed_id.lock().await.is_some()
+    })
+    .await;
+    let job_id = observed_id.lock().await.clone().expect("job id");
+    let stall_key = format!("{{chasqui:{queue}}}:stalls:{job_id}");
+    let _: Value = admin
+        .custom(
+            CustomCommand::new_static("INCR", ClusterHash::FirstKey, false),
+            vec![Value::from(stall_key.as_str())],
+        )
+        .await
+        .expect("INCR seed stall counter");
+    pre_seed_done.notify_waiters();
+
     wait_until(Duration::from_secs(15), || async {
         sink.jobs_completed() >= 5
     })
     .await;
 
-    // No failures must have surfaced.
+    // No failures must have surfaced — DEL of a non-existent counter
+    // (the common path for jobs 2..=5) must not error out.
     let failed = sink.jobs_failed();
     assert_eq!(
         failed, 0,
         "JOB_OK_SCRIPT must not surface DEL errors as failed; saw {failed}"
+    );
+
+    // The seeded stall counter must be DEL'd by the successful ack.
+    let exists: Value = admin
+        .custom(
+            CustomCommand::new_static("EXISTS", ClusterHash::FirstKey, false),
+            vec![Value::from(stall_key.as_str())],
+        )
+        .await
+        .expect("EXISTS stall counter");
+    let n = match exists {
+        Value::Integer(n) => n,
+        other => panic!("EXISTS returned non-integer: {other:?}"),
+    };
+    assert_eq!(
+        n, 0,
+        "JOB_OK_SCRIPT must DEL the stall counter on successful ack; \
+         key {stall_key} still exists ({n} hits)"
     );
 
     shutdown.cancel();
@@ -486,9 +551,17 @@ async fn job_ok_script_acks_without_stall_counter() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires REDIS_URL"]
 async fn replay_dlq_quad_argv_shape_works() {
-    // REGRESSION-CRITICAL: pin the slice-12 ARGV layout change.
-    // REPLAY_DLQ_SCRIPT moved from triples (id, payload, name) to
-    // quads (+ job_id). Existing replay paths must still work.
+    // REGRESSION-CRITICAL: pin two slice-12 invariants on the
+    // REPLAY_DLQ_SCRIPT path.
+    //
+    // 1. ARGV layout moved from triples (id, payload, name) to quads
+    //    (+ job_id). Existing replay paths must still work.
+    // 2. The script DELs any leftover stall counter for the job being
+    //    replayed. A replayed entry that was originally stalled (and
+    //    therefore had a live counter under sliding TTL) must start
+    //    its fresh attempt with a zeroed counter — otherwise the next
+    //    detector tick would trip threshold against a stale value
+    //    from the previous incarnation.
     let queue = unique_queue("replay_quad");
     let admin = admin().await;
     flush_stalled(&admin, &queue).await;
@@ -499,10 +572,18 @@ async fn replay_dlq_quad_argv_shape_works() {
     cfg.stalled_detector_enabled = false;
     let consumer = Consumer::<Sample>::new(redis_url(), cfg);
 
-    let handler = move |_job: chasquimq::Job<Sample>| async move {
-        Err::<Bytes, _>(chasquimq::HandlerError::unrecoverable(
-            std::io::Error::other("poison"),
-        ))
+    // Capture the job id the handler observes so we can seed the
+    // corresponding stall counter before replay.
+    let observed_id = Arc::new(tokio::sync::Mutex::new(None::<String>));
+    let observed_id_clone = observed_id.clone();
+    let handler = move |job: chasquimq::Job<Sample>| {
+        let observed_id_clone = observed_id_clone.clone();
+        async move {
+            *observed_id_clone.lock().await = Some(job.id.clone());
+            Err::<Bytes, _>(chasquimq::HandlerError::unrecoverable(
+                std::io::Error::other("poison"),
+            ))
+        }
     };
     let shutdown = CancellationToken::new();
     let consumer_task = tokio::spawn(consumer.run(handler, shutdown.clone()));
@@ -518,12 +599,61 @@ async fn replay_dlq_quad_argv_shape_works() {
     })
     .await;
 
+    let job_id = observed_id
+        .lock()
+        .await
+        .clone()
+        .expect("handler should have observed job id");
+    let stall_key = format!("{{chasqui:{queue}}}:stalls:{job_id}");
+
+    // Seed a leftover stall counter under the dlq'd job's id (no live
+    // detector to do this naturally because we ran with
+    // stalled_detector_enabled=false). REPLAY_DLQ_SCRIPT must DEL it.
+    let _: Value = admin
+        .custom(
+            CustomCommand::new_static("INCR", ClusterHash::FirstKey, false),
+            vec![Value::from(stall_key.as_str())],
+        )
+        .await
+        .expect("INCR seed stall counter");
+    // Sanity: the seed worked.
+    let pre_exists: Value = admin
+        .custom(
+            CustomCommand::new_static("EXISTS", ClusterHash::FirstKey, false),
+            vec![Value::from(stall_key.as_str())],
+        )
+        .await
+        .expect("EXISTS pre-replay");
+    let pre_n = match pre_exists {
+        Value::Integer(n) => n,
+        other => panic!("EXISTS returned non-integer: {other:?}"),
+    };
+    assert_eq!(pre_n, 1, "stall-counter seed sanity check");
+
     // Now replay — must succeed with the new quad ARGV shape.
     let replayed = producer
         .replay_dlq(10)
         .await
         .expect("replay_dlq with quad shape must work");
     assert_eq!(replayed, 1, "expected exactly 1 entry replayed");
+
+    // The leftover stall counter must be gone after replay.
+    let post_exists: Value = admin
+        .custom(
+            CustomCommand::new_static("EXISTS", ClusterHash::FirstKey, false),
+            vec![Value::from(stall_key.as_str())],
+        )
+        .await
+        .expect("EXISTS post-replay");
+    let post_n = match post_exists {
+        Value::Integer(n) => n,
+        other => panic!("EXISTS returned non-integer: {other:?}"),
+    };
+    assert_eq!(
+        post_n, 0,
+        "REPLAY_DLQ_SCRIPT must DEL the stall counter on replay; \
+         key {stall_key} still exists ({post_n} hits)"
+    );
 
     shutdown.cancel();
     let _ = tokio::time::timeout(Duration::from_secs(10), consumer_task).await;
