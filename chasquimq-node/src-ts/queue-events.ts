@@ -233,6 +233,19 @@ export class QueueEvents extends EventEmitter {
       case 'drained':
         this.emit('drained', eventId)
         break
+      case 'stalled': {
+        // Slice-12: emitted once per detector-INCR-under-threshold
+        // observation. `attempt` is the current stall count
+        // (1-indexed). `prev` is always `'active'` (every stalled
+        // entry was PEL-resident when the detector saw it). Mirrors
+        // the BullMQ `Worker.on('stalled', (jobId, prev))` shape so
+        // shim subscribers see the familiar two-arg payload.
+        const attempt = parseIntSafe(f['attempt'])
+        const prev = f['prev'] ?? 'active'
+        this.emit('stalled', { jobId, name, attempt, prev }, eventId)
+        if (jobId) this.emit(`stalled:${jobId}`, { jobId, name, attempt, prev }, eventId)
+        break
+      }
       default:
         // Unknown event — forward as-is on a generic channel for future-compat.
         this.emit('unknown', { eventName: e, fields: f }, eventId)

@@ -109,7 +109,7 @@ skipIfNoRedis('Result backend integration', () => {
       {
         connection: parseConn(REDIS_URL!),
         concurrency: 1,
-        maxStalledCount: 1,
+        maxAttempts: 1,
         autorun: false,
         storeResults: true,
       },

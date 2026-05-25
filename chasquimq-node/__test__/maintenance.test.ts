@@ -177,7 +177,7 @@ skipIfNoRedis("Queue maintenance API", () => {
         concurrency: 1,
         // `maxStalledCount` maps to the engine's maxAttempts: 1 → straight
         // to the DLQ on the first failure.
-        maxStalledCount: 1,
+        maxAttempts: 1,
       },
     );
     for (let i = 0; i < 3; i++) {

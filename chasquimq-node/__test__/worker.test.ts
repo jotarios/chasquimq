@@ -112,7 +112,7 @@ skipIfNoRedis('Worker integration', () => {
       {
         connection: parseConn(REDIS_URL!),
         concurrency: 1,
-        maxStalledCount: 1,
+        maxAttempts: 1,
         autorun: false,
       },
     )
@@ -138,8 +138,12 @@ skipIfNoRedis('Worker integration', () => {
     // An async function that `throw`s before any await still surfaces
     // the throw as a rejected promise to the caller. The audit asked us
     // to pin this — the engine must treat sync-throw-inside-async the
-    // same as `Promise.reject(...)`. Two attempts (maxStalledCount=2)
+    // same as `Promise.reject(...)`. Two attempts (maxAttempts=2)
     // exhaust the retry budget on the second handler call → DLQ.
+    //
+    // v1.4.0: switched from `maxStalledCount: 2` to `maxAttempts: 2`
+    // — `maxStalledCount` now controls the stalled-detector ceiling
+    // (which a fail-throwing handler never trips), not total retries.
     const failedSpy = vi.fn()
     let attempts = 0
 
@@ -154,7 +158,7 @@ skipIfNoRedis('Worker integration', () => {
       {
         connection: parseConn(REDIS_URL!),
         concurrency: 1,
-        maxStalledCount: 2,
+        maxAttempts: 2,
         autorun: false,
       },
     )
