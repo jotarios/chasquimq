@@ -538,8 +538,16 @@ pub struct StalledDetectorConfig {
     /// `XPENDING ... - + <count>` cap. Bounds the scan size so a giant
     /// stuck PEL can't block the leader on one tick. Default `256`.
     pub scan_batch: usize,
-    /// Leader-election lock TTL. Same pattern as promoter / scheduler.
-    /// Default `5`.
+    /// Leader-election lock TTL (seconds). Must comfortably exceed
+    /// `tick_interval_ms` — the detector sleeps for one full tick
+    /// between scans, and the lock must not expire while the sleeping
+    /// leader holds it or another replica will steal leadership every
+    /// tick (and the original leader will reacquire on wake, causing
+    /// thrash). Default `90` — `tick_interval_ms` defaults to `30_000`
+    /// (30s), so `90s = 3× tick` leaves enough headroom for tick jitter
+    /// and short Redis hiccups. Operators overriding `tick_interval_ms`
+    /// upward should bump this in lockstep (rule of thumb: at least
+    /// `2 × (tick_interval_ms / 1000) + 5s`).
     pub lock_ttl_secs: u64,
     /// Detector-instance id (value of the leader lock). Default a fresh
     /// `format!("sd-{uuid}")`.
@@ -575,7 +583,11 @@ impl Default for StalledDetectorConfig {
             idle_threshold_ms: 30_000,
             max_stalled_attempts: 1,
             scan_batch: 256,
-            lock_ttl_secs: 5,
+            // Must outlive `tick_interval_ms` (the leader sleeps for one
+            // full tick between scans and will lose its lock to a
+            // replica otherwise — see field doc). `90s` covers the
+            // default `30_000ms` tick with 3× headroom.
+            lock_ttl_secs: 90,
             holder_id: format!("sd-{}", uuid::Uuid::new_v4()),
             metrics: crate::metrics::noop_sink(),
             connection: ConnectionTuning::default(),
