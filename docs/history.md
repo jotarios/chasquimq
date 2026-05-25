@@ -392,6 +392,168 @@ Tests: 16 engine integration cases (live Redis — `tests/progress_and_log.rs`),
 
 Doc surfaces synced: this slice, root `README.md` (feature row), `docs/engine.md` (new "Progress and logs" section + ConsumerConfig fields + read-only Job guard), both shim READMEs (symmetric "Progress and logs" sections), `site/src/content/docs/reference/{node-api,python-api,rust-api}.md` (`Job.updateProgress` / `log`, `Queue.getJobLogs`, `JobHandle`, `Introspector::get_job_logs`, `JobInfo.progress`), `site/src/content/docs/reference/options.md` (three new ConsumerConfig fields), `site/src/content/docs/reference/wire-format.md` (new STRING + STREAM keys under the `{chasqui:<queue>}` hash tag), `site/src/content/docs/concepts/events-and-listeners.md` (`progress` event documented as live; `stalled` remains the only no-op listener), `benchmarks/README.md` index, and `benchmarks/progress-log-slice.md`.
 
+## Stalled-job detector (cross-FFI slice)
+
+**Shipped 2026-05-25 (feat/stalled-detector).** A leader-elected
+background task spawned alongside the promoter and scheduler that
+scans the consumer group's PEL on a tick, INCRs a per-job stall
+counter for entries idle past `idle_threshold_ms`, and atomically
+relocates them to the DLQ as a new `DlqReason::Stalled` variant once
+`max_stalled_attempts` consecutive scans see the entry stuck. Distinct
+from the existing `RetriesExhausted` route: handler-failure loops and
+worker-crash loops are now observable separately, and the `stalled`
+event finally has a real producer instead of being documented as a
+no-op on both shims.
+
+**Problem statement.** Today's recovery for stuck deliveries is passive
+— the reader's `XREADGROUP ... CLAIM <claim_min_idle_ms>` call
+re-claims any PEL entry idle past the threshold and re-delivers it.
+That recovers a single crash mid-handler, but it can't bound a *loop*
+of worker crashes against the same entry: every CLAIM redelivery
+resets the idle clock, `delivery_count` rises forever, and the only
+terminal signal is `RetriesExhausted` after `max_attempts` — which
+conflates "handler ran N times and failed" with "worker crashed N
+times mid-handler". The detector closes that gap.
+
+Engine changes (`chasquimq/`):
+
+- New module `stalled.rs` with `StalledDetector` (`new` standalone +
+  `with_shared_events` / `with_shared_dlq_tx` for the embedded path
+  so the detector reuses the consumer's existing events writer and
+  `dlq::run_relocator` channel — no extra Redis connection, no
+  separate IDMP-XADD producer_id).
+- New `StalledDetectorConfig` mirroring the `SchedulerConfig` shape.
+  Defaults: `tick_interval_ms = 30_000`, `idle_threshold_ms = 30_000`,
+  `max_stalled_attempts = 1` (matches BullMQ's `maxStalledCount`),
+  `scan_batch = 256`, `lock_ttl_secs = 5`. The embedded spawn forces
+  `tick_interval_ms == idle_threshold_ms == claim_min_idle_ms` so the
+  per-crash counting invariant holds without operator intervention.
+- New `STALLED_SCAN_SCRIPT` (Lua): for each (entry_id, job_id) pair
+  the Rust caller pre-decoded via XPENDING + pipelined XRANGE, INCR
+  the stall counter + EXPIRE the counter at sliding TTL
+  (`idle_threshold_ms * max_stalled_attempts * 2`). When `n <
+  max_stalled_attempts` the entry is recorded as `incremented` (Rust
+  emits `e=stalled`). When `n >= max_stalled_attempts` the script
+  `XACKDEL`s the entry out of the PEL inside the same Lua call (the
+  threshold gate) and records the entry as a threshold hit. The DLQ
+  XADD does NOT happen in the script — it travels the existing
+  `dlq_tx` channel + `run_relocator` pipeline so the IDMP-XADD wire
+  shape, the `e=dlq` emit, and `dlq_inflight` backpressure are all
+  reused.
+- New `RELOCATE_DLQ_PRE_ACKED_SCRIPT` (Lua) + `DlqRelocate::pre_acked`
+  flag. Necessary correctness fix: without this, the existing
+  `RELOCATE_DLQ_SCRIPT`'s XACKDEL gate would return 0 ("gate lost")
+  when run against an entry the stalled script already removed,
+  silently skipping the DLQ XADD — orphan ack, no DLQ entry. The
+  pre-acked script does the IDMP-XADD only (the IDMP marker is the
+  dedup guard; the upstream XACKDEL already excluded any concurrent
+  CLAIM / manual-ack from racing). Lazy SCRIPT LOAD on first
+  pre-acked entry so the common path (retry-exhausted-only) pays no
+  startup round trip.
+- `JOB_OK_SCRIPT` extended to DEL the per-job stall counter on
+  successful ack — KEYS[3] = `stall_counter_key`. A one-off stall
+  followed by success starts a fresh streak instead of inheriting
+  the old counter under sliding TTL. Common path (no counter ever
+  written) DELs to `0`; not an error.
+- `REPLAY_DLQ_SCRIPT` ARGV layout widened from triples
+  `(dlq_id, payload, name)` to **quads** `(+ job_id)` so the script
+  can synthesize the per-job stall counter key and DEL it on replay.
+  Single-deploy atomic upgrade per the engine-script contract.
+- `DlqReason::Stalled` (wire string `"stalled"`).
+- `MetricsSink::stalled_tick(StalledTick { scanned, incremented,
+  relocated })` default-noop trait method (backwards-compatible).
+- Events stream: new `e=stalled` entry (`id`, `n` opt, `attempt`,
+  `prev=active`, `ts`). Mirrors the BullMQ `Worker.on('stalled',
+  (jobId, prev))` payload shape so shim subscribers see the familiar
+  two-arg API.
+- `JobInfo.stalled_count: Option<u32>` populated only for Active-state
+  lookups (the counter is `DEL`'d on every terminal transition, so
+  probing in other states would always return `nil` and burn one
+  extra round trip).
+- New `leader_task.rs` extracts the shared script-load / transient-
+  classifier / value-coercion helpers the detector needs; promoter
+  and scheduler retain their own copies in-place to keep this slice's
+  diff scoped (consolidation is a follow-up refactor).
+
+Node shim (`chasquimq-node`):
+
+- **BREAKING (load-bearing for this slice).** `WorkerOptions.maxStalledCount`
+  now routes to engine `max_stalled_attempts` instead of `max_attempts`.
+  Pre-v1.4 the shim mapped this field to `max_attempts` with a `?? 3`
+  fallback that *also* masked the engine's real default of `25`; users
+  who set `maxStalledCount` on its own get a different DLQ-routing
+  outcome (handlers now retry up to 25 times by default instead of 3).
+  Migration: replace `maxStalledCount: N` with `maxAttempts: N`. A
+  one-time `WARN [chasquimq]` per `(queueName)` per process fires when
+  `maxStalledCount` is set without `maxAttempts` so upgraders see the
+  change loudly at runtime.
+- New `WorkerOptions.maxAttempts` — canonical name for total handler
+  attempts before DLQ-as-`retries_exhausted` (routes to engine
+  `max_attempts`).
+- New `WorkerOptions.stalledDetectorEnabled` (default `true`) and
+  `WorkerOptions.stalledInterval` (override the detector tick).
+- New `Worker.on('stalled', (jobId: string, prev: string) => ...)` —
+  lazily spawns the internal `QueueEvents` subscriber on first attach,
+  same shape as `'drained'` / `'progress'`. Cross-process scope: every
+  worker on the queue receives the event, not just the one holding
+  the stalled entry (the entry is in mid-flight on some OTHER worker,
+  possibly even one that crashed). `prev` is always `'active'`.
+- `QueueEvents` parses `e=stalled` and emits both the broadcast and
+  per-id channels.
+- NAPI: `ConsumerOpts` gains `maxStalledAttempts`,
+  `stalledDetectorEnabled`, `stalledDetectorTickMs`,
+  `stalledDetectorIdleThresholdMs`, `stalledDetectorScanBatch`.
+
+Python shim (`chasquimq-py`):
+
+- New `Worker(...)` kwargs: `max_stalled_attempts`,
+  `stalled_detector_enabled` (default `True`), `stalled_interval_ms`,
+  `stalled_detector_scan_batch`. **No deprecation needed** (unlike
+  Node) — the Python shim never had a pre-slice equivalent of
+  `maxStalledCount`; the existing `max_attempts` kwarg already routed
+  correctly to engine `max_attempts`.
+- New `worker.on('stalled', cb)` — callback signature `(job_id: str,
+  prev: str)`. Same lazy `QueueEvents` subscriber spin-up as
+  `drained` / `progress`. `stalled` joins `_PER_ID_EVENTS` in
+  `queue_events.py` so a future `Job.wait_until_stalled` (or
+  equivalent targeted listener) can subscribe to a single job
+  without paying the broadcast dispatch cost.
+- PyO3: `Consumer.__init__` extended with the new kwargs; `_native.pyi`
+  updated.
+
+Tests:
+
+- Engine: 6 integration cases (live Redis — `tests/stalled_detection.rs`)
+  covering the threshold-relocate flow (standalone-detector path,
+  isolates from the reader-CLAIM race), the no-false-positives gate
+  under healthy load, the disabled-skips-spawn invariant, the JOB_OK
+  no-counter regression, the REPLAY_DLQ quad-ARGV-shape regression,
+  and the e=stalled event field shape.
+- Engine unit: ~10 new tests across `stalled.rs` (reply-shape parser
+  + counter TTL math), `leader_task.rs` (the new shared helpers),
+  `metrics/mod.rs` (`DlqReason::Stalled.as_str`), `config.rs`
+  (validation rejects `max_stalled_attempts == 0`,
+  `scan_batch == 0`, `tick < idle`), and `redis/keys.rs`
+  (`stall_counter_key` + `stalled_lock_key` cluster hash-tag
+  sharing).
+- Node: 5 cross-FFI cases (`__test__/worker-stalled.test.ts`) pin the
+  routing-fix regression (`maxStalledCount: 2 + maxAttempts: 5` runs
+  ~5 attempts, not 2), the `'stalled'` listener wiring, and the
+  warn-once dedup. 5 existing tests that used `maxStalledCount` as
+  a retry cap migrated to `maxAttempts` (the new canonical name).
+- Python: 3 cross-FFI cases (`tests/test_stalled_detector.py`) pin
+  the `max_stalled_attempts` routing (always-failing handler
+  respects `max_attempts`, not `max_stalled_attempts`), the
+  `'stalled'` listener lazy spawn, and the
+  `stalled_detector_enabled=False` skip-spawn invariant.
+
+Doc surfaces synced: this slice, `docs/engine.md` (new
+"Stalled-job detector" section + `DlqReason::Stalled` row in DLQ
+tooling), `chasquimq-node/README.md` + `chasquimq-py/README.md`
+(symmetric "Stalled-job detection" sections + the Node breaking-
+change call-out), and the `site/src/content/docs/` reference /
+concept / options pages.
+
 ## Deferred follow-ups for 1.x
 
 - **Opt-in result-write bench scenario.** The PR #75 bench guard locked in the no-overhead-when-off claim (`store_results=false` regresses 0%). The opt-in path (`store_results=true` under sustained load) is not yet measured.

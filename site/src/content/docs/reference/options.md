@@ -50,13 +50,22 @@ exists.
 
 | Option | Node | Python | Rust | Controls |
 |---|---|---|---|---|
-| Total attempts (queue-wide) | `WorkerOptions.maxStalledCount` (**3**) | `Worker(max_attempts=25)` | `ConsumerConfig::max_attempts` (**3**) | Total attempts per job before DLQ. |
+| Total attempts (queue-wide) | `WorkerOptions.maxAttempts` (**25**) | `Worker(max_attempts=25)` | `ConsumerConfig::max_attempts` (**3**) | Total attempts per job before DLQ-as-`retries_exhausted`. **Node:** `maxStalledCount` was mis-routed here pre-v1.4 with a shim-side `?? 3` fallback that masked the engine default; v1.4 fixes the routing — `maxStalledCount` now goes to `max_stalled_attempts` (below) and `maxAttempts` is the canonical name. |
 | Total attempts (per job) | `JobsOptions.attempts` | `Queue.add(attempts=...)` | `JobRetryOverride::max_attempts` | Per-job override of the queue-wide value. |
 | Initial backoff (ms) | (set via `BackoffSpec.exponential(initialMs)`) | `BackoffSpec.exponential(initial_ms)` | `RetryConfig::initial_backoff_ms` (**100**) | Base delay for the first retry. |
 | Max backoff (ms) | `BackoffOptions.maxDelay` | `BackoffSpec(max_delay_ms=...)` | `RetryConfig::max_backoff_ms` (**30_000**) | Cap on the computed backoff per attempt. |
 | Multiplier | `BackoffOptions.multiplier` (**2** when built via `BackoffSpec.exponential`) | `BackoffSpec.exponential(multiplier=2.0)` | `RetryConfig::multiplier` (**2.0**) | Exponential growth factor. |
 | Jitter (ms) | `BackoffOptions.jitterMs` | `BackoffSpec(jitter_ms=...)` | `RetryConfig::jitter_ms` (**100**) | Symmetric ±jitter applied per retry. |
 | Backoff strategy (per job) | `JobsOptions.backoff` (`number` or `BackoffOptions`) | `Queue.add(backoff=...)` | `JobRetryOverride::backoff: BackoffSpec` | Override the queue-wide curve for this job. |
+
+## Stalled-job detection
+
+| Option | Node | Python | Rust | Controls |
+|---|---|---|---|---|
+| Detector toggle | `WorkerOptions.stalledDetectorEnabled` (**true**) | `Worker(stalled_detector_enabled=True)` | `ConsumerConfig::stalled_detector_enabled` (**true**) | Toggle the embedded leader-elected stalled-detector. Set `false` for pure-consumer benchmarks or deployments running a separate detector. |
+| Stall ceiling | `WorkerOptions.maxStalledCount` (**1**) | `Worker(max_stalled_attempts=1)` | `StalledDetectorConfig::max_stalled_attempts` (**1**) | Stall cycles past `idle_threshold_ms` before DLQ-as-`stalled`. Matches BullMQ's default. Validation rejects `0`. |
+| Tick interval (ms) | `WorkerOptions.stalledInterval` (**30_000**) | `Worker(stalled_interval_ms=30_000)` | `StalledDetectorConfig::tick_interval_ms` (**30_000**) | Scan-tick interval. The embedded spawn overrides this from `claim_min_idle_ms` to preserve the per-crash counting invariant (`tick == idle == claim_min_idle`); rarely worth setting. |
+| Scan batch | n/a | `Worker(stalled_detector_scan_batch=256)` | `StalledDetectorConfig::scan_batch` (**256**) | `XPENDING ... IDLE - + N` cap per tick. |
 
 ## Result storage
 

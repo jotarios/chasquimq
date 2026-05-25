@@ -485,6 +485,10 @@ class Worker:
         log_max_stream_len: int | None = None,
         log_max_line_bytes: int | None = None,
         events_progress_enabled: bool | None = None,
+        max_stalled_attempts: int | None = None,
+        stalled_detector_enabled: bool = True,
+        stalled_interval_ms: int | None = None,
+        stalled_detector_scan_batch: int | None = None,
     ) -> None: ...
 ```
 
@@ -522,6 +526,16 @@ on `{chasqui:<queue>}:scheduler:lock`.
   The persisted progress key is always written; this only mutes
   the events fan-out a `QueueEvents` subscriber would observe.
   **Default engine: `True`.**
+- `max_stalled_attempts` — stalled-detector ceiling. Stall cycles
+  past `idle_threshold_ms` before DLQ-as-`stalled`. **Default engine: `1`** (matches BullMQ's `maxStalledCount`).
+- `stalled_detector_enabled` — toggle the embedded stalled-job
+  detector. **Default `True`.** Set `False` for pure-consumer
+  benchmarks or deployments running a separate detector process.
+- `stalled_interval_ms` — detector tick interval (ms). **Default
+  engine: `30_000`.** The embedded spawn overrides this from
+  `claim_min_idle_ms` to preserve the per-crash counting invariant.
+- `stalled_detector_scan_batch` — `XPENDING ... IDLE - + N` cap per
+  tick. **Default engine: `256`.**
 
 ### `await worker.run()`
 
@@ -600,12 +614,7 @@ swallowed so a buggy listener cannot crash the worker.
 | `paused` | `()` | `pause()` was called. Process-local. |
 | `resumed` | `()` | `resume()` was called. Process-local. |
 | `progress` | `(job: Job, progress: int)` | Handler called [`job.update_progress(n)`](#await-jobupdate_progressn). **Cross-process scope.** Same lazy embedded `QueueEvents` subscriber as `drained` (zero-cost when no listener is attached). The worker re-uses the in-flight `Job` instance so handler-side `job.progress` and the callback observe identical state. Disable the events fan-out (and therefore this event) by passing `Worker(events_progress_enabled=False)`. |
-
-Names accepted for parity but currently never fire (engine doesn't
-emit the underlying transition yet — safe to wire up, will start
-firing when the corresponding engine work lands):
-
-- `stalled` — `(job_id: str, prev: str)`.
+| `stalled` | `(job_id: str, prev: str)` | Stalled-job detector observed this entry idle past `idle_threshold_ms` for the `attempt`-th consecutive scan (under threshold; the relocate path emits the existing `failed` channel with `reason='stalled'`). `prev` is always `'active'`. **Cross-process scope:** every worker on the queue receives the event regardless of which one held the stalled entry. Same lazy `QueueEvents` subscriber as `drained` / `progress`. |
 
 ```python
 worker.on("completed", lambda job, result: print("ok", job.id))

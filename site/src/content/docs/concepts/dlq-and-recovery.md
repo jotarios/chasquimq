@@ -18,9 +18,9 @@ The decision to make the DLQ a Redis Stream (not a list, not a hash, not a separ
 
 The alternative — a parallel Redis list, a separate dead-job hash, a different store entirely — would mean two operational stories to learn, two sets of tools, two places to monitor. Symmetry is the design choice.
 
-## Five reasons an entry lands in DLQ
+## Six reasons an entry lands in DLQ
 
-The engine writes a `reason` field on every DLQ entry. Five values, three of which fire from the consumer side and two from the reader side:
+The engine writes a `reason` field on every DLQ entry. Six values, three of which fire from the consumer side, two from the reader side, and one from the leader-elected stalled-job detector:
 
 | Reason | Side | When it fires | Handler ran? |
 |---|---|---|---|
@@ -30,8 +30,20 @@ The engine writes a `reason` field on every DLQ entry. Five values, three of whi
 | `decode_fail` | Reader | The entry's msgpack payload couldn't be decoded | No |
 | `malformed` | Reader | The entry was missing required fields | No |
 | `oversize` | Reader | The payload exceeded `max_payload_bytes` | No |
+| `stalled` | Stalled detector | PEL entry observed idle past `idle_threshold_ms` for `max_stalled_attempts` consecutive scans — i.e. the entry kept being CLAIM-redelivered to crashing workers without ever completing. | Maybe (every dispatch crashed before ack) |
 
 Reader-side reasons (`decode_fail` / `malformed` / `oversize`) carry `attempt: 0` because the handler never ran. Useful when triaging a backlog — a high `decode_fail` rate means a producer is writing in a different schema, not a handler bug.
+
+## Stalled jobs
+
+`retries_exhausted` and `stalled` look similar from a distance — both mean "this job couldn't finish" — but they catch different failure modes and require different operator responses.
+
+- **`retries_exhausted`** = the handler ran `max_attempts` times and *every run failed*. The handler's logic, the input data, or a downstream service is broken. Replay the entries after shipping a fix.
+- **`stalled`** = the handler kept *crashing the worker mid-execution* (segfault, OOM kill, infrastructure hiccup, kubelet OOM, deploy mid-job, etc) so the entry kept getting CLAIM-redelivered without an ack ever landing. The handler never even got to *fail* — it got interrupted. Replay won't help until the underlying worker-stability issue is resolved.
+
+The stalled-job detector lives behind the `ConsumerConfig::stalled_detector_enabled` (default `true`) toggle. On every `tick_interval_ms` (default 30s, inherited from `claim_min_idle_ms` on the embedded spawn) the leader replica runs `XPENDING ... IDLE` against the consumer group's PEL, INCRs a per-job stall counter (`{chasqui:<queue>}:stalls:<job_id>`) for every entry past the idle threshold, and atomically relocates entries that hit `max_stalled_attempts` (default `1`, matches BullMQ's `maxStalledCount`) to the DLQ with `reason: "stalled"`. The counter is sliding-TTL'd and `DEL`'d on every terminal transition (successful ack, DLQ replay), so a one-off stall followed by success starts a fresh streak.
+
+Subscribe to the `stalled` event on `Worker` (the in-process re-fan) or `QueueEvents` (cross-process, including the per-id channel `stalled:<jobId>`) to alert before threshold and decide whether to intervene.
 
 ## Routing into the DLQ is atomic
 
