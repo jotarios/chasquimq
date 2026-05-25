@@ -400,15 +400,41 @@ where
             return None;
         }
         // Forward the parent's queue_name + group + metrics + connection.
-        // CRITICAL: override `tick_interval_ms` and `idle_threshold_ms`
-        // from `claim_min_idle_ms` so the per-crash counting invariant
-        // (`tick == idle == claim_min_idle`) is automatic — the embedded
-        // path must never depend on the operator mirroring three fields.
+        //
+        // Tick / idle resolution rule (slice-12 fix-up):
+        //   - If the user left `stalled_detector.tick_interval_ms` /
+        //     `idle_threshold_ms` at the engine default (`30_000`), inherit
+        //     `claim_min_idle_ms` so the per-crash counting invariant
+        //     (`tick == idle == claim_min_idle`) is automatic on the
+        //     common path. This matches what the Node `stalledInterval`
+        //     option and the corresponding Python kwarg silently relied
+        //     on pre-fix-up.
+        //   - If the user EXPLICITLY set either knob to a non-default
+        //     value (FFI shims forward user-supplied values verbatim),
+        //     honor it. Silently overriding a value the user explicitly
+        //     set was the High-6 bug — the Node `stalledInterval` /
+        //     Python `stalled_interval_ms` options were dead letters.
+        //
+        // Operators who set `tick` and `idle` independently still own
+        // the `tick >= idle` validation; `validate()` enforces it.
+        let defaults = StalledDetectorConfig::default();
         let claim_idle = self.cfg.claim_min_idle_ms;
+        let user_tick = self.cfg.stalled_detector.tick_interval_ms;
+        let user_idle = self.cfg.stalled_detector.idle_threshold_ms;
+        let tick = if user_tick == defaults.tick_interval_ms {
+            claim_idle
+        } else {
+            user_tick
+        };
+        let idle = if user_idle == defaults.idle_threshold_ms {
+            claim_idle
+        } else {
+            user_idle
+        };
         let detector_cfg = StalledDetectorConfig {
             queue_name: self.cfg.queue_name.clone(),
-            tick_interval_ms: claim_idle,
-            idle_threshold_ms: claim_idle,
+            tick_interval_ms: tick,
+            idle_threshold_ms: idle,
             metrics: self.cfg.metrics.clone(),
             connection: self.cfg.connection.clone(),
             ..self.cfg.stalled_detector.clone()

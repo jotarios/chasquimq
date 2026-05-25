@@ -218,17 +218,21 @@ pub struct ConsumerConfig {
     /// standalone [`crate::StalledDetector`] API is unaffected.
     pub stalled_detector_enabled: bool,
     /// Configuration for the embedded stalled-job detector when
-    /// `stalled_detector_enabled` is `true`. The `queue_name`,
-    /// `tick_interval_ms`, and `idle_threshold_ms` fields are overridden
-    /// from the parent `ConsumerConfig` at spawn time (`queue_name` from
-    /// `ConsumerConfig::queue_name`; both timing fields from
-    /// `claim_min_idle_ms`), so the counter-semantic invariant
-    /// `tick_interval_ms == idle_threshold_ms == claim_min_idle_ms`
-    /// holds without the operator having to mirror three fields. The
-    /// `metrics` and `connection` fields are also forwarded from the
-    /// parent at spawn time. The other fields (`max_stalled_attempts`,
-    /// `scan_batch`, `lock_ttl_secs`, `holder_id`) are honored as
-    /// configured. Defaults to [`StalledDetectorConfig::default`].
+    /// `stalled_detector_enabled` is `true`. At spawn time:
+    ///   - `queue_name` is forwarded from `ConsumerConfig::queue_name`.
+    ///   - `metrics` and `connection` are forwarded from the parent.
+    ///   - `tick_interval_ms` and `idle_threshold_ms` inherit
+    ///     `claim_min_idle_ms` **only when left at their defaults**, so
+    ///     the counter-semantic invariant
+    ///     `tick_interval_ms == idle_threshold_ms == claim_min_idle_ms`
+    ///     holds on the common path. An explicit non-default value
+    ///     (set by an operator or forwarded by an FFI shim option) is
+    ///     honored verbatim; the operator owns the lockstep in that
+    ///     case, and `validate()` enforces `tick >= idle`.
+    ///   - The other fields (`max_stalled_attempts`, `scan_batch`,
+    ///     `lock_ttl_secs`, `holder_id`) are honored as configured.
+    ///
+    /// Defaults to [`StalledDetectorConfig::default`].
     pub stalled_detector: StalledDetectorConfig,
     /// Forwarded to the inline promoter the consumer spawns when
     /// `delayed_enabled` is true. Defaults to [`crate::metrics::NoopSink`].
@@ -519,15 +523,22 @@ pub struct StalledDetectorConfig {
     pub queue_name: String,
     /// How often the leader runs `XPENDING ... IDLE`. Default 30_000ms.
     /// **Must be >= `idle_threshold_ms`** — a faster tick INCRs more than
-    /// once per crash and breaks the per-crash counting invariant. The
-    /// embedded spawn overrides both from `ConsumerConfig::claim_min_idle_ms`
-    /// so the invariant is automatic on the common path.
+    /// once per crash and breaks the per-crash counting invariant.
+    ///
+    /// On the embedded `Consumer::run` spawn path, this value inherits
+    /// `ConsumerConfig::claim_min_idle_ms` *only when left at the
+    /// default*. An explicit non-default value is honored verbatim
+    /// (operators who set this on purpose own the lockstep with
+    /// `idle_threshold_ms`).
     pub tick_interval_ms: u64,
     /// Idle threshold passed to `XPENDING ... IDLE`. Default 30_000ms.
-    /// See `tick_interval_ms` for the lockstep invariant. The embedded
-    /// spawn forwards `ConsumerConfig::claim_min_idle_ms` so the detector
-    /// scans the same entries the reader's CLAIM safety net is already
-    /// re-delivering — one INCR per crash cycle.
+    /// See `tick_interval_ms` for the lockstep invariant.
+    ///
+    /// On the embedded `Consumer::run` spawn path, this value inherits
+    /// `ConsumerConfig::claim_min_idle_ms` *only when left at the
+    /// default* so the detector scans the same entries the reader's
+    /// CLAIM safety net is already re-delivering — one INCR per crash
+    /// cycle. An explicit non-default value is honored verbatim.
     pub idle_threshold_ms: u64,
     /// Stall counter ceiling. When `n >= max_stalled_attempts`, the entry
     /// is atomically relocated to the DLQ as `DlqReason::Stalled`. Default

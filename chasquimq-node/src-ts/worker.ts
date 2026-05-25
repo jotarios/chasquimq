@@ -109,13 +109,14 @@ export interface WorkerOptions {
    * Override the stalled-job detector's scan-tick interval (ms).
    * Default `30_000` (mirrors the engine default).
    *
-   * The detector inherits its `idle_threshold_ms` from `claim_min_idle_ms`
-   * at the engine level so the per-crash counting invariant
-   * (`tick == idle == claim_min_idle`) holds — see
-   * `docs/engine.md#stalled-detection`. This option only sets the
-   * scheduling cadence operators usually want to leave alone; in
-   * practice the engine clamps this to match `claim_min_idle_ms` on
-   * the embedded spawn.
+   * On the embedded spawn path, the engine inherits both the detector
+   * `tick_interval_ms` and `idle_threshold_ms` from `claim_min_idle_ms`
+   * **only when those fields are at their default** so the per-crash
+   * counting invariant (`tick == idle == claim_min_idle`) holds on the
+   * common path. Set this explicitly to a non-default value and the
+   * engine honors it verbatim — the operator owns the lockstep
+   * (`tick_interval_ms >= idle_threshold_ms`, enforced by config
+   * validation). See `docs/engine.md#stalled-detection`.
    */
   stalledInterval?: number
 

@@ -781,3 +781,71 @@ async fn stalled_event_payload_shape() {
     let _ = tokio::time::timeout(Duration::from_secs(10), consumer_task).await;
     flush_stalled(&admin, &queue).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires REDIS_URL"]
+async fn embedded_spawn_honors_user_supplied_tick_and_idle() {
+    // Slice-12 fix-up (High 6): the embedded spawn used to UNCONDITIONALLY
+    // override `stalled_detector.tick_interval_ms` and `idle_threshold_ms`
+    // from `claim_min_idle_ms`. A user / FFI shim setting either value
+    // explicitly was a dead letter — silently silenced. Post-fix-up, the
+    // override only kicks in when the field is still at its default
+    // sentinel; an explicit non-default value reaches the detector
+    // verbatim.
+    //
+    // Wire: drive the user-supplied tick fast (200ms) while leaving
+    // `claim_min_idle_ms` at a value (5000ms) that — under the old
+    // "always override" behavior — would silence the detector for the
+    // length of the test. If the explicit tick wins, we observe several
+    // tick events inside a few seconds; if the override silently fired,
+    // we'd observe zero.
+    let queue = unique_queue("user_tick_honored");
+    let admin = admin().await;
+    flush_stalled(&admin, &queue).await;
+
+    let sink = Arc::new(InMemorySink::new());
+    let mut cfg = consumer_cfg(&queue, sink.clone(), 25);
+    // Long CLAIM idle → if the embedded path still overrode tick/idle
+    // from `claim_min_idle_ms`, ticks would fire every 5s and we'd
+    // observe ~1 in the 3s observation window below.
+    cfg.claim_min_idle_ms = 5_000;
+    cfg.stalled_detector_enabled = true;
+    cfg.stalled_detector = StalledDetectorConfig {
+        // Explicit non-default tick + idle — these must be preserved.
+        tick_interval_ms: 200,
+        idle_threshold_ms: 200,
+        max_stalled_attempts: 100, // very high → no DLQ during the test
+        scan_batch: 64,
+        metrics: sink.clone(),
+        ..StalledDetectorConfig::default()
+    };
+
+    let consumer = Consumer::<Sample>::new(redis_url(), cfg);
+    let handler = move |_job: chasquimq::Job<Sample>| async move {
+        // Resolve immediately — we don't need stalled events, only
+        // tick events from the detector loop.
+        Ok::<_, chasquimq::HandlerError>(Bytes::new())
+    };
+    let shutdown = CancellationToken::new();
+    let consumer_task = tokio::spawn(consumer.run(handler, shutdown.clone()));
+
+    // Give the consumer + detector time to spawn + observe several
+    // ticks at 200ms. Wait for at least 5 ticks (>= 1s of activity at
+    // the requested cadence); without the fix, this would loop forever
+    // (would only see ~1 tick at the 5s claim_min_idle).
+    wait_until(Duration::from_secs(15), || async {
+        sink.stalled_ticks().len() >= 5
+    })
+    .await;
+
+    let ticks = sink.stalled_ticks().len();
+    assert!(
+        ticks >= 5,
+        "embedded detector must honor user-supplied tick_interval_ms=200ms; \
+         observed {ticks} ticks in 15s (would expect <=3 under the silent override)"
+    );
+
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(10), consumer_task).await;
+    flush_stalled(&admin, &queue).await;
+}

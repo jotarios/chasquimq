@@ -88,15 +88,16 @@ pub struct ConsumerOpts {
     /// `ConsumerConfig::stalled_detector_enabled`. Default `true`.
     pub stalled_detector_enabled: Option<bool>,
     /// Override the detector's tick interval (ms). Maps to
-    /// `stalled_detector.tick_interval_ms`. Note: the embedded spawn
-    /// overrides this from `claim_min_idle_ms` to preserve the
-    /// per-crash counting invariant; setting this only matters when
-    /// the operator is running the detector standalone. Default
-    /// inherits from `claim_min_idle_ms`.
+    /// `stalled_detector.tick_interval_ms`. On the embedded spawn the
+    /// engine inherits this from `claim_min_idle_ms` only when the
+    /// field is at its default (`30_000`); explicit non-default values
+    /// flow through verbatim so this option is now honored. Operators
+    /// who set this own the lockstep with the idle threshold
+    /// (`tick >= idle`, enforced by config validation).
     pub stalled_detector_tick_ms: Option<i64>,
     /// Override the detector's `XPENDING ... IDLE` threshold (ms).
-    /// Maps to `stalled_detector.idle_threshold_ms`. Same embedded-
-    /// spawn-override note as `stalled_detector_tick_ms`.
+    /// Maps to `stalled_detector.idle_threshold_ms`. Same default-only
+    /// inherit-from-`claim_min_idle_ms` rule as `stalled_detector_tick_ms`.
     pub stalled_detector_idle_threshold_ms: Option<i64>,
     /// Override the detector's per-tick scan cap. Maps to
     /// `stalled_detector.scan_batch`. Default `256`.
