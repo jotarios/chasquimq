@@ -15,6 +15,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Queue, Worker } from '../dist/index.js'
+import { __resetMaxStalledCountWarnLatchForTests } from '../dist/worker.js'
 
 const REDIS_URL = process.env.REDIS_URL
 const skipIfNoRedis = REDIS_URL ? describe : describe.skip
@@ -126,6 +127,11 @@ skipIfNoRedis('Worker stalled-detector deprecation warning', () => {
     queueName = `qmq-test-stalled-warn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     queue = new Queue(queueName, { connection: parseConn(REDIS_URL!) })
     warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    // The warn latch is process-global — reset it so per-test
+    // scenarios start with a clean slate. Without this, the latch set
+    // by the first warning test would suppress every subsequent
+    // warn-triggering test in the file.
+    __resetMaxStalledCountWarnLatchForTests()
   })
 
   afterEach(async () => {
@@ -193,6 +199,40 @@ skipIfNoRedis('Worker stalled-detector deprecation warning', () => {
       (s) => typeof s === 'string' && s.includes('[chasquimq]') && s.includes('maxStalledCount'),
     )
     expect(matching.length).toBe(0)
+  })
+
+  it('warns once per process across multiple queues', async () => {
+    // Multi-queue deployment regression: N Workers on N different
+    // queues, each setting `maxStalledCount` on its own, must produce
+    // exactly ONE `[chasquimq]` warning total — the dedup latch is
+    // process-scoped, not per-queue.
+    const workers: Worker<{ value: number }, number>[] = []
+    try {
+      for (let i = 0; i < 4; i++) {
+        const w = new Worker<{ value: number }, number>(
+          `${queueName}-${i}`,
+          async () => 0,
+          {
+            connection: parseConn(REDIS_URL!),
+            autorun: false,
+            maxStalledCount: 3,
+          },
+        )
+        workers.push(w)
+      }
+      const calls = warnSpy.mock.calls.flat() as string[]
+      const matching = calls.filter(
+        (s) => typeof s === 'string' && s.includes('[chasquimq]') && s.includes('maxStalledCount'),
+      )
+      expect(matching.length).toBe(1)
+    } finally {
+      for (const w of workers) {
+        await Promise.race([
+          w.close().catch(() => {}),
+          new Promise((r) => setTimeout(r, 2_000)),
+        ])
+      }
+    }
   })
 })
 

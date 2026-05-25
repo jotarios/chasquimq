@@ -704,23 +704,46 @@ export class Worker<
 // ---------------------------------------------------------------------------
 
 /**
- * Module-level dedup set for the v1.4.0 `maxStalledCount` semantics
- * warning. We warn at most once per `(queueName)` per process so a
- * deployment with N workers on the same queue doesn't spam the
- * console — different queues each get one warning. Kept module-level
- * (not class-level) so the dedup survives across Worker instances
- * pointed at the same queue.
+ * Process-global latch for the v1.4.0 `maxStalledCount` semantics
+ * warning. We warn at most once per process — the message is a
+ * migration nag, not a per-queue diagnostic, and a multi-queue
+ * deployment that sets `maxStalledCount` on each Worker shouldn't
+ * spam N copies of the same prose. The first triggering queue's name
+ * makes the warning concrete; subsequent triggers are suppressed.
+ *
+ * Stashed on `globalThis` (under a unique symbol) so multiple
+ * loaded copies of this module — which happens under Vitest's
+ * isolated test runner — still share one latch, matching the
+ * "once per process" intent that a normal user app honors via the
+ * single-instance CommonJS module cache.
  */
-const maxStalledCountWarnedQueues: Set<string> = new Set()
+const WARN_LATCH_KEY = Symbol.for('chasquimq.maxStalledCountWarned')
+type LatchHost = typeof globalThis & {
+  [WARN_LATCH_KEY]?: boolean
+}
 
 function warnMaxStalledCountSemanticsOnce(queueName: string): void {
-  if (maxStalledCountWarnedQueues.has(queueName)) return
-  maxStalledCountWarnedQueues.add(queueName)
+  const host = globalThis as LatchHost
+  if (host[WARN_LATCH_KEY]) return
+  host[WARN_LATCH_KEY] = true
   // eslint-disable-next-line no-console
   console.warn(
     `WARN [chasquimq] \`maxStalledCount\` now controls stall-attempts (not job-attempts) ` +
-      `for queue "${queueName}". Use \`maxAttempts\` for the prior behavior. See CHANGELOG for v1.4.0.`,
+      `(first seen on queue "${queueName}"). Use \`maxAttempts\` for the prior behavior. ` +
+      `This warning fires once per process; see CHANGELOG for v1.4.0.`,
   )
+}
+
+/**
+ * Test-only: reset the warn-once latch so the next call to
+ * `warnMaxStalledCountSemanticsOnce` fires again. Used by
+ * `worker-stalled.test.ts` to exercise per-test scenarios without
+ * carrying latch state between tests. Not part of the public API —
+ * the underscore prefix signals "do not import".
+ */
+export function __resetMaxStalledCountWarnLatchForTests(): void {
+  const host = globalThis as LatchHost
+  host[WARN_LATCH_KEY] = false
 }
 
 function buildRedisUrl(c: ConnectionOptions): string {
