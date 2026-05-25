@@ -290,7 +290,12 @@ impl Default for ConsumerConfig {
             block_ms: 5_000,
             claim_min_idle_ms: 30_000,
             concurrency: 100,
-            max_attempts: 3,
+            // Default tuned to match the FFI shims (Python kwarg default,
+            // Node docs) and BullMQ. A handler that always fails will run
+            // 25 times before being DLQ'd as `retries_exhausted`. Override
+            // per-queue via `ConsumerConfig::max_attempts` or per-job via
+            // `JobRetryOverride::max_attempts` on `Producer::add_with_options`.
+            max_attempts: 25,
             ack_batch: 256,
             ack_idle_ms: 5,
             shutdown_deadline_secs: 30,

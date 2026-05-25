@@ -50,7 +50,7 @@ exists.
 
 | Option | Node | Python | Rust | Controls |
 |---|---|---|---|---|
-| Total attempts (queue-wide) | `WorkerOptions.maxAttempts` (**25**) | `Worker(max_attempts=25)` | `ConsumerConfig::max_attempts` (**3**) | Total attempts per job before DLQ-as-`retries_exhausted`. **Node:** `maxStalledCount` was mis-routed here pre-v1.4 with a shim-side `?? 3` fallback that masked the engine default; v1.4 fixes the routing — `maxStalledCount` now goes to `max_stalled_attempts` (below) and `maxAttempts` is the canonical name. |
+| Total attempts (queue-wide) | `WorkerOptions.maxAttempts` (**25**) | `Worker(max_attempts=25)` | `ConsumerConfig::max_attempts` (**25**) | Total attempts per job before DLQ-as-`retries_exhausted`. **Node:** `maxStalledCount` was mis-routed here pre-v1.4 with a shim-side `?? 3` fallback that masked the engine default of `25`; v1.4 fixes the routing — `maxStalledCount` now goes to `max_stalled_attempts` (below) and `maxAttempts` is the canonical name. |
 | Total attempts (per job) | `JobsOptions.attempts` | `Queue.add(attempts=...)` | `JobRetryOverride::max_attempts` | Per-job override of the queue-wide value. |
 | Initial backoff (ms) | (set via `BackoffSpec.exponential(initialMs)`) | `BackoffSpec.exponential(initial_ms)` | `RetryConfig::initial_backoff_ms` (**100**) | Base delay for the first retry. |
 | Max backoff (ms) | `BackoffOptions.maxDelay` | `BackoffSpec(max_delay_ms=...)` | `RetryConfig::max_backoff_ms` (**30_000**) | Cap on the computed backoff per attempt. |

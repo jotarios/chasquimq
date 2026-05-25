@@ -101,7 +101,7 @@ pub struct ConsumerConfig {
 - `block_ms` — `XREADGROUP BLOCK`. **Default `5000`.**
 - `claim_min_idle_ms` — recovery threshold for the `XREADGROUP ... CLAIM` safety net. **Default `30_000`.**
 - `concurrency` — max in-flight handler invocations. **Default `100`.**
-- `max_attempts` — total attempts per job (initial + retries). **Default `3`.**
+- `max_attempts` — total attempts per job (initial + retries). **Default `25`** (matches the Node/Python FFI shims).
 - `ack_batch` — `XACK` flush size. **Default `256`.**
 - `ack_idle_ms` — max idle time before flushing a partial ack batch. **Default `5`.**
 - `shutdown_deadline_secs` — max time the engine waits for in-flight handlers on shutdown. **Default `30`.**
