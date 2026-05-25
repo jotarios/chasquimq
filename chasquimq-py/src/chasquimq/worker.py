@@ -90,11 +90,15 @@ class Worker:
       this EE so callers see ``(job, n)`` in the same process that ran
       the handler. Disable the events fan-out (and therefore this
       event) by passing ``Worker(events_progress_enabled=False)``.
-
-    Listener names accepted for parity but currently no-op (engine
-    doesn't emit the underlying transition yet): ``stalled``. These
-    can be wired up without raising; promoted to active events when
-    the corresponding engine work lands.
+    * ``stalled``   — ``(job_id: str, prev: str)``. Fired when the
+      stalled-job detector observes an entry sitting idle past
+      ``idle_threshold_ms`` for the ``attempt``-th consecutive scan
+      (under threshold; the relocate path emits a separate ``dlq``
+      event with ``reason='stalled'``). ``prev`` is always
+      ``'active'``. **Cross-process scope:** every worker on this
+      queue receives the event, not just the one holding the entry.
+      Lazily spawns the internal :class:`QueueEvents` subscriber on
+      first attach.
     """
 
     def __init__(
@@ -124,6 +128,10 @@ class Worker:
         log_max_stream_len: Optional[int] = None,
         log_max_line_bytes: Optional[int] = None,
         events_progress_enabled: Optional[bool] = None,
+        max_stalled_attempts: Optional[int] = None,
+        stalled_detector_enabled: bool = True,
+        stalled_interval_ms: Optional[int] = None,
+        stalled_detector_scan_batch: Optional[int] = None,
     ) -> None:
         self._queue_name = queue_name
         self._handler = handler
@@ -166,6 +174,19 @@ class Worker:
             consumer_kwargs["log_max_line_bytes"] = log_max_line_bytes
         if events_progress_enabled is not None:
             consumer_kwargs["events_progress_enabled"] = events_progress_enabled
+        # Slice-12 stalled-detector knobs. Mirrors the Node shim's
+        # `maxStalledCount` / `stalledDetectorEnabled` /
+        # `stalledInterval`. No deprecation warning needed here — the
+        # Python shim never had a pre-slice `max_stalled_count` field
+        # (the equivalent semantic — total handler attempts before DLQ
+        # — already lived under the canonical `max_attempts` name).
+        consumer_kwargs["stalled_detector_enabled"] = stalled_detector_enabled
+        if max_stalled_attempts is not None:
+            consumer_kwargs["max_stalled_attempts"] = max_stalled_attempts
+        if stalled_interval_ms is not None:
+            consumer_kwargs["stalled_interval_ms"] = stalled_interval_ms
+        if stalled_detector_scan_batch is not None:
+            consumer_kwargs["stalled_detector_scan_batch"] = stalled_detector_scan_batch
 
         if credential_provider is not None:
             # The native consumer captures the running asyncio loop at
@@ -410,7 +431,7 @@ class Worker:
         """
         self._listeners[event_name].append(callback)
         if (
-            event_name in ("drained", "progress")
+            event_name in ("drained", "progress", "stalled")
             and self._internal_events is None
             and not self._closed
         ):
@@ -523,8 +544,24 @@ class Worker:
             job.progress = progress_int
             self._emit("progress", job, progress_int)
 
+        def _on_stalled(payload: dict, _event_id: str) -> None:
+            # Slice-12: forward `stalled` events with the BullMQ-shaped
+            # ``(job_id, prev)`` payload. Cross-process scope (the
+            # detector is leader-elected per queue, so any worker on
+            # the queue receives the event regardless of which worker
+            # held the stalled entry). Not Job-keyed because the entry
+            # is in mid-flight on some OTHER worker (possibly even one
+            # that crashed); the local ``_inflight`` map wouldn't
+            # have a live :class:`Job` for this id.
+            job_id = payload.get("jobId")
+            prev = payload.get("prev", "active")
+            if job_id is None:
+                return
+            self._emit("stalled", job_id, prev)
+
         events.on("drained", _on_drained)
         events.on("progress", _on_progress)
+        events.on("stalled", _on_stalled)
         # Note: :class:`QueueEvents` does not currently expose an
         # explicit ``error`` channel the way Node's ``EventEmitter``
         # does; transient subscriber errors are logged inside the

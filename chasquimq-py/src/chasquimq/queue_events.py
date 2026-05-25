@@ -417,7 +417,7 @@ _NUMERIC_EVENT_FIELDS: frozenset[str] = frozenset(
 # :meth:`Job.wait_until_finished` doesn't have to filter every
 # broadcast event by jobId.
 _PER_ID_EVENTS: frozenset[str] = frozenset(
-    {"active", "completed", "failed", "progress"}
+    {"active", "completed", "failed", "progress", "stalled"}
 )
 
 

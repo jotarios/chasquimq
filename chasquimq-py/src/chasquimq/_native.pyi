@@ -112,6 +112,10 @@ class Consumer:
         log_max_stream_len: Optional[int] = None,
         log_max_line_bytes: Optional[int] = None,
         events_progress_enabled: Optional[bool] = None,
+        max_stalled_attempts: Optional[int] = None,
+        stalled_detector_enabled: Optional[bool] = None,
+        stalled_interval_ms: Optional[int] = None,
+        stalled_detector_scan_batch: Optional[int] = None,
     ) -> None: ...
     def run(
         self, handler: Callable[[_Job], Awaitable[Any]]
