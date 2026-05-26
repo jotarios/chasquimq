@@ -499,7 +499,7 @@ consumer auto-embeds a scheduler task (controlled by
 on `{chasqui:<queue>}:scheduler:lock`.
 
 - `concurrency` — max in-flight handler invocations. **Default `100`.**
-- `max_attempts` — total attempts per job. **Default `25`** (the engine cap; the Node shim's `maxStalledCount` defaults lower).
+- `max_attempts` — total attempts per job. **Default `25`** (the engine cap; matches the Node shim's `maxAttempts` default).
 - `group` — consumer group name. **Default `"default"`.**
 - `consumer_id` — optional XREADGROUP consumer name.
 - `read_block_ms` — `XREADGROUP BLOCK` timeout. **Default engine: `5000`.**
@@ -527,7 +527,7 @@ on `{chasqui:<queue>}:scheduler:lock`.
   the events fan-out a `QueueEvents` subscriber would observe.
   **Default engine: `True`.**
 - `max_stalled_attempts` — stalled-detector ceiling. Stall cycles
-  past `idle_threshold_ms` before DLQ-as-`stalled`. **Default engine: `1`** (matches BullMQ's `maxStalledCount`).
+  past `idle_threshold_ms` before DLQ-as-`stalled`. **Default engine: `2`** — one extra tick of headroom over BullMQ's `maxStalledCount: 1` to avoid racing the reader's CLAIM-on-read recovery path.
 - `stalled_detector_enabled` — toggle the embedded stalled-job
   detector. **Default `True`.** Set `False` for pure-consumer
   benchmarks or deployments running a separate detector process.

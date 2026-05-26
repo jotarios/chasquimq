@@ -399,8 +399,9 @@ const worker = new Worker(
   },
   {
     connection: { host: "127.0.0.1", port: 6379 },
-    // Stall ceiling (BullMQ's `maxStalledCount` default).
-    maxStalledCount: 1,
+    // Stall ceiling — default `2` (one extra tick of headroom over
+    // BullMQ's `maxStalledCount: 1` to avoid racing CLAIM-on-read).
+    maxStalledCount: 2,
     // Total handler attempts before DLQ-as-retries_exhausted (canonical
     // name for what users pre-v1.4 thought `maxStalledCount` was doing).
     maxAttempts: 25,
@@ -422,7 +423,7 @@ events.on("stalled", ({ jobId, attempt, prev }) => {
 
 | Option | Default | Controls |
 |---|---:|---|
-| `maxStalledCount` | `1` | Stall cycles past `idle_threshold_ms` before DLQ-as-`stalled`. Matches BullMQ's default. |
+| `maxStalledCount` | `2` | Stall cycles past `idle_threshold_ms` before DLQ-as-`stalled`. One extra tick of headroom over BullMQ's `maxStalledCount: 1` to avoid racing the reader's CLAIM-on-read recovery path. |
 | `maxAttempts` | `25` | Total handler attempts (initial + retries) before DLQ-as-`retries_exhausted`. Per-job override via `Queue.add(name, data, { attempts })`. |
 | `stalledDetectorEnabled` | `true` | Toggle the embedded detector. Set `false` for pure-consumer benchmarks or deployments running a separate detector process. |
 | `stalledInterval` | `30_000` | Scan-tick interval (ms). The embedded spawn overrides this from the engine's `claim_min_idle_ms` to preserve the per-crash counting invariant (`tick == idle == claim_min_idle`); rarely worth setting. |

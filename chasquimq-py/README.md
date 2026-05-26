@@ -428,8 +428,9 @@ worker = Worker(
     "emails",
     handler,
     redis_url="redis://127.0.0.1:6379",
-    # Stall ceiling (matches the engine default; BullMQ's default too).
-    max_stalled_attempts=1,
+    # Stall ceiling — default `2` (one extra tick of headroom over
+    # BullMQ's `maxStalledCount: 1` to avoid racing CLAIM-on-read).
+    max_stalled_attempts=2,
     # Total handler attempts before DLQ-as-retries_exhausted.
     max_attempts=25,
 )
@@ -458,7 +459,7 @@ events.on("stalled", on_stalled_event)
 
 | Option | Default | Controls |
 |---|---:|---|
-| `max_stalled_attempts` | `1` | Stall cycles past `idle_threshold_ms` before DLQ-as-`stalled`. Matches BullMQ's `maxStalledCount` default. |
+| `max_stalled_attempts` | `2` | Stall cycles past `idle_threshold_ms` before DLQ-as-`stalled`. One extra tick of headroom over BullMQ's `maxStalledCount: 1` to avoid racing the reader's CLAIM-on-read recovery path. |
 | `max_attempts` | `25` | Total handler attempts (initial + retries) before DLQ-as-`retries_exhausted`. Per-job override via `Queue.add(name, data, attempts=N)`. |
 | `stalled_detector_enabled` | `True` | Toggle the embedded detector. Set `False` for pure-consumer benchmarks or deployments running a separate detector process. |
 | `stalled_interval_ms` | `30_000` | Scan-tick interval (ms). The embedded spawn overrides this from the engine's `claim_min_idle_ms` to preserve the per-crash counting invariant (`tick == idle == claim_min_idle`); rarely worth setting. |

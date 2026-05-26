@@ -424,10 +424,13 @@ Engine changes (`chasquimq/`):
   separate IDMP-XADD producer_id).
 - New `StalledDetectorConfig` mirroring the `SchedulerConfig` shape.
   Defaults: `tick_interval_ms = 30_000`, `idle_threshold_ms = 30_000`,
-  `max_stalled_attempts = 1` (matches BullMQ's `maxStalledCount`),
-  `scan_batch = 256`, `lock_ttl_secs = 5`. The embedded spawn forces
-  `tick_interval_ms == idle_threshold_ms == claim_min_idle_ms` so the
-  per-crash counting invariant holds without operator intervention.
+  `max_stalled_attempts = 2` (one extra tick of headroom over BullMQ's
+  `maxStalledCount: 1` to avoid racing the reader's CLAIM-on-read
+  recovery path; rationale below under "Default `max_stalled_attempts`
+  bump"), `scan_batch = 256`, `lock_ttl_secs = 5`. The embedded spawn
+  forces `tick_interval_ms == idle_threshold_ms == claim_min_idle_ms`
+  so the per-crash counting invariant holds without operator
+  intervention.
 - New `STALLED_SCAN_SCRIPT` (Lua): for each (entry_id, job_id) pair
   the Rust caller pre-decoded via XPENDING + pipelined XRANGE, INCR
   the stall counter + EXPIRE the counter at sliding TTL
@@ -474,6 +477,21 @@ Engine changes (`chasquimq/`):
   classifier / value-coercion helpers the detector needs; promoter
   and scheduler retain their own copies in-place to keep this slice's
   diff scoped (consolidation is a follow-up refactor).
+
+**Default `max_stalled_attempts` bump (`1` → `2`).** Initial slice
+shipped with `max_stalled_attempts = 1` to match BullMQ's
+`maxStalledCount` default verbatim. Post-merge testing surfaced a
+race: with `max_stalled_attempts = 1`, the *first* idle PEL scan
+that finds an entry idle past `idle_threshold_ms` immediately routes
+it to DLQ-Stalled — racing the reader's CLAIM-on-read recovery path
+for operators with short `claim_min_idle_ms`. Bumping the default to
+`2` requires a second consecutive idle observation
+(~`tick_interval_ms` apart) before relocating, which eliminates the
+race window. BullMQ's `maxStalledCount = 1` means "fail after 1
+stall observation"; ours of `2` means "fail after 2 consecutive
+stall observations" — comparable safety stance, one extra
+`tick_interval_ms` of DLQ-Stalled routing latency for genuinely-
+crashed workers (with the default 30s tick, that's 30s extra).
 
 Node shim (`chasquimq-node`):
 

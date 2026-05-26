@@ -206,13 +206,17 @@ async fn detector_relocates_after_max_stalled_attempts() {
     flush_stalled(&admin, &queue).await;
 
     let sink = Arc::new(InMemorySink::new());
-    // `max_stalled_attempts = 1` matches the BullMQ default ("one
-    // missed scan and you're out"). For the hung-handler simulation,
-    // each tick the detector and the reader's CLAIM safety net race
-    // for the entry: detector-wins → INCR=1 → threshold → relocate;
-    // reader-wins → CLAIM-redeliver, idle resets, repeat. Probability
-    // of N consecutive reader wins is 0.5^N; the 30s wait window
-    // tolerates up to ~15 ticks (~30 ticks at 1s) without flaking.
+    // `max_stalled_attempts = 1` ("one missed scan and you're out") is
+    // pinned explicitly here to exercise the threshold-hit relocate path
+    // on the first idle observation — the engine default is `2` (one
+    // extra tick of headroom to avoid racing the CLAIM safety net), but
+    // this test is *about* the threshold-hit codepath, not the default
+    // value. For the hung-handler simulation, each tick the detector and
+    // the reader's CLAIM safety net race for the entry: detector-wins →
+    // INCR=1 → threshold → relocate; reader-wins → CLAIM-redeliver, idle
+    // resets, repeat. Probability of N consecutive reader wins is 0.5^N;
+    // the 30s wait window tolerates up to ~15 ticks (~30 ticks at 1s)
+    // without flaking.
     let mut cfg = fast_detector_cfg(&queue, sink.clone(), 1);
     // 1-second claim threshold + detector tick (embedded path forces
     // tick=idle=claim_min_idle). Concurrency=1 so only one worker

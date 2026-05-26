@@ -82,7 +82,9 @@ pub struct ConsumerOpts {
     pub events_progress_enabled: Option<bool>,
     /// Maximum stall attempts before the stalled-job detector relocates
     /// the entry to the DLQ with `DlqReason::Stalled`. Maps to engine
-    /// `stalled_detector.max_stalled_attempts`. Default `1`.
+    /// `stalled_detector.max_stalled_attempts`. Default `2` — requires
+    /// two consecutive idle observations before relocating, which avoids
+    /// racing the reader's CLAIM-on-read recovery path.
     pub max_stalled_attempts: Option<u32>,
     /// Toggle the embedded stalled-job detector. Maps to
     /// `ConsumerConfig::stalled_detector_enabled`. Default `true`.

@@ -542,9 +542,16 @@ pub struct StalledDetectorConfig {
     pub idle_threshold_ms: u64,
     /// Stall counter ceiling. When `n >= max_stalled_attempts`, the entry
     /// is atomically relocated to the DLQ as `DlqReason::Stalled`. Default
-    /// `1` — matches BullMQ's `maxStalledCount` default; one missed scan
-    /// is enough to call it stalled. Set higher for noisy workloads where
-    /// brief CLAIM redeliveries shouldn't count. Validation rejects `0`.
+    /// `2` — requires two consecutive idle observations
+    /// (~`tick_interval_ms` apart) before relocating, which avoids racing
+    /// the reader's CLAIM-on-read recovery path for operators with short
+    /// `claim_min_idle_ms`. BullMQ's `maxStalledCount = 1` means "fail
+    /// after 1 stall observation"; ours of `2` means "fail after 2
+    /// consecutive stall observations" — comparable safety stance, one
+    /// extra `tick_interval_ms` of DLQ-Stalled routing latency for
+    /// genuinely-crashed workers. Set lower for ultra-fast routing in
+    /// uncontested deployments, or higher for noisy workloads where brief
+    /// CLAIM redeliveries shouldn't count. Validation rejects `0`.
     pub max_stalled_attempts: u32,
     /// `XPENDING ... - + <count>` cap. Bounds the scan size so a giant
     /// stuck PEL can't block the leader on one tick. Default `256`.
@@ -592,7 +599,7 @@ impl Default for StalledDetectorConfig {
             queue_name: "default".to_string(),
             tick_interval_ms: 30_000,
             idle_threshold_ms: 30_000,
-            max_stalled_attempts: 1,
+            max_stalled_attempts: 2,
             scan_batch: 256,
             // Must outlive `tick_interval_ms` (the leader sleeps for one
             // full tick between scans and will lose its lock to a
@@ -642,7 +649,7 @@ mod tests {
     fn default_config_passes_validation() {
         // The defaults always satisfy the stalled-detector invariants:
         // tick_interval_ms == idle_threshold_ms (both 30_000ms),
-        // max_stalled_attempts == 1 (>= 1), scan_batch == 256 (>= 1).
+        // max_stalled_attempts == 2 (>= 1), scan_batch == 256 (>= 1).
         let cfg = ConsumerConfig::default();
         assert!(cfg.validate().is_ok());
     }

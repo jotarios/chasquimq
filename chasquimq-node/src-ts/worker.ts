@@ -78,8 +78,10 @@ export interface WorkerOptions {
   /**
    * Maximum stall attempts before the stalled-job detector relocates
    * the entry to the DLQ with `DlqReason::Stalled`. Maps to engine
-   * `max_stalled_attempts` (default `1` — matches BullMQ's
-   * `maxStalledCount` default).
+   * `max_stalled_attempts` (default `2` — requires two consecutive
+   * idle observations before relocating, which avoids racing the
+   * reader's CLAIM-on-read recovery path. BullMQ's `maxStalledCount`
+   * defaults to `1`.).
    *
    * **v1.4.0 routing fix (BREAKING for the small set of users who
    * relied on the pre-v1.4 behavior).** Pre-v1.4 this field was

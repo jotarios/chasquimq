@@ -63,7 +63,7 @@ exists.
 | Option | Node | Python | Rust | Controls |
 |---|---|---|---|---|
 | Detector toggle | `WorkerOptions.stalledDetectorEnabled` (**true**) | `Worker(stalled_detector_enabled=True)` | `ConsumerConfig::stalled_detector_enabled` (**true**) | Toggle the embedded leader-elected stalled-detector. Set `false` for pure-consumer benchmarks or deployments running a separate detector. |
-| Stall ceiling | `WorkerOptions.maxStalledCount` (**1**) | `Worker(max_stalled_attempts=1)` | `StalledDetectorConfig::max_stalled_attempts` (**1**) | Stall cycles past `idle_threshold_ms` before DLQ-as-`stalled`. Matches BullMQ's default. Validation rejects `0`. |
+| Stall ceiling | `WorkerOptions.maxStalledCount` (**2**) | `Worker(max_stalled_attempts=2)` | `StalledDetectorConfig::max_stalled_attempts` (**2**) | Stall cycles past `idle_threshold_ms` before DLQ-as-`stalled`. One extra tick of headroom over BullMQ's `maxStalledCount: 1` to avoid racing the reader's CLAIM-on-read recovery path. Validation rejects `0`. |
 | Tick interval (ms) | `WorkerOptions.stalledInterval` (**30_000**) | `Worker(stalled_interval_ms=30_000)` | `StalledDetectorConfig::tick_interval_ms` (**30_000**) | Scan-tick interval. The embedded spawn overrides this from `claim_min_idle_ms` to preserve the per-crash counting invariant (`tick == idle == claim_min_idle`); rarely worth setting. |
 | Scan batch | n/a | `Worker(stalled_detector_scan_batch=256)` | `StalledDetectorConfig::scan_batch` (**256**) | `XPENDING ... IDLE - + N` cap per tick. |
 
