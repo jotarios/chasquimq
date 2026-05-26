@@ -605,6 +605,18 @@ async fn per_job_override_honored_after_claim_reclaim() {
     let a_started_h = a_started.clone();
     let mut cfg_a = fast_consumer_cfg(queue, "c_a", 2);
     cfg_a.claim_min_idle_ms = 250;
+    // This test exercises the reader's CLAIM-reclaim → dispatch-time
+    // per-job override gate. The embedded stalled detector (default ON
+    // since slice 12) inherits `tick == idle == claim_min_idle_ms = 250`
+    // and `max_stalled_attempts = 1`, so its first scan after A's PEL
+    // entry passes the 250ms idle threshold would INCR to 1 → threshold
+    // hit → XACKDEL + DLQ-relocate as `DlqReason::Stalled` before B's
+    // reader can CLAIM the entry. That races the assertion and routes
+    // the job out the wrong door (Stalled instead of RetriesExhausted).
+    // Disable the embedded detector here — this test isn't about
+    // stalled detection, and `stalled_detection.rs` already covers that
+    // path explicitly with a tolerant wait window.
+    cfg_a.stalled_detector_enabled = false;
     let consumer_a: Consumer<Sample> = Consumer::new(redis_url(), cfg_a);
     let shutdown_a = CancellationToken::new();
     let shutdown_a_clone = shutdown_a.clone();
@@ -655,6 +667,10 @@ async fn per_job_override_honored_after_claim_reclaim() {
     let b_calls_h = b_calls.clone();
     let mut cfg_b = fast_consumer_cfg(queue, "c_b", 2);
     cfg_b.claim_min_idle_ms = 250;
+    // See cfg_a comment: detector must be off here too, otherwise B's
+    // own detector tick can pre-empt the per-handler retry loop the
+    // assertion is counting.
+    cfg_b.stalled_detector_enabled = false;
     let consumer_b: Consumer<Sample> = Consumer::new(redis_url(), cfg_b);
     let shutdown_b = CancellationToken::new();
     let shutdown_b_clone = shutdown_b.clone();
