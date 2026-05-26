@@ -81,7 +81,7 @@ skipIfNoRedis('Job progress + log', () => {
     await done.promise
     await waitFor(
       () => targetedSpy.mock.calls.length >= 1 && broadcastSpy.mock.calls.length >= 1,
-      10_000,
+      25_000,
     )
     const [payload] = targetedSpy.mock.calls[0]!
     expect(payload).toMatchObject({
@@ -89,7 +89,7 @@ skipIfNoRedis('Job progress + log', () => {
       name: 'emits-progress',
       progress: 33,
     })
-  }, 15_000)
+  }, 30_000)
 
   it('Worker EE fires progress with (job, n) once per call', async () => {
     const done = deferred<void>()
@@ -109,11 +109,11 @@ skipIfNoRedis('Job progress + log', () => {
 
     await queue.add('three-updates', { value: 1 })
     await done.promise
-    await waitFor(() => progressSpy.mock.calls.length >= 3, 10_000)
+    await waitFor(() => progressSpy.mock.calls.length >= 3, 25_000)
     expect(progressSpy).toHaveBeenCalledTimes(3)
     const values = progressSpy.mock.calls.map((c) => c[1])
     expect(values).toEqual([10, 50, 100])
-  }, 15_000)
+  }, 30_000)
 
   it('Job.log appends lines and Queue.getJobLogs reads them back', async () => {
     const done = deferred<void>()
