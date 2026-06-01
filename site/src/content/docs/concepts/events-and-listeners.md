@@ -26,21 +26,18 @@ The events stream carries these transitions, all best-effort (a network blip on 
 | `retry-scheduled` | Retry relocator, after an atomic reschedule onto the delayed ZSET. | `jobId`, `name`, `attempt`, `backoffMs` |
 | `dlq` | DLQ relocator, after writing the entry to the DLQ stream. | `jobId`, `name`, `reason`, `attempt` |
 | `progress` | Worker, after the handler's `updateProgress(n)` SET succeeds. | `jobId`, `name`, `progress` |
+| `stalled` | Stalled-job detector, when a PEL entry is observed idle past `idle_threshold_ms` for the `attempt`-th consecutive scan (under threshold; the relocate path emits a separate `dlq` event with `reason='stalled'`). | `jobId`, `name`, `attempt`, `prev` (always `'active'`) |
 | `drained` | Reader, on a full→empty transition (not on every empty poll). | (queue-scoped) |
 
 `retries-exhausted` is a synthetic alias of `dlq` (with the `reason` carried as the engine's `DlqReason` string) that the Node shim emits to match existing high-level-shim subscribers.
 
 `progress` is best-effort fan-out — the persisted progress key (`{chasqui:<queue>}:progress:<id>`) is the source of truth. A failed events XADD never propagates back to the handler. High-rate progress reporters that don't need cross-process fan-out can mute the events with `WorkerOptions.eventsProgressEnabled: false` (Node) / `Worker(events_progress_enabled=False)` (Python); the persisted key is still written.
 
-One listener name is accepted on both shims for API stability but is currently no-op — the engine does not emit the underlying transition yet:
-
-- `stalled` — requires a stalled-detector in the engine.
-
-Wire it up safely; it'll start firing when the corresponding engine work lands.
+`stalled` is leader-emitted (the stalled-job detector is leader-elected per queue), so every worker on the queue receives the event regardless of which one held the stalled entry. `Worker.on('stalled', (jobId, prev) => ...)` mirrors the BullMQ two-arg payload; `prev` is always `'active'` because every stalled entry was PEL-resident when the detector saw it. See [DLQ and recovery](./dlq-and-recovery.md) for the detection + relocate semantics.
 
 ## Per-id channels
 
-For events that carry a `jobId` (`active`, `completed`, `failed`, `progress`), `QueueEvents` also fans the event onto a per-id channel named `<event>:<jobId>`. Targeted subscribers (like `Job.waitUntilFinished` / `Job.wait_until_finished`) listen there directly instead of filtering every broadcast event by id — at large fan-out this is the difference between an `O(N-listeners)` dispatch tax and an `O(1)` one.
+For events that carry a `jobId` (`active`, `completed`, `failed`, `progress`, `stalled`), `QueueEvents` also fans the event onto a per-id channel named `<event>:<jobId>`. Targeted subscribers (like `Job.waitUntilFinished` / `Job.wait_until_finished`) listen there directly instead of filtering every broadcast event by id — at large fan-out this is the difference between an `O(N-listeners)` dispatch tax and an `O(1)` one.
 
 The channel naming convention is `<event>:<jobId>` (e.g. `completed:<jobId>` / `failed:<jobId>` / `progress:<jobId>`). Power users can subscribe directly:
 

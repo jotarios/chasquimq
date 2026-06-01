@@ -70,7 +70,7 @@ skipIfNoRedis('Tier 1 — Queue.peekDlq / Queue.replayDlq', () => {
       {
         connection: parseConn(REDIS_URL!),
         concurrency: 1,
-        maxStalledCount: 1,
+        maxAttempts: 1,
         autorun: false,
       },
     )
@@ -101,7 +101,7 @@ skipIfNoRedis('Tier 1 — Queue.peekDlq / Queue.replayDlq', () => {
       {
         connection: parseConn(REDIS_URL!),
         concurrency: 1,
-        maxStalledCount: 1,
+        maxAttempts: 1,
         autorun: false,
       },
     )
@@ -160,7 +160,7 @@ skipIfNoRedis('Tier 1 — single failed event on UnrecoverableError', () => {
       {
         connection: parseConn(REDIS_URL!),
         concurrency: 1,
-        maxStalledCount: 5, // generous — UnrecoverableError must short-circuit
+        maxAttempts: 5, // generous — UnrecoverableError must short-circuit
         autorun: false,
       },
     )
@@ -217,7 +217,7 @@ skipIfNoRedis('Tier 1 — failedReason has no FFI prefix', () => {
       {
         connection: parseConn(REDIS_URL!),
         concurrency: 1,
-        maxStalledCount: 1,
+        maxAttempts: 1,
         autorun: false,
       },
     )

@@ -242,10 +242,12 @@ async fn run_evalsha_pipeline(
     let evalsha_cmd = CustomCommand::new_static("EVALSHA", ClusterHash::FirstKey, false);
     for item in buf {
         let result_key = crate::redis::keys::result_key(&cfg.queue_name, &item.job_id);
+        let stall_key = crate::redis::keys::stall_counter_key(&cfg.queue_name, &item.job_id);
         let args = evalsha_job_ok_args(
             sha,
             &cfg.stream_key,
             &result_key,
+            &stall_key,
             &cfg.group,
             item.entry_id.as_ref(),
             item.result_bytes.clone(),
@@ -273,10 +275,12 @@ async fn run_eval_pipeline(
     let eval_cmd = CustomCommand::new_static("EVAL", ClusterHash::FirstKey, false);
     for item in buf {
         let result_key = crate::redis::keys::result_key(&cfg.queue_name, &item.job_id);
+        let stall_key = crate::redis::keys::stall_counter_key(&cfg.queue_name, &item.job_id);
         let args = eval_job_ok_args(
             JOB_OK_SCRIPT,
             &cfg.stream_key,
             &result_key,
+            &stall_key,
             &cfg.group,
             item.entry_id.as_ref(),
             item.result_bytes.clone(),

@@ -65,9 +65,9 @@ asyncio.run(main())
 | Surface | What it does |
 |---|---|
 | `Queue` | Producer + queue inspection. `add` / `add_bulk` / `add_unique` / `get_job` / `get_jobs` / `get_jobs_page` / `get_job_state` / `get_job_counts` / `get_job_logs` / `get_waiting_count` / `get_active_count` / `get_delayed_count` / `get_completed_count` / `get_failed_count` / `count` / `get_job_result` / `peek_dlq` / `replay_dlq` / `cancel_delayed` / `get_repeatable_jobs` / `remove_repeatable_by_key` / `pause` / `resume` / `is_paused` / `remove` / `remove_report` / `drain` / `clean` / `obliterate`. Async context manager. |
-| `Worker` | Consumer pool. asyncio-first dispatch, opt-in result storage (`store_results=True`), graceful shutdown, `pause` / `resume` / `is_paused`, listener API (`on`/`off`/`once` for `ready` / `active` / `completed` / `failed` / `error` / `closing` / `closed` / `drained` / `paused` / `resumed` / `progress`). Async context manager. |
-| `Job` | Dataclass returned by `Queue.add`. Has `id`, `name`, `data`, `attempts_made`, `progress`, `update_progress(n)` (Worker-side only), `log(line)` (Worker-side only), `wait_for_result(timeout=)`, `wait_until_finished(queue_events, timeout=)`. |
-| `QueueEvents` | Async-iterator + listener API over the engine events stream. Cross-process pub/sub for `waiting` / `active` / `completed` / `failed` / `dlq` / `retry-scheduled` / `delayed` / `drained` / `retries-exhausted`, plus per-id channels (`completed:<jobId>` / `failed:<jobId>` / `active:<jobId>`) for targeted subscribers. |
+| `Worker` | Consumer pool. asyncio-first dispatch, opt-in result storage (`store_results=True`), graceful shutdown, `pause` / `resume` / `is_paused`, listener API (`on`/`off`/`once` for `ready` / `active` / `completed` / `failed` / `error` / `closing` / `closed` / `drained` / `paused` / `resumed` / `progress` / `stalled`). Async context manager. |
+| `Job` | Dataclass returned by `Queue.add`. Has `id`, `name`, `data`, `attempts_made`, `progress`, `stalled_count`, `update_progress(n)` (Worker-side only), `log(line)` (Worker-side only), `wait_for_result(timeout=)`, `wait_until_finished(queue_events, timeout=)`. |
+| `QueueEvents` | Async-iterator + listener API over the engine events stream. Cross-process pub/sub for `waiting` / `active` / `completed` / `failed` / `dlq` / `retry-scheduled` / `delayed` / `drained` / `stalled` / `retries-exhausted`, plus per-id channels (`completed:<jobId>` / `failed:<jobId>` / `active:<jobId>` / `stalled:<jobId>`) for targeted subscribers. |
 | `BackoffSpec` | Builders: `.fixed(delay_ms)` / `.exponential(initial_ms, multiplier, max_ms, jitter_ms)`. |
 | `RepeatPattern` | Builders: `.cron(expr, tz=)` / `.every(interval_ms)`. DST-aware via IANA tz names. |
 | `MissedFiresPolicy` | `.skip()` / `.fire_once()` / `.fire_all(max_catchup)` for cron catch-up after scheduler downtime. |
@@ -410,6 +410,59 @@ Tuning (all `Worker` keyword args):
 | `events_progress_enabled` | `True` | When `False`, mutes the `e=progress` events-stream entry — the persisted progress key is still written. Useful for high-rate progress reporters that don't need cross-process fan-out. |
 
 Subscribe to the cross-process `progress` event via `QueueEvents` (broadcast `progress`, per-id `progress:<job_id>`) or the in-process `worker.on('progress', ...)` re-fan. **Read-only Job guard:** calling `update_progress` / `log` on a Job returned by `Queue.get_job` / `Queue.add` raises `RuntimeError("Job.update_progress() requires the Job be passed to your worker handler; Jobs returned by Queue.get_job() are read-only")` — only Jobs handed to a `Worker` processor carry the live native handle.
+
+### Stalled-job detection
+
+The CLAIM-on-read safety net recovers a single mid-handler crash, but it can't bound a *loop* of worker crashes against the same entry. Each redelivery resets the idle clock, `delivery_count` rises forever, and the only terminal route is DLQ-as-`retries_exhausted` — which conflates handler-failure loops with worker-crash loops. The stalled-job detector is the active sibling: a leader-elected background task spawned alongside the scheduler that scans the PEL on a tick, INCRs a per-job stall counter for entries idle past the threshold, and atomically relocates them to the DLQ as a distinct `stalled` reason once the counter reaches `max_stalled_attempts`.
+
+```python
+import asyncio
+from chasquimq.worker import Worker
+from chasquimq.queue_events import QueueEvents
+
+
+async def handler(job):
+    ...
+
+worker = Worker(
+    "emails",
+    handler,
+    redis_url="redis://127.0.0.1:6379",
+    # Stall ceiling — default `2` (one extra tick of headroom over
+    # BullMQ's `maxStalledCount: 1` to avoid racing CLAIM-on-read).
+    max_stalled_attempts=2,
+    # Total handler attempts before DLQ-as-retries_exhausted.
+    max_attempts=25,
+)
+
+
+# Cross-process scope — every worker on this queue receives the event,
+# not just the one holding the entry. `prev` is always `'active'`.
+def on_stalled(job_id: str, prev: str) -> None:
+    print(f"stalled: {job_id} (was {prev})")
+
+
+worker.on("stalled", on_stalled)
+
+
+# Or subscribe to the cross-process `e=stalled` event directly:
+events = QueueEvents("emails", redis_url="redis://127.0.0.1:6379")
+
+
+def on_stalled_event(payload: dict, _event_id: str) -> None:
+    # payload['attempt'] = current stall count (1-indexed)
+    print(payload)
+
+
+events.on("stalled", on_stalled_event)
+```
+
+| Option | Default | Controls |
+|---|---:|---|
+| `max_stalled_attempts` | `2` | Stall cycles past `idle_threshold_ms` before DLQ-as-`stalled`. One extra tick of headroom over BullMQ's `maxStalledCount: 1` to avoid racing the reader's CLAIM-on-read recovery path. |
+| `max_attempts` | `25` | Total handler attempts (initial + retries) before DLQ-as-`retries_exhausted`. Per-job override via `Queue.add(name, data, attempts=N)`. |
+| `stalled_detector_enabled` | `True` | Toggle the embedded detector. Set `False` for pure-consumer benchmarks or deployments running a separate detector process. |
+| `stalled_interval_ms` | `30_000` | Scan-tick interval (ms). The embedded spawn overrides this from the engine's `claim_min_idle_ms` to preserve the per-crash counting invariant (`tick == idle == claim_min_idle`); rarely worth setting. |
 
 ## Power-user surface
 

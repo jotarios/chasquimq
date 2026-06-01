@@ -50,7 +50,7 @@ skipIfNoRedis('Per-job retry overrides + UnrecoverableError', () => {
       {
         connection: parseConn(REDIS_URL!),
         concurrency: 1,
-        maxStalledCount: 2,
+        maxAttempts: 2,
         autorun: false,
       },
     )
@@ -89,7 +89,7 @@ skipIfNoRedis('Per-job retry overrides + UnrecoverableError', () => {
       {
         connection: parseConn(REDIS_URL!),
         concurrency: 1,
-        maxStalledCount: 5, // reach for the per-job override budget
+        maxAttempts: 5, // reach for the per-job override budget
         autorun: false,
       },
     )
@@ -132,7 +132,7 @@ skipIfNoRedis('Per-job retry overrides + UnrecoverableError', () => {
         concurrency: 1,
         // Generous queue-wide budget — the test proves this is *ignored*
         // because the handler signaled terminal-fail.
-        maxStalledCount: 10,
+        maxAttempts: 10,
         autorun: false,
       },
     )
@@ -165,7 +165,13 @@ skipIfNoRedis('Per-job retry overrides + UnrecoverableError', () => {
       {
         connection: parseConn(REDIS_URL!),
         concurrency: 1,
-        maxStalledCount: 2, // queue-wide budget; the test relies on it
+        // v1.4.0: `maxAttempts` is the canonical name for total
+        // handler attempts before DLQ-as-retries_exhausted. Pre-v1.4
+        // this test used `maxStalledCount: 2`, which mis-routed to
+        // `max_attempts`; post-fix that field controls only the
+        // stalled-detector ceiling and an always-failing handler
+        // would run up to 25 times.
+        maxAttempts: 2,
         autorun: false,
       },
     )
@@ -199,7 +205,7 @@ skipIfNoRedis('Per-job retry overrides + UnrecoverableError', () => {
       {
         connection: parseConn(REDIS_URL!),
         concurrency: 1,
-        maxStalledCount: 5,
+        maxAttempts: 5,
         autorun: false,
       },
     )

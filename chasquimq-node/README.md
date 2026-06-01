@@ -69,9 +69,9 @@ main()
 | Surface | What it does |
 |---|---|
 | `Queue<DataType, ResultType, NameType>` | Producer + queue inspection. `add` / `addBulk` / `addUnique` / `getJob` / `getJobs` / `getJobState` / `getJobCounts` / `getJobLogs` / `getWaitingCount` / `getActiveCount` / `getDelayedCount` / `getCompletedCount` / `getFailedCount` / `count` / `getJobResult` / `peekDlq` / `replayDlq` / `cancelDelayed` / `getRepeatableJobs` / `removeRepeatableByKey` / `pause` / `resume` / `isPaused` / `remove` / `removeReport` / `drain` / `clean` / `obliterate`. `[Symbol.asyncDispose]`. |
-| `Worker<DataType, ResultType, NameType>` | Consumer pool. tokio-side dispatch, opt-in result storage (`storeResults: true`), `EventEmitter` events (`ready` / `active` / `completed` / `failed` / `error` / `closing` / `closed` / `drained` / `paused` / `resumed` / `progress`), `pause` / `resume` / `isPaused`. `[Symbol.asyncDispose]`. |
-| `Job<DataType, ResultType, NameType>` | Read-only handle. `id`, `name`, `data`, `attemptsMade`, `progress`, `updateProgress(n)` (Worker-side only), `log(line)` (Worker-side only), `waitForResult({ timeoutMs, intervalMs, signal })`, `waitUntilFinished(queueEvents, ttl?)`. |
-| `QueueEvents` | Cross-process pub/sub via the events stream. Subscribe to `waiting` / `active` / `completed` / `failed` / `dlq` / `retry-scheduled` / `delayed` / `drained` / `retries-exhausted`, plus per-id channels (`completed:<jobId>` / `failed:<jobId>` / `active:<jobId>`) for targeted subscribers. `[Symbol.asyncDispose]`. |
+| `Worker<DataType, ResultType, NameType>` | Consumer pool. tokio-side dispatch, opt-in result storage (`storeResults: true`), `EventEmitter` events (`ready` / `active` / `completed` / `failed` / `error` / `closing` / `closed` / `drained` / `paused` / `resumed` / `progress` / `stalled`), `pause` / `resume` / `isPaused`. `[Symbol.asyncDispose]`. |
+| `Job<DataType, ResultType, NameType>` | Read-only handle. `id`, `name`, `data`, `attemptsMade`, `progress`, `stalledCount`, `updateProgress(n)` (Worker-side only), `log(line)` (Worker-side only), `waitForResult({ timeoutMs, intervalMs, signal })`, `waitUntilFinished(queueEvents, ttl?)`. |
+| `QueueEvents` | Cross-process pub/sub via the events stream. Subscribe to `waiting` / `active` / `completed` / `failed` / `dlq` / `retry-scheduled` / `delayed` / `drained` / `stalled` / `retries-exhausted`, plus per-id channels (`completed:<jobId>` / `failed:<jobId>` / `active:<jobId>` / `stalled:<jobId>`) for targeted subscribers. `[Symbol.asyncDispose]`. |
 | `BackoffSpec` | Builders: `.fixed(delayMs)` / `.exponential(initialMs, { multiplier, maxMs, jitterMs })`. |
 | `UnrecoverableError` | Throw from your handler to bypass retries and route the job directly to DLQ. |
 | `NotSupportedError` | Surfaces from APIs that aren't on the chasquimq roadmap (e.g. parent/child flows). |
@@ -382,6 +382,51 @@ Tuning (all `WorkerOptions`):
 Subscribe to the cross-process `progress` event via `QueueEvents` (broadcast `progress`, per-id `progress:<jobId>`) or the in-process `Worker.on('progress', (job, n) => ...)` re-fan. **Read-only Job guard:** calling `updateProgress` / `log` on a Job returned by `Queue.getJob` / `Queue.add` throws `Error('Job.updateProgress() requires the Job be passed to your Worker handler; Jobs returned by Queue.getJob() are read-only')` — only Jobs handed to a `Worker` processor carry the live native handle.
 
 > **Breaking (TS types only):** `JobProgress` narrowed from `number | object` to `number`. No runtime impact — the engine wire format never carried the object form.
+
+### Stalled-job detection
+
+> **Breaking (v1.4.0):** `WorkerOptions.maxStalledCount` now controls the stalled-detector ceiling, not total handler attempts. Pre-v1.4 it routed to engine `max_attempts` with a shim-side `?? 3` fallback that masked the engine's real default of `25`. Users who set `maxStalledCount` on its own will see different behavior — handlers now retry up to 25 times by default (not 3) before DLQ-as-`retries_exhausted`. **Migration:** replace `maxStalledCount: N` with `maxAttempts: N` to preserve the prior "cap total attempts at N" semantic. A one-time `WARN [chasquimq]` log fires per process when `maxStalledCount` is set without `maxAttempts` so the change is loud at runtime.
+
+The CLAIM-on-read safety net recovers a single mid-handler crash, but it can't bound a *loop* of worker crashes against the same entry. Each redelivery resets the idle clock, `delivery_count` rises forever, and the only terminal route is DLQ-as-`retries_exhausted` — which conflates handler-failure loops with worker-crash loops. The stalled-job detector is the active sibling: a leader-elected background task spawned alongside the scheduler that scans the PEL on a tick, INCRs a per-job stall counter for entries idle past the threshold, and atomically relocates them to the DLQ as a distinct `stalled` reason once the counter reaches `maxStalledCount`.
+
+```ts
+import { Worker, QueueEvents } from "chasquimq"
+
+const worker = new Worker(
+  "emails",
+  async (job) => {
+    /* ... */
+  },
+  {
+    connection: { host: "127.0.0.1", port: 6379 },
+    // Stall ceiling — default `2` (one extra tick of headroom over
+    // BullMQ's `maxStalledCount: 1` to avoid racing CLAIM-on-read).
+    maxStalledCount: 2,
+    // Total handler attempts before DLQ-as-retries_exhausted (canonical
+    // name for what users pre-v1.4 thought `maxStalledCount` was doing).
+    maxAttempts: 25,
+  },
+)
+
+// Cross-process scope — every worker on this queue receives the event,
+// not just the one holding the entry. `prev` is always `'active'`.
+worker.on("stalled", (jobId, prev) => {
+  console.log(`stalled: ${jobId} (was ${prev})`)
+})
+
+// Or subscribe to the cross-process `e=stalled` event directly:
+const events = new QueueEvents("emails", { connection })
+events.on("stalled", ({ jobId, attempt, prev }) => {
+  // attempt = current stall count (1-indexed)
+})
+```
+
+| Option | Default | Controls |
+|---|---:|---|
+| `maxStalledCount` | `2` | Stall cycles past `idle_threshold_ms` before DLQ-as-`stalled`. One extra tick of headroom over BullMQ's `maxStalledCount: 1` to avoid racing the reader's CLAIM-on-read recovery path. |
+| `maxAttempts` | `25` | Total handler attempts (initial + retries) before DLQ-as-`retries_exhausted`. Per-job override via `Queue.add(name, data, { attempts })`. |
+| `stalledDetectorEnabled` | `true` | Toggle the embedded detector. Set `false` for pure-consumer benchmarks or deployments running a separate detector process. |
+| `stalledInterval` | `30_000` | Scan-tick interval (ms). The embedded spawn overrides this from the engine's `claim_min_idle_ms` to preserve the per-crash counting invariant (`tick == idle == claim_min_idle`); rarely worth setting. |
 
 ## Power-user surface
 

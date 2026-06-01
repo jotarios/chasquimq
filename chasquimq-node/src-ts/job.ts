@@ -67,6 +67,17 @@ export class Job<
   readonly opts: JobsOptions;
   attemptsMade: number = 0;
   progress: JobProgress = 0;
+  /**
+   * Number of times the stalled-job detector has observed this entry
+   * idle past `idle_threshold_ms` without being acked. `undefined` when
+   * the job is not in the `'active'` state (the counter only exists
+   * while the entry sits in the consumer group's PEL) or when the job
+   * has been DEL'd by a successful ack / DLQ replay. Only populated on
+   * Jobs synthesized from `Queue.getJob()` for Active jobs; Jobs
+   * dispatched to a Worker handler leave this `undefined` (the live
+   * counter is internal to the engine's stalled detector).
+   */
+  stalledCount?: number;
   returnvalue?: ResultType;
   failedReason?: string;
   stacktrace: string[] = [];
@@ -406,6 +417,7 @@ export class Job<
       opts: this.opts,
       attemptsMade: this.attemptsMade,
       progress: this.progress,
+      stalledCount: this.stalledCount,
       returnvalue: this.returnvalue,
       failedReason: this.failedReason,
       timestamp: this.timestamp,

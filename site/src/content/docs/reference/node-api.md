@@ -510,13 +510,8 @@ Throws `NotSupportedError` in v1.
 | `drained` | `()` | Engine observed a full→empty transition on the main stream. **Cross-process scope.** Lazily wires an embedded `QueueEvents` subscriber on the first `.on('drained', ...)` call; torn down on `close()`. |
 | `paused` | `()` | `.pause()` was called. Process-local. |
 | `resumed` | `()` | `.resume()` was called. Process-local. |
-
-Names accepted for API stability but currently never fire (engine
-doesn't emit the underlying transition yet — safe to wire up, will
-start firing when the corresponding engine work lands):
-
-- `progress` — `(job, progress)`.
-- `stalled` — `(jobId, prev)`.
+| `progress` | `(job, progress)` | Handler called `await job.updateProgress(n)`. The in-process re-fan finds the live `Job` in the inflight map and surfaces it with the clamped 0..=100 value. |
+| `stalled` | `(jobId, prev)` | Stalled-job detector observed this entry idle past `idle_threshold_ms` for the `attempt`-th consecutive scan (under threshold; the relocate path emits `'failed'` with `reason='stalled'` via `dlq`). `prev` is always `'active'`. **Cross-process scope:** every worker on the queue receives the event. Lazily wires the internal `QueueEvents` subscriber on first attach. |
 
 ```ts
 worker.on("completed", (job, result) => {
@@ -803,6 +798,9 @@ interface WorkerOptions {
   autorun?: boolean;
   drainDelay?: number;
   maxStalledCount?: number;
+  maxAttempts?: number;
+  stalledDetectorEnabled?: boolean;
+  stalledInterval?: number;
   removeOnComplete?: unknown;
   removeOnFail?: unknown;
   prefix?: string;
@@ -820,7 +818,10 @@ interface WorkerOptions {
 - `concurrency` — max in-flight handler invocations. **Default `100`.**
 - `autorun` — whether `.run()` is called on the next microtask. **Default `true`.**
 - `drainDelay` — `XREADGROUP BLOCK` timeout in ms. **Default `5000`.**
-- `maxStalledCount` — total attempts per job (initial + retries). Maps to engine `maxAttempts`. **Default `3`.**
+- `maxStalledCount` — **v1.4 breaking change.** Now routes to engine `max_stalled_attempts` (the stalled-detector ceiling — stall cycles past `idle_threshold_ms` before DLQ-as-`stalled`). **Default `2`** — one extra tick of headroom over BullMQ's `maxStalledCount: 1` to avoid racing the reader's CLAIM-on-read recovery path. Pre-v1.4 this field was mis-routed to `max_attempts` with a `?? 3` fallback. Migration: use `maxAttempts` for the old "cap total attempts" semantic. A one-time `WARN [chasquimq]` log fires per process when `maxStalledCount` is set without `maxAttempts`.
+- `maxAttempts` — total handler attempts (initial + retries) before DLQ-as-`retries_exhausted`. Maps to engine `max_attempts`. **Default `25`** (the engine default; an undefined value flows through literally).
+- `stalledDetectorEnabled` — toggle the embedded stalled-job detector. **Default `true`.** Set `false` for pure-consumer benchmarks or deployments running a separate detector process.
+- `stalledInterval` — detector scan-tick interval (ms). **Default `30_000`.** The embedded spawn overrides this from `claim_min_idle_ms` to preserve the per-crash counting invariant.
 - `removeOnComplete`, `removeOnFail` — accepted; no-ops. The engine `XACKDEL`s on success and DLQ-relocates on failure.
 - `prefix` — accepted; no-op.
 - `name` — optional consumer ID for `XREADGROUP CONSUMER`.

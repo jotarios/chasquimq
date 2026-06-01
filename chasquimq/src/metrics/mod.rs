@@ -205,6 +205,13 @@ pub enum DlqReason {
     /// path and routes the job straight to the DLQ regardless of the
     /// remaining attempt budget.
     Unrecoverable,
+    /// The stalled-job detector observed the entry sitting in the
+    /// consumer group's PEL past `idle_threshold_ms` for
+    /// `max_stalled_attempts` consecutive scans (i.e. it kept being
+    /// CLAIM-redelivered to crashing workers without ever completing).
+    /// Distinct from [`DlqReason::RetriesExhausted`]: handler-failure
+    /// loops vs worker-crash loops are observable separately.
+    Stalled,
 }
 
 impl DlqReason {
@@ -217,6 +224,7 @@ impl DlqReason {
             DlqReason::Malformed { .. } => "malformed",
             DlqReason::OversizePayload => "oversize_payload",
             DlqReason::Unrecoverable => "unrecoverable",
+            DlqReason::Stalled => "stalled",
         }
     }
 
@@ -259,6 +267,24 @@ pub trait MetricsSink: Send + Sync + 'static {
     fn job_outcome(&self, _outcome: JobOutcome) {}
     fn retry_scheduled(&self, _retry: RetryScheduled) {}
     fn dlq_routed(&self, _dlq: DlqRouted) {}
+    /// Emitted once per stalled-detector tick **on the leader replica**.
+    /// `scanned` is the count of PEL entries the `XPENDING ... IDLE` call
+    /// returned (capped at `StalledDetectorConfig::scan_batch`),
+    /// `incremented` is the subset whose stall counter went up but stayed
+    /// below `max_stalled_attempts`, and `relocated` is the subset that
+    /// reached the threshold AND the script's `XACKDEL` gate held (the
+    /// detector's relocate path actually fired). Non-leader replicas emit
+    /// `LockOutcome::Held` once on transition (via `promoter_lock_outcome`,
+    /// reused) and skip the tick entirely.
+    fn stalled_tick(&self, _tick: StalledTick) {}
+}
+
+/// One stalled-detector leader tick. See [`MetricsSink::stalled_tick`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StalledTick {
+    pub scanned: u64,
+    pub incremented: u64,
+    pub relocated: u64,
 }
 
 /// Default sink — drops every event.
@@ -268,4 +294,33 @@ impl MetricsSink for NoopSink {}
 
 pub fn noop_sink() -> Arc<dyn MetricsSink> {
     Arc::new(NoopSink)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dlq_reason_stalled_as_str() {
+        assert_eq!(DlqReason::Stalled.as_str(), "stalled");
+        // No `detail()` for the stalled variant — only `Malformed` carries one.
+        assert!(DlqReason::Stalled.detail().is_none());
+    }
+
+    #[test]
+    fn dlq_reason_as_str_covers_every_variant() {
+        // Sanity: a new variant added to `DlqReason` must also extend
+        // `as_str` (the match is exhaustive). This guards against the
+        // forgot-to-update-as_str bug class without a snapshot lock.
+        for r in [
+            DlqReason::RetriesExhausted,
+            DlqReason::DecodeFailed,
+            DlqReason::Malformed { reason: "x" },
+            DlqReason::OversizePayload,
+            DlqReason::Unrecoverable,
+            DlqReason::Stalled,
+        ] {
+            assert!(!r.as_str().is_empty());
+        }
+    }
 }

@@ -76,10 +76,59 @@ export interface WorkerOptions {
   drainDelay?: number
 
   /**
-   * Maximum total attempts per job (initial + retries). Maps to
-   * `ConsumerOpts.maxAttempts`.
+   * Maximum stall attempts before the stalled-job detector relocates
+   * the entry to the DLQ with `DlqReason::Stalled`. Maps to engine
+   * `max_stalled_attempts` (default `2` — requires two consecutive
+   * idle observations before relocating, which avoids racing the
+   * reader's CLAIM-on-read recovery path. BullMQ's `maxStalledCount`
+   * defaults to `1`.).
+   *
+   * **v1.4.0 routing fix (BREAKING for the small set of users who
+   * relied on the pre-v1.4 behavior).** Pre-v1.4 this field was
+   * mis-routed to engine `max_attempts` (with a `?? 3` shim-side
+   * fallback that masked the engine's real default of `25`). It now
+   * routes to the semantically-correct `max_stalled_attempts` — stall
+   * cycles before DLQ-as-`stalled`, not total handler attempts before
+   * DLQ-as-`retries_exhausted`. To preserve the pre-v1.4 behavior of
+   * "cap total attempts at 3", set `maxAttempts: 3` explicitly. A
+   * one-time `WARN [chasquimq]` log fires per process when
+   * `maxStalledCount` is set without `maxAttempts` so the breaking
+   * change is loud at runtime.
    */
   maxStalledCount?: number
+
+  /**
+   * Maximum total attempts per job (initial + retries) before the
+   * engine routes to the DLQ with `DlqReason::RetriesExhausted`. Maps
+   * to engine `max_attempts` (default `25`). This is the canonical
+   * name for what users pre-v1.4 thought `maxStalledCount` was doing
+   * — see the {@link WorkerOptions.maxStalledCount} doc for the
+   * migration story.
+   */
+  maxAttempts?: number
+
+  /**
+   * Override the stalled-job detector's scan-tick interval (ms).
+   * Default `30_000` (mirrors the engine default).
+   *
+   * On the embedded spawn path, the engine inherits both the detector
+   * `tick_interval_ms` and `idle_threshold_ms` from `claim_min_idle_ms`
+   * **only when those fields are at their default** so the per-crash
+   * counting invariant (`tick == idle == claim_min_idle`) holds on the
+   * common path. Set this explicitly to a non-default value and the
+   * engine honors it verbatim — the operator owns the lockstep
+   * (`tick_interval_ms >= idle_threshold_ms`, enforced by config
+   * validation). See `docs/engine.md#stalled-detection`.
+   */
+  stalledInterval?: number
+
+  /**
+   * Toggle the embedded stalled-job detector. Default `true`. Set to
+   * `false` for pure-consumer benchmarks or deployments running a
+   * separate detector process. Maps to
+   * `ConsumerConfig::stalled_detector_enabled`.
+   */
+  stalledDetectorEnabled?: boolean
 
   /**
    * Accepted; no-op. The engine uses `XACKDEL` so completed jobs are
@@ -216,15 +265,19 @@ export interface WorkerOptions {
  *   the events fan-out (and therefore this event) by setting
  *   `WorkerOptions.eventsProgressEnabled = false`.
  *
+ * - `stalled`  — `(jobId: string, prev: string)`. Fired when the
+ *   stalled-job detector observes this entry sitting idle past
+ *   `idle_threshold_ms` for the `attempt`-th consecutive scan
+ *   (under threshold; the relocate path emits a separate `dlq` event
+ *   with `reason='stalled'`). `prev` is always `'active'`. **Cross-
+ *   process scope:** every worker on this queue receives `stalled`,
+ *   not just the one holding the entry. Lazily subscribes to the
+ *   cross-process events stream on the first `worker.on('stalled',
+ *   ...)` call; the subscriber is torn down on `.close()`.
+ *
  * ## Listener names accepted for API stability but currently no-op
  *
- * These can be wired up without throwing, but the engine does not emit
- * the underlying transition yet. Listed here so subscriber code keeps
- * type-checking; promoted to active events when the corresponding
- * engine work lands.
- *
- * - `stalled`  — `(jobId: string, prev: string)`. Requires a stalled-
- *   detector in the engine. Not yet emitted.
+ * (None — every event documented above is live.)
  */
 export class Worker<
   DataType = unknown,
@@ -281,12 +334,33 @@ export class Worker<
     this.opts = opts
     this.processor = processor
 
+    // v1.4.0 routing fix: warn-once when `maxStalledCount` is set on
+    // its own. Pre-v1.4 it routed to engine `max_attempts` (with a
+    // `?? 3` shim-side fallback that masked the real default of 25);
+    // it now routes to `max_stalled_attempts`. Surface the change so
+    // upgraders don't silently get a different DLQ-routing outcome.
+    if (opts.maxStalledCount != null && opts.maxAttempts == null) {
+      warnMaxStalledCountSemanticsOnce(name)
+    }
+
     const url = buildRedisUrl(opts.connection)
     const nativeOpts: NativeConsumerOpts = {
       queueName: name,
       concurrency: opts.concurrency ?? 100,
       blockMs: opts.drainDelay ?? 5000,
-      maxAttempts: opts.maxStalledCount ?? 3,
+      // v1.4.0: maxAttempts is the canonical "total handler attempts
+      // before DLQ-as-retries_exhausted" knob. `undefined` flows to
+      // the engine default (25). Dropping the `?? 3` fallback that
+      // pre-v1.4 masked the engine default — `undefined` now reaches
+      // the engine literally as "use your default", which is what
+      // users were already expecting under the old (mis-named) field.
+      maxAttempts: opts.maxAttempts,
+      // v1.4.0: maxStalledCount routes to max_stalled_attempts
+      // (slice-12 stalled-detector). The semantic rename lives in
+      // the doc on `WorkerOptions.maxStalledCount`.
+      maxStalledAttempts: opts.maxStalledCount,
+      stalledDetectorEnabled: opts.stalledDetectorEnabled,
+      stalledDetectorTickMs: opts.stalledInterval,
       consumerId: opts.name,
       runScheduler: opts.runScheduler !== false,
       schedulerTickMs: opts.schedulerTickMs,
@@ -306,13 +380,17 @@ export class Worker<
     this.native = new NativeConsumer(url, nativeOpts, opts.connection.credentialProvider)
 
     // Spawn the cross-process events-stream subscriber the first time
-    // a user attaches a `drained` or `progress` listener. Using
-    // `newListener` (not a public method) keeps the API surface plain
-    // `EventEmitter`-shaped — users just call
-    // `worker.on('drained' | 'progress', ...)`, no extra setup.
+    // a user attaches a `drained`, `progress`, or `stalled` listener.
+    // Using `newListener` (not a public method) keeps the API surface
+    // plain `EventEmitter`-shaped — users just call
+    // `worker.on('drained' | 'progress' | 'stalled', ...)`, no extra
+    // setup. `stalled` is a slice-12 add: the stalled-job detector
+    // emits `e=stalled` on the events stream which the lazy
+    // subscriber forwards onto this Worker EE with the BullMQ-shaped
+    // `(jobId, prev)` payload.
     this.on('newListener', (event: string) => {
       if (
-        (event === 'drained' || event === 'progress') &&
+        (event === 'drained' || event === 'progress' || event === 'stalled') &&
         !this.internalEvents &&
         !this.closed
       ) {
@@ -380,6 +458,16 @@ export class Worker<
         job.progress = payload.progress
         this.emit('progress', job, payload.progress)
       }
+    })
+    // Slice-12: forward `stalled` events with the BullMQ-shaped
+    // `(jobId, prev)` payload. Cross-process scope (the detector is
+    // leader-elected per queue, so any worker on the queue receives
+    // the event regardless of which worker held the stalled entry).
+    // Not Job-keyed because the entry is in mid-flight on some
+    // OTHER worker (possibly even one that crashed); the local
+    // `inflight` map wouldn't have a live Job for this id.
+    events.on('stalled', (payload: { jobId: string; prev: string }) => {
+      this.emit('stalled', payload.jobId, payload.prev)
     })
     // Forward subscriber errors onto the worker's single ``error``
     // channel so application code only needs one error subscription.
@@ -617,6 +705,49 @@ export class Worker<
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Process-global latch for the v1.4.0 `maxStalledCount` semantics
+ * warning. We warn at most once per process — the message is a
+ * migration nag, not a per-queue diagnostic, and a multi-queue
+ * deployment that sets `maxStalledCount` on each Worker shouldn't
+ * spam N copies of the same prose. The first triggering queue's name
+ * makes the warning concrete; subsequent triggers are suppressed.
+ *
+ * Stashed on `globalThis` (under a unique symbol) so multiple
+ * loaded copies of this module — which happens under Vitest's
+ * isolated test runner — still share one latch, matching the
+ * "once per process" intent that a normal user app honors via the
+ * single-instance CommonJS module cache.
+ */
+const WARN_LATCH_KEY = Symbol.for('chasquimq.maxStalledCountWarned')
+type LatchHost = typeof globalThis & {
+  [WARN_LATCH_KEY]?: boolean
+}
+
+function warnMaxStalledCountSemanticsOnce(queueName: string): void {
+  const host = globalThis as LatchHost
+  if (host[WARN_LATCH_KEY]) return
+  host[WARN_LATCH_KEY] = true
+  // eslint-disable-next-line no-console
+  console.warn(
+    `WARN [chasquimq] \`maxStalledCount\` now controls stall-attempts (not job-attempts) ` +
+      `(first seen on queue "${queueName}"). Use \`maxAttempts\` for the prior behavior. ` +
+      `This warning fires once per process; see CHANGELOG for v1.4.0.`,
+  )
+}
+
+/**
+ * Test-only: reset the warn-once latch so the next call to
+ * `warnMaxStalledCountSemanticsOnce` fires again. Used by
+ * `worker-stalled.test.ts` to exercise per-test scenarios without
+ * carrying latch state between tests. Not part of the public API —
+ * the underscore prefix signals "do not import".
+ */
+export function __resetMaxStalledCountWarnLatchForTests(): void {
+  const host = globalThis as LatchHost
+  host[WARN_LATCH_KEY] = false
+}
 
 function buildRedisUrl(c: ConnectionOptions): string {
   if (c.url) return applyTls(c.url, c.tls === true)

@@ -24,6 +24,8 @@ Cross-FFI credential-provider callbacks for the Node and Python shims shipped in
 
 Redis Cluster support shipped (May 2026) — connect with a `redis-cluster://` / `rediss-cluster://` URL (or Node `connection.cluster: true`). The engine was already cluster-correct (the `{chasqui:<queue>}` hash tag co-locates a queue's keyspace on one slot; every command uses `ClusterHash::FirstKey`); the slice fixed two shim TLS-URL bugs, added a real-cluster integration test + CI job, and synced docs. See `docs/history.md`.
 
+Stalled-job detector shipped (May 2026, v1.4.0) — leader-elected background task spawned alongside the promoter/scheduler that bounds worker-crash loops independently of handler-failure loops. New `DlqReason::Stalled`, `MetricsSink::stalled_tick`, `e=stalled` event, `JobInfo.stalled_count`, and a Node-shim **BREAKING CHANGE**: `WorkerOptions.maxStalledCount` now routes to engine `max_stalled_attempts` (the correct semantic — stall cycles before DLQ-as-`stalled`) instead of `max_attempts` (total handler attempts) — with a one-time warn-once when users hit the migration cell. Python shim adds `Worker(max_stalled_attempts=...)` clean (no deprecation needed — Python never had the mis-routed field). See `docs/history.md`.
+
 ## Workspace
 
 - `chasquimq/` — engine crate.

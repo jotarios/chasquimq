@@ -14,6 +14,20 @@ If `next_attempt >= max_attempts`, the entry goes straight to DLQ instead. Backo
 
 The classic `XREADGROUP CLAIM` mechanism (Redis 8.4 idle-pending reads) remains the safety net: if a worker dies mid-handler before the retry path runs, CLAIM re-delivers the entry on the next read, and the reader compares the in-payload `attempt` counter against `delivery_count` to detect retry-exhaustion regardless of which path produced the count.
 
+## Stalled-job detector
+
+CLAIM-on-read recovers a *single* mid-handler crash, but it can't bound a *loop* of worker crashes against the same entry — every CLAIM redelivery resets the idle clock, the `delivery_count` rises forever, and the entry never escapes the PEL. The stalled-job detector is the active sibling of that passive recovery: a leader-elected background task spawned alongside the promoter and scheduler that scans the consumer group's PEL on a tick, INCRs a per-job stall counter for entries idle past the threshold, and atomically relocates them to the DLQ as `DlqReason::Stalled` at `max_stalled_attempts`.
+
+**What counts as stalled:** every detector tick at which the entry is observed sitting in the PEL idle longer than `idle_threshold_ms`. The counter is per-job (`{chasqui:<queue>}:stalls:<job_id>`, sliding TTL = `idle_threshold_ms * max_stalled_attempts * 2`); it's `DEL`'d on successful ack (inside `JOB_OK_SCRIPT`) and on DLQ replay (inside `REPLAY_DLQ_SCRIPT`), so a one-off stall followed by success starts a fresh streak.
+
+**Race-isolation invariant.** The reader's `XREADGROUP ... CLAIM <claim_min_idle_ms>` is still the only path that bumps `delivery_count`; the detector reads idle-ms but never `XCLAIM`s. To keep the per-crash counting invariant ("one INCR per crash cycle"), the embedded spawn forces `stalled_detector.tick_interval_ms == idle_threshold_ms == claim_min_idle_ms` so reader and detector move in lockstep: reader CLAIM resets idle → handler crashes → idle climbs back past threshold → next detector tick INCRs once. `ConsumerConfig::validate()` rejects `tick_interval_ms < idle_threshold_ms` to keep operators who override these explicitly from breaking it.
+
+**Threshold-hit relocate path.** When `n >= max_stalled_attempts`, `STALLED_SCAN_SCRIPT` `XACKDEL`s the entry out of the PEL inside the same Lua call (atomic with the INCR) and signals Rust to enqueue a DLQ relocate via the existing `dlq_tx` channel. The relocator uses a sibling `RELOCATE_DLQ_PRE_ACKED_SCRIPT` (XADD-only, no XACKDEL gate) since the entry is already acked — the IDMP marker on the XADD is the dedup guard. The eventual `e=dlq` event carries `reason="stalled"` so DLQ subscribers can distinguish handler-failure loops (`retries_exhausted`) from worker-crash loops (`stalled`).
+
+**Configuration:** `ConsumerConfig::stalled_detector_enabled` (default `true`) and `ConsumerConfig::stalled_detector: StalledDetectorConfig` — `max_stalled_attempts` (default `2` — requires two consecutive idle observations before relocating, which avoids racing the reader's CLAIM-on-read recovery for operators with short `claim_min_idle_ms`; BullMQ's `maxStalledCount` defaults to `1`), `scan_batch` (default `256`, caps `XPENDING ... IDLE - + N`), `lock_ttl_secs` (default `90`, sized to outlive a full `tick_interval_ms` sleep so the sleeping leader doesn't lose its lock to a replica every tick — bump in lockstep when raising `tick_interval_ms`). `tick_interval_ms` and `idle_threshold_ms` default to `30_000` but are overridden from `claim_min_idle_ms` at spawn time on the embedded path. Observability: `MetricsSink::stalled_tick(StalledTick { scanned, incremented, relocated })` per leader tick, plus the existing `dlq_routed` event with `reason: DlqReason::Stalled`.
+
+**Active-state observability:** `JobInfo.stalled_count` is populated by the introspector only for `Active`-state lookups. The counter is `DEL`'d on every terminal transition (ack / DLQ-relocate / DLQ-replay), so it's never live outside the active window — probing in other states would always return `nil` and burn one extra round trip on every admin lookup.
+
 ## Delayed jobs
 
 `Producer::add_in(delay, payload)` and `Producer::add_at(when, payload)` schedule jobs to fire later. Bulk variant is `Producer::add_in_bulk`. A `delay` of zero (or `add_at` in the past) fast-paths straight to the stream.
@@ -32,7 +46,7 @@ By default any `Consumer` with `delayed_enabled = true` (the default) runs an em
 
 ## DLQ tooling
 
-`Producer::peek_dlq(limit)` reads up to N DLQ entries with their failure metadata (`source_id`, `reason`, optional `detail`, raw payload bytes) without removing them — the inspection API.
+`Producer::peek_dlq(limit)` reads up to N DLQ entries with their failure metadata (`source_id`, `reason`, optional `detail`, raw payload bytes) without removing them — the inspection API. `reason` values: `retries_exhausted` (handler failed enough times), `decode_failed` (msgpack envelope didn't parse), `malformed { reason }` (stream entry shape wrong), `oversize_payload`, `unrecoverable` (handler raised `UnrecoverableError`), `stalled` (stalled-detector relocated a worker-crash loop — see [Stalled-job detector](#stalled-job-detector)).
 
 `Producer::replay_dlq(limit)` moves up to N DLQ entries back into the main stream atomically. Each entry's `attempt` counter is reset to 0 before re-`XADD` so the replayed job gets a full retry budget (otherwise it'd land in DLQ again on first dispatch). The fix-the-bug-and-requeue workflow.
 

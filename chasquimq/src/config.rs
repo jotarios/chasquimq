@@ -208,6 +208,32 @@ pub struct ConsumerConfig {
     /// opt out of the events flood while keeping persisted progress.
     /// Default `true`.
     pub events_progress_enabled: bool,
+    /// Whether `Consumer::run` auto-spawns an embedded
+    /// [`crate::StalledDetector`] alongside the reader / promoter /
+    /// scheduler. Mirrors `delayed_enabled` for the promoter: a worker
+    /// process that loads the consumer also gets stalled-job detection
+    /// for free, without the operator managing a separate detector
+    /// process. Default `true`. Set to `false` for deployments running a
+    /// separate detector process or for pure-consumer benchmarks. The
+    /// standalone [`crate::StalledDetector`] API is unaffected.
+    pub stalled_detector_enabled: bool,
+    /// Configuration for the embedded stalled-job detector when
+    /// `stalled_detector_enabled` is `true`. At spawn time:
+    ///   - `queue_name` is forwarded from `ConsumerConfig::queue_name`.
+    ///   - `metrics` and `connection` are forwarded from the parent.
+    ///   - `tick_interval_ms` and `idle_threshold_ms` inherit
+    ///     `claim_min_idle_ms` **only when left at their defaults**, so
+    ///     the counter-semantic invariant
+    ///     `tick_interval_ms == idle_threshold_ms == claim_min_idle_ms`
+    ///     holds on the common path. An explicit non-default value
+    ///     (set by an operator or forwarded by an FFI shim option) is
+    ///     honored verbatim; the operator owns the lockstep in that
+    ///     case, and `validate()` enforces `tick >= idle`.
+    ///   - The other fields (`max_stalled_attempts`, `scan_batch`,
+    ///     `lock_ttl_secs`, `holder_id`) are honored as configured.
+    ///
+    /// Defaults to [`StalledDetectorConfig::default`].
+    pub stalled_detector: StalledDetectorConfig,
     /// Forwarded to the inline promoter the consumer spawns when
     /// `delayed_enabled` is true. Defaults to [`crate::metrics::NoopSink`].
     pub metrics: std::sync::Arc<dyn crate::metrics::MetricsSink>,
@@ -250,6 +276,8 @@ impl std::fmt::Debug for ConsumerConfig {
             .field("log_max_stream_len", &self.log_max_stream_len)
             .field("log_max_line_bytes", &self.log_max_line_bytes)
             .field("events_progress_enabled", &self.events_progress_enabled)
+            .field("stalled_detector_enabled", &self.stalled_detector_enabled)
+            .field("stalled_detector", &self.stalled_detector)
             .field("metrics", &"<dyn MetricsSink>")
             .field("connection", &self.connection)
             .finish()
@@ -266,7 +294,12 @@ impl Default for ConsumerConfig {
             block_ms: 5_000,
             claim_min_idle_ms: 30_000,
             concurrency: 100,
-            max_attempts: 3,
+            // Default tuned to match the FFI shims (Python kwarg default,
+            // Node docs) and BullMQ. A handler that always fails will run
+            // 25 times before being DLQ'd as `retries_exhausted`. Override
+            // per-queue via `ConsumerConfig::max_attempts` or per-job via
+            // `JobRetryOverride::max_attempts` on `Producer::add_with_options`.
+            max_attempts: 25,
             ack_batch: 256,
             ack_idle_ms: 5,
             shutdown_deadline_secs: 30,
@@ -292,6 +325,8 @@ impl Default for ConsumerConfig {
             log_max_stream_len: 1_000,
             log_max_line_bytes: 4_096,
             events_progress_enabled: true,
+            stalled_detector_enabled: true,
+            stalled_detector: StalledDetectorConfig::default(),
             metrics: crate::metrics::noop_sink(),
             connection: ConnectionTuning::default(),
         }
@@ -314,6 +349,34 @@ impl ConsumerConfig {
                 Self::MIN_LOG_MAX_STREAM_LEN,
                 self.log_max_stream_len
             )));
+        }
+        if self.stalled_detector_enabled {
+            if self.stalled_detector.max_stalled_attempts == 0 {
+                return Err(crate::Error::Config(
+                    "stalled_detector.max_stalled_attempts must be >= 1 (a value of 0 would \
+                     relocate every observed pending entry on first scan)"
+                        .into(),
+                ));
+            }
+            if self.stalled_detector.scan_batch == 0 {
+                return Err(crate::Error::Config(
+                    "stalled_detector.scan_batch must be >= 1".into(),
+                ));
+            }
+            // The counter-semantic invariant: a faster tick than the idle
+            // threshold INCRs more than once per crash. The embedded spawn
+            // overrides both fields from `claim_min_idle_ms` so the default
+            // path is always valid; only matters when a user overrides
+            // `stalled_detector.tick_interval_ms` / `idle_threshold_ms`
+            // explicitly.
+            if self.stalled_detector.tick_interval_ms < self.stalled_detector.idle_threshold_ms {
+                return Err(crate::Error::Config(format!(
+                    "stalled_detector.tick_interval_ms ({}) must be >= \
+                     stalled_detector.idle_threshold_ms ({}) — faster ticks INCR more than \
+                     once per crash and break per-crash counting",
+                    self.stalled_detector.tick_interval_ms, self.stalled_detector.idle_threshold_ms,
+                )));
+            }
         }
         Ok(())
     }
@@ -441,6 +504,115 @@ impl Default for PromoterConfig {
     }
 }
 
+/// Configuration for the standalone [`crate::StalledDetector`] (slice 12).
+///
+/// The detector is leader-elected (via `SET NX EX` on
+/// `{chasqui:<queue>}:stalled:lock`) and scans the consumer group's PEL
+/// every `tick_interval_ms`, INCR'ing a per-job stall counter for every
+/// entry that has sat idle past `idle_threshold_ms`. When a job's stall
+/// counter reaches `max_stalled_attempts`, the entry is atomically
+/// relocated to the DLQ with `DlqReason::Stalled` (distinct from
+/// `RetriesExhausted` — handler-failure loops vs worker-crash loops).
+///
+/// Defaults inherit cleanly from `ConsumerConfig::claim_min_idle_ms` when
+/// the detector is embedded (`spawn_stalled_detector`) — operators
+/// running the detector standalone own the
+/// `tick_interval_ms >= idle_threshold_ms` invariant.
+#[derive(Clone)]
+pub struct StalledDetectorConfig {
+    pub queue_name: String,
+    /// How often the leader runs `XPENDING ... IDLE`. Default 30_000ms.
+    /// **Must be >= `idle_threshold_ms`** — a faster tick INCRs more than
+    /// once per crash and breaks the per-crash counting invariant.
+    ///
+    /// On the embedded `Consumer::run` spawn path, this value inherits
+    /// `ConsumerConfig::claim_min_idle_ms` *only when left at the
+    /// default*. An explicit non-default value is honored verbatim
+    /// (operators who set this on purpose own the lockstep with
+    /// `idle_threshold_ms`).
+    pub tick_interval_ms: u64,
+    /// Idle threshold passed to `XPENDING ... IDLE`. Default 30_000ms.
+    /// See `tick_interval_ms` for the lockstep invariant.
+    ///
+    /// On the embedded `Consumer::run` spawn path, this value inherits
+    /// `ConsumerConfig::claim_min_idle_ms` *only when left at the
+    /// default* so the detector scans the same entries the reader's
+    /// CLAIM safety net is already re-delivering — one INCR per crash
+    /// cycle. An explicit non-default value is honored verbatim.
+    pub idle_threshold_ms: u64,
+    /// Stall counter ceiling. When `n >= max_stalled_attempts`, the entry
+    /// is atomically relocated to the DLQ as `DlqReason::Stalled`. Default
+    /// `2` — requires two consecutive idle observations
+    /// (~`tick_interval_ms` apart) before relocating, which avoids racing
+    /// the reader's CLAIM-on-read recovery path for operators with short
+    /// `claim_min_idle_ms`. BullMQ's `maxStalledCount = 1` means "fail
+    /// after 1 stall observation"; ours of `2` means "fail after 2
+    /// consecutive stall observations" — comparable safety stance, one
+    /// extra `tick_interval_ms` of DLQ-Stalled routing latency for
+    /// genuinely-crashed workers. Set lower for ultra-fast routing in
+    /// uncontested deployments, or higher for noisy workloads where brief
+    /// CLAIM redeliveries shouldn't count. Validation rejects `0`.
+    pub max_stalled_attempts: u32,
+    /// `XPENDING ... - + <count>` cap. Bounds the scan size so a giant
+    /// stuck PEL can't block the leader on one tick. Default `256`.
+    pub scan_batch: usize,
+    /// Leader-election lock TTL (seconds). Must comfortably exceed
+    /// `tick_interval_ms` — the detector sleeps for one full tick
+    /// between scans, and the lock must not expire while the sleeping
+    /// leader holds it or another replica will steal leadership every
+    /// tick (and the original leader will reacquire on wake, causing
+    /// thrash). Default `90` — `tick_interval_ms` defaults to `30_000`
+    /// (30s), so `90s = 3× tick` leaves enough headroom for tick jitter
+    /// and short Redis hiccups. Operators overriding `tick_interval_ms`
+    /// upward should bump this in lockstep (rule of thumb: at least
+    /// `2 × (tick_interval_ms / 1000) + 5s`).
+    pub lock_ttl_secs: u64,
+    /// Detector-instance id (value of the leader lock). Default a fresh
+    /// `format!("sd-{uuid}")`.
+    pub holder_id: String,
+    /// Receiver of `stalled_tick` events. Defaults to
+    /// [`crate::metrics::NoopSink`]. The embedded spawn forwards the
+    /// parent `ConsumerConfig::metrics` so dashboards see the same sink.
+    pub metrics: std::sync::Arc<dyn crate::metrics::MetricsSink>,
+    pub connection: ConnectionTuning,
+}
+
+impl std::fmt::Debug for StalledDetectorConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StalledDetectorConfig")
+            .field("queue_name", &self.queue_name)
+            .field("tick_interval_ms", &self.tick_interval_ms)
+            .field("idle_threshold_ms", &self.idle_threshold_ms)
+            .field("max_stalled_attempts", &self.max_stalled_attempts)
+            .field("scan_batch", &self.scan_batch)
+            .field("lock_ttl_secs", &self.lock_ttl_secs)
+            .field("holder_id", &self.holder_id)
+            .field("metrics", &"<dyn MetricsSink>")
+            .field("connection", &self.connection)
+            .finish()
+    }
+}
+
+impl Default for StalledDetectorConfig {
+    fn default() -> Self {
+        Self {
+            queue_name: "default".to_string(),
+            tick_interval_ms: 30_000,
+            idle_threshold_ms: 30_000,
+            max_stalled_attempts: 2,
+            scan_batch: 256,
+            // Must outlive `tick_interval_ms` (the leader sleeps for one
+            // full tick between scans and will lose its lock to a
+            // replica otherwise — see field doc). `90s` covers the
+            // default `30_000ms` tick with 3× headroom.
+            lock_ttl_secs: 90,
+            holder_id: format!("sd-{}", uuid::Uuid::new_v4()),
+            metrics: crate::metrics::noop_sink(),
+            connection: ConnectionTuning::default(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -468,6 +640,87 @@ mod tests {
     fn validate_accepts_log_max_stream_len_at_minimum() {
         let cfg = ConsumerConfig {
             log_max_stream_len: ConsumerConfig::MIN_LOG_MAX_STREAM_LEN,
+            ..ConsumerConfig::default()
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn default_config_passes_validation() {
+        // The defaults always satisfy the stalled-detector invariants:
+        // tick_interval_ms == idle_threshold_ms (both 30_000ms),
+        // max_stalled_attempts == 2 (>= 1), scan_batch == 256 (>= 1).
+        let cfg = ConsumerConfig::default();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_max_stalled_attempts_zero() {
+        let cfg = ConsumerConfig {
+            stalled_detector: StalledDetectorConfig {
+                max_stalled_attempts: 0,
+                ..StalledDetectorConfig::default()
+            },
+            ..ConsumerConfig::default()
+        };
+        let err = cfg
+            .validate()
+            .expect_err("max_stalled_attempts=0 must reject");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("max_stalled_attempts"),
+            "error must name the field: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_zero_scan_batch() {
+        let cfg = ConsumerConfig {
+            stalled_detector: StalledDetectorConfig {
+                scan_batch: 0,
+                ..StalledDetectorConfig::default()
+            },
+            ..ConsumerConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_tick_below_idle_threshold() {
+        // tick=5s, idle=30s — a 5s tick would INCR 6x per 30s crash cycle,
+        // breaking the per-crash counting invariant.
+        let cfg = ConsumerConfig {
+            stalled_detector: StalledDetectorConfig {
+                tick_interval_ms: 5_000,
+                idle_threshold_ms: 30_000,
+                ..StalledDetectorConfig::default()
+            },
+            ..ConsumerConfig::default()
+        };
+        let err = cfg.validate().expect_err("tick < idle must reject");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("tick_interval_ms"),
+            "error must name the field: {msg}"
+        );
+        assert!(
+            msg.contains("idle_threshold_ms"),
+            "error must name the field: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_disabled_detector_with_garbage_settings() {
+        // When the detector is disabled, the embedded path won't spawn it,
+        // so invariants on the inner struct are not enforced.
+        let cfg = ConsumerConfig {
+            stalled_detector_enabled: false,
+            stalled_detector: StalledDetectorConfig {
+                max_stalled_attempts: 0,
+                tick_interval_ms: 100,
+                idle_threshold_ms: 100_000,
+                ..StalledDetectorConfig::default()
+            },
             ..ConsumerConfig::default()
         };
         assert!(cfg.validate().is_ok());

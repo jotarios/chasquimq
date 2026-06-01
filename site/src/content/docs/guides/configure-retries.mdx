@@ -31,12 +31,12 @@ const worker = new Worker(
   },
   {
     connection,
-    maxStalledCount: 5, // → ConsumerOpts.maxAttempts; total attempt budget
+    maxAttempts: 5, // total attempt budget per job
   },
 );
 ```
 
-The Node shim maps `maxStalledCount` to the engine's `max_attempts`. The default is 3.
+`WorkerOptions.maxAttempts` maps directly to the engine's `ConsumerConfig::max_attempts`. The default is **25** (matches the Python `max_attempts` kwarg). Pre-v1.4 the Node shim mis-routed `maxStalledCount` here with a shim-side `?? 3` fallback that masked the real engine default — use `maxAttempts` explicitly. `maxStalledCount` now controls the stalled-detector ceiling, not the attempt budget.
 
 </TabItem>
 <TabItem label="Python">

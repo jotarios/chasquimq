@@ -80,6 +80,30 @@ pub struct ConsumerOpts {
     /// would otherwise flood the events stream). Default `true`. Maps
     /// to `ConsumerConfig::events_progress_enabled`.
     pub events_progress_enabled: Option<bool>,
+    /// Maximum stall attempts before the stalled-job detector relocates
+    /// the entry to the DLQ with `DlqReason::Stalled`. Maps to engine
+    /// `stalled_detector.max_stalled_attempts`. Default `2` — requires
+    /// two consecutive idle observations before relocating, which avoids
+    /// racing the reader's CLAIM-on-read recovery path.
+    pub max_stalled_attempts: Option<u32>,
+    /// Toggle the embedded stalled-job detector. Maps to
+    /// `ConsumerConfig::stalled_detector_enabled`. Default `true`.
+    pub stalled_detector_enabled: Option<bool>,
+    /// Override the detector's tick interval (ms). Maps to
+    /// `stalled_detector.tick_interval_ms`. On the embedded spawn the
+    /// engine inherits this from `claim_min_idle_ms` only when the
+    /// field is at its default (`30_000`); explicit non-default values
+    /// flow through verbatim so this option is now honored. Operators
+    /// who set this own the lockstep with the idle threshold
+    /// (`tick >= idle`, enforced by config validation).
+    pub stalled_detector_tick_ms: Option<i64>,
+    /// Override the detector's `XPENDING ... IDLE` threshold (ms).
+    /// Maps to `stalled_detector.idle_threshold_ms`. Same default-only
+    /// inherit-from-`claim_min_idle_ms` rule as `stalled_detector_tick_ms`.
+    pub stalled_detector_idle_threshold_ms: Option<i64>,
+    /// Override the detector's per-tick scan cap. Maps to
+    /// `stalled_detector.scan_batch`. Default `256`.
+    pub stalled_detector_scan_batch: Option<u32>,
 }
 
 /// `Job` is a `#[napi]` class (not a plain object) so it can carry the
@@ -465,6 +489,31 @@ fn build_consumer_config(opts: Option<ConsumerOpts>) -> napi::Result<ConsumerCon
         }
         if let Some(v) = o.events_progress_enabled {
             cfg.events_progress_enabled = v;
+        }
+        if let Some(v) = o.stalled_detector_enabled {
+            cfg.stalled_detector_enabled = v;
+        }
+        if let Some(v) = o.max_stalled_attempts {
+            cfg.stalled_detector.max_stalled_attempts = v;
+        }
+        if let Some(v) = o.stalled_detector_tick_ms {
+            if v < 0 {
+                return Err(napi::Error::from_reason(format!(
+                    "stalledDetectorTickMs must be non-negative; got {v}"
+                )));
+            }
+            cfg.stalled_detector.tick_interval_ms = v as u64;
+        }
+        if let Some(v) = o.stalled_detector_idle_threshold_ms {
+            if v < 0 {
+                return Err(napi::Error::from_reason(format!(
+                    "stalledDetectorIdleThresholdMs must be non-negative; got {v}"
+                )));
+            }
+            cfg.stalled_detector.idle_threshold_ms = v as u64;
+        }
+        if let Some(v) = o.stalled_detector_scan_batch {
+            cfg.stalled_detector.scan_batch = v as usize;
         }
     }
     Ok(cfg)

@@ -152,7 +152,7 @@ skipIfNoRedis('Worker + Queue + Job event listeners', () => {
       {
         connection: parseConn(REDIS_URL!),
         concurrency: 1,
-        maxStalledCount: 1,
+        maxAttempts: 1,
         autorun: false,
       },
     )
@@ -235,7 +235,7 @@ skipIfNoRedis('Worker + Queue + Job event listeners', () => {
       {
         connection: parseConn(REDIS_URL!),
         concurrency: 1,
-        maxStalledCount: 1,
+        maxAttempts: 1,
         autorun: false,
       },
     )

@@ -65,6 +65,10 @@ impl Consumer {
         log_max_stream_len = None,
         log_max_line_bytes = None,
         events_progress_enabled = None,
+        max_stalled_attempts = None,
+        stalled_detector_enabled = None,
+        stalled_interval_ms = None,
+        stalled_detector_scan_batch = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -91,6 +95,10 @@ impl Consumer {
         log_max_stream_len: Option<u64>,
         log_max_line_bytes: Option<u32>,
         events_progress_enabled: Option<bool>,
+        max_stalled_attempts: Option<u32>,
+        stalled_detector_enabled: Option<bool>,
+        stalled_interval_ms: Option<i64>,
+        stalled_detector_scan_batch: Option<u32>,
     ) -> PyResult<Self> {
         let mut cfg = ConsumerConfig {
             queue_name,
@@ -174,6 +182,24 @@ impl Consumer {
         }
         if let Some(v) = events_progress_enabled {
             cfg.events_progress_enabled = v;
+        }
+        if let Some(v) = stalled_detector_enabled {
+            cfg.stalled_detector_enabled = v;
+        }
+        if let Some(v) = max_stalled_attempts {
+            cfg.stalled_detector.max_stalled_attempts = v;
+        }
+        if let Some(v) = stalled_interval_ms {
+            if v < 0 {
+                return Err(PyRuntimeError::new_err(format!(
+                    "stalled_interval_ms must be non-negative; got {v}"
+                )));
+            }
+            cfg.stalled_detector.tick_interval_ms = v as u64;
+            cfg.stalled_detector.idle_threshold_ms = v as u64;
+        }
+        if let Some(v) = stalled_detector_scan_batch {
+            cfg.stalled_detector.scan_batch = v as usize;
         }
 
         let unrecoverable_cls = py

@@ -2,7 +2,9 @@ use crate::error::{Error, Result};
 use crate::events::EventsWriter;
 use crate::metrics::{self, DlqRouted, MetricsSink};
 use crate::redis::commands::{
-    RELOCATE_DLQ_SCRIPT, eval_relocate_dlq_args, evalsha_relocate_dlq_args, script_load_args,
+    RELOCATE_DLQ_PRE_ACKED_SCRIPT, RELOCATE_DLQ_SCRIPT, eval_relocate_dlq_args,
+    eval_relocate_dlq_pre_acked_args, evalsha_relocate_dlq_args,
+    evalsha_relocate_dlq_pre_acked_args, script_load_args,
 };
 use crate::redis::parse::StreamEntryId;
 use bytes::Bytes;
@@ -21,7 +23,7 @@ const DLQ_RETRY_BASE_MS: u64 = 50;
 pub(crate) use crate::metrics::DlqReason;
 
 #[derive(Debug)]
-pub(crate) struct DlqRelocate {
+pub struct DlqRelocate {
     /// The job's stable id, plumbed from the upstream call site so the
     /// relocator hot path doesn't have to msgpack-decode `payload` just
     /// to read the id field. Carried for the events-stream `dlq` emit;
@@ -40,9 +42,22 @@ pub(crate) struct DlqRelocate {
     /// the DLQ entry preserves it as a sibling field. Empty for reader-side
     /// routes where the entry was malformed or had no `n` to begin with.
     pub name: String,
+    /// When `true`, the source entry has already been XACKDEL'd out of
+    /// the consumer group's PEL by the caller (used by the stalled-job
+    /// detector, whose Lua script atomically INCRs the counter + XACKDEL's
+    /// at threshold in one round trip). The relocator then skips its own
+    /// XACKDEL gate inside `RELOCATE_DLQ_SCRIPT` (which would otherwise
+    /// return 0 — gate-lost — because the entry is already gone) and
+    /// goes straight to the IDMP-XADD path. The IDMP marker on the
+    /// XADD is the only dedup guard on this path, which is correct: the
+    /// upstream XACKDEL has already excluded any concurrent CLAIM /
+    /// manual-ack from racing the relocate. Defaults to `false`; every
+    /// existing caller (retry-exhausted, malformed-on-read, etc) leaves
+    /// it default and gets the original XACKDEL-then-XADD shape.
+    pub pre_acked: bool,
 }
 
-pub(crate) struct DlqRelocatorConfig {
+pub struct DlqRelocatorConfig {
     pub stream_key: String,
     pub dlq_key: String,
     pub group: String,
@@ -61,6 +76,27 @@ pub(crate) async fn enqueue(
     attempt: u32,
     name: String,
 ) {
+    enqueue_with_mode(
+        dlq_tx, job_id, entry_id, payload, reason, attempt, name, false,
+    )
+    .await;
+}
+
+/// Variant of [`enqueue`] that lets the caller mark the entry as
+/// already XACKDEL'd out of the PEL (the stalled-detector path's
+/// `STALLED_SCAN_SCRIPT` does its own XACKDEL at threshold so the
+/// relocator must skip the gate). See [`DlqRelocate::pre_acked`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn enqueue_with_mode(
+    dlq_tx: &mpsc::Sender<DlqRelocate>,
+    job_id: String,
+    entry_id: StreamEntryId,
+    payload: Bytes,
+    reason: DlqReason,
+    attempt: u32,
+    name: String,
+    pre_acked: bool,
+) {
     if dlq_tx
         .send(DlqRelocate {
             job_id,
@@ -69,6 +105,7 @@ pub(crate) async fn enqueue(
             reason,
             attempt,
             name,
+            pre_acked,
         })
         .await
         .is_err()
@@ -77,20 +114,25 @@ pub(crate) async fn enqueue(
     }
 }
 
-pub(crate) async fn run_relocator(
+pub async fn run_relocator(
     client: Client,
     cfg: DlqRelocatorConfig,
     mut rx: mpsc::Receiver<DlqRelocate>,
 ) {
-    let mut sha = match load_script(&client).await {
+    let mut sha = match load_script(&client, RELOCATE_DLQ_SCRIPT).await {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, "dlq relocator: SCRIPT LOAD failed; entries will reclaim via CLAIM");
             return;
         }
     };
+    // Slice-12: separate SHA for the pre-acked path (stalled-detector
+    // threshold relocates). Lazy-loaded on first pre-acked entry to
+    // avoid a startup SCRIPT LOAD round trip when no caller ever
+    // pre-acks (the common, retry-exhausted-only path).
+    let mut pre_acked_sha: Option<String> = None;
     while let Some(relocate) = rx.recv().await {
-        match relocate_with_retry(&client, &cfg, &relocate, &mut sha).await {
+        match relocate_with_retry(&client, &cfg, &relocate, &mut sha, &mut pre_acked_sha).await {
             Ok(true) => {
                 let event = DlqRouted {
                     reason: relocate.reason,
@@ -139,16 +181,19 @@ pub(crate) async fn run_relocator(
 
 /// Returns `Ok(true)` when the entry was relocated into the DLQ, `Ok(false)`
 /// when the XACKDEL gate found nothing to ack (a concurrent path already
-/// removed it — no DLQ write happened).
+/// removed it — no DLQ write happened). For `relocate.pre_acked = true`
+/// (stalled-detector path) the pre-acked script always returns 1, so
+/// this only returns `Ok(false)` on the gated `RELOCATE_DLQ_SCRIPT` path.
 async fn relocate_with_retry(
     client: &Client,
     cfg: &DlqRelocatorConfig,
     relocate: &DlqRelocate,
     sha: &mut String,
+    pre_acked_sha: &mut Option<String>,
 ) -> Result<bool> {
     let mut last_err: Option<Error> = None;
     for attempt in 0..DLQ_RETRY_ATTEMPTS {
-        match relocate_once(client, cfg, relocate, sha).await {
+        match relocate_once(client, cfg, relocate, sha, pre_acked_sha).await {
             Ok(relocated) => return Ok(relocated),
             Err(e) => {
                 let backoff = DLQ_RETRY_BASE_MS << attempt;
@@ -161,16 +206,20 @@ async fn relocate_with_retry(
     Err(last_err.unwrap_or_else(|| Error::Config("DLQ relocation exhausted retries".into())))
 }
 
-/// Runs [`RELOCATE_DLQ_SCRIPT`] via EVALSHA with a cached SHA, falling back to
-/// EVAL (and refreshing the cache) on `NOSCRIPT`. The script does the
-/// XACKDEL-gate-then-XADD move atomically, so a crash or dropped connection
-/// can never leave the entry both in the DLQ and pending on the main stream.
+/// Routes to either [`RELOCATE_DLQ_SCRIPT`] (default — does XACKDEL
+/// gate + XADD) or [`RELOCATE_DLQ_PRE_ACKED_SCRIPT`] (only XADD; for
+/// the stalled-detector path where the source entry is already
+/// XACKDEL'd).
 async fn relocate_once(
     client: &Client,
     cfg: &DlqRelocatorConfig,
     relocate: &DlqRelocate,
     sha: &mut String,
+    pre_acked_sha: &mut Option<String>,
 ) -> Result<bool> {
+    if relocate.pre_acked {
+        return relocate_pre_acked_once(client, cfg, relocate, pre_acked_sha).await;
+    }
     let cmd = CustomCommand::new_static("EVALSHA", ClusterHash::FirstKey, false);
     let args = evalsha_relocate_dlq_args(
         sha,
@@ -190,7 +239,7 @@ async fn relocate_once(
     match res {
         Ok(v) => Ok(script_returned_one(&v)),
         Err(e) if format!("{e}").contains("NOSCRIPT") => {
-            *sha = load_script(client).await?;
+            *sha = load_script(client, RELOCATE_DLQ_SCRIPT).await?;
             let cmd = CustomCommand::new_static("EVAL", ClusterHash::FirstKey, false);
             let args = eval_relocate_dlq_args(
                 RELOCATE_DLQ_SCRIPT,
@@ -198,6 +247,54 @@ async fn relocate_once(
                 &cfg.dlq_key,
                 &cfg.group,
                 relocate.entry_id.as_ref(),
+                &cfg.producer_id,
+                relocate.entry_id.as_ref(),
+                relocate.payload.clone(),
+                relocate.reason.as_str(),
+                cfg.max_stream_len,
+                &relocate.name,
+                relocate.reason.detail(),
+            );
+            let v: Value = client.custom(cmd, args).await.map_err(Error::Redis)?;
+            Ok(script_returned_one(&v))
+        }
+        Err(e) => Err(Error::Redis(e)),
+    }
+}
+
+/// Pre-acked relocate: source entry was already XACKDEL'd by the
+/// caller (stalled-detector). Just XADD into the DLQ with IDMP dedup.
+async fn relocate_pre_acked_once(
+    client: &Client,
+    cfg: &DlqRelocatorConfig,
+    relocate: &DlqRelocate,
+    pre_acked_sha: &mut Option<String>,
+) -> Result<bool> {
+    if pre_acked_sha.is_none() {
+        *pre_acked_sha = Some(load_script(client, RELOCATE_DLQ_PRE_ACKED_SCRIPT).await?);
+    }
+    let sha = pre_acked_sha.as_ref().unwrap();
+    let cmd = CustomCommand::new_static("EVALSHA", ClusterHash::FirstKey, false);
+    let args = evalsha_relocate_dlq_pre_acked_args(
+        sha,
+        &cfg.dlq_key,
+        &cfg.producer_id,
+        relocate.entry_id.as_ref(),
+        relocate.payload.clone(),
+        relocate.reason.as_str(),
+        cfg.max_stream_len,
+        &relocate.name,
+        relocate.reason.detail(),
+    );
+    let res: std::result::Result<Value, fred::error::Error> = client.custom(cmd, args).await;
+    match res {
+        Ok(v) => Ok(script_returned_one(&v)),
+        Err(e) if format!("{e}").contains("NOSCRIPT") => {
+            *pre_acked_sha = Some(load_script(client, RELOCATE_DLQ_PRE_ACKED_SCRIPT).await?);
+            let cmd = CustomCommand::new_static("EVAL", ClusterHash::FirstKey, false);
+            let args = eval_relocate_dlq_pre_acked_args(
+                RELOCATE_DLQ_PRE_ACKED_SCRIPT,
+                &cfg.dlq_key,
                 &cfg.producer_id,
                 relocate.entry_id.as_ref(),
                 relocate.payload.clone(),
@@ -226,10 +323,10 @@ fn script_returned_one(v: &Value) -> bool {
     }
 }
 
-async fn load_script(client: &Client) -> Result<String> {
+async fn load_script(client: &Client, body: &str) -> Result<String> {
     let cmd = CustomCommand::new_static("SCRIPT", ClusterHash::FirstKey, false);
     let res: Value = client
-        .custom(cmd, script_load_args(RELOCATE_DLQ_SCRIPT))
+        .custom(cmd, script_load_args(body))
         .await
         .map_err(Error::Redis)?;
     match res {

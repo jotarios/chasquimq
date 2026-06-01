@@ -40,6 +40,7 @@
 //! | `delayed`          | `delay_ms`, `n` (opt)                      |
 //! | `dlq`              | `attempt`, `reason`, `n` (opt)             |
 //! | `drained`          | (no `id`/`n` — emitted with `id=""`)       |
+//! | `stalled`          | `attempt` (current stall count), `prev=active`, `n` (opt) |
 //!
 //! `attempt` is 1-indexed (matches `JobOutcome.attempt`). Numeric values are
 //! always decimal strings. The `n` field is the slice-5 payoff: subscribers
@@ -232,6 +233,25 @@ impl EventsWriter {
             id,
             name,
             &[("attempt", &attempt_s), ("reason", reason)],
+        )
+        .await;
+    }
+
+    /// Emit a `stalled` event (the stalled-job detector observed this
+    /// entry sitting idle past the threshold for the `attempt`-th
+    /// consecutive scan; under threshold the detector continues
+    /// counting, at threshold it relocates to the DLQ and also emits
+    /// a separate `dlq` event). `prev` is always `"active"` — every
+    /// stalled entry was active (PEL-resident) when the detector
+    /// saw it. Mirrors the BullMQ `Worker.on('stalled', (jobId, prev))`
+    /// payload so shim subscribers see the familiar two-arg shape.
+    pub(crate) async fn emit_stalled(&self, id: &str, name: &str, attempt: u32) {
+        let attempt_s = attempt.to_string();
+        self.xadd(
+            "stalled",
+            id,
+            name,
+            &[("attempt", &attempt_s), ("prev", "active")],
         )
         .await;
     }

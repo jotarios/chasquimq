@@ -132,6 +132,30 @@ pub fn log_key(queue_name: &str, job_id: &str) -> String {
     format!("{{chasqui:{queue_name}}}:log:{job_id}")
 }
 
+/// Per-queue, per-job-id stall counter. Written by the stalled-job
+/// detector's `STALLED_SCAN_SCRIPT` (INCR + EXPIRE) when the entry has
+/// sat idle past the detector's threshold; cleared by `JOB_OK_SCRIPT`
+/// on successful ack and by `REPLAY_DLQ_SCRIPT` on replay. The detector
+/// relocates the entry to the DLQ as `DlqReason::Stalled` once the
+/// counter reaches `max_stalled_attempts`. TTL is sliding:
+/// `idle_threshold_ms * max_stalled_attempts * 2` ms, applied on every
+/// INCR, so a job that genuinely keeps stalling doesn't have its
+/// counter evicted between ticks. Same `{chasqui:<queue>}` hash tag so
+/// the counter co-locates with the stream / result / progress keys on
+/// the same Cluster slot — `STALLED_SCAN_SCRIPT` reaches it from the
+/// same Lua call as the `XACKDEL` on the source stream.
+pub fn stall_counter_key(queue_name: &str, job_id: &str) -> String {
+    format!("{{chasqui:{queue_name}}}:stalls:{job_id}")
+}
+
+/// Per-queue stalled-detector leader-election lock. Sibling of
+/// `promoter_lock_key` and `scheduler_lock_key`; uses the shared
+/// `ACQUIRE_LOCK_SCRIPT` / `RELEASE_LOCK_SCRIPT` primitives. TTL =
+/// `StalledDetectorConfig::lock_ttl_secs` (5s default).
+pub fn stalled_lock_key(queue_name: &str) -> String {
+    format!("{{chasqui:{queue_name}}}:stalled:lock")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,6 +184,28 @@ mod tests {
         assert_eq!(tag(&pk), tag(&stream));
         assert_eq!(tag(&lk), tag(&stream));
         assert_eq!(tag(&pk), tag(&result_key("demo", "job-abc")));
+    }
+
+    /// The stalled-detector keys share the same `{chasqui:<queue>}` hash
+    /// tag as the rest of the queue's keyspace. Critical because the
+    /// `STALLED_SCAN_SCRIPT` synthesizes `stalls:<job_id>` keys from the
+    /// stream KEYS[1] hash tag inside Lua and `XACKDEL`s the source
+    /// stream entry in the same call — both keys must live on the same
+    /// Redis Cluster slot.
+    #[test]
+    fn stalled_keys_share_queue_hash_tag() {
+        let sc = stall_counter_key("demo", "job-abc");
+        let lk = stalled_lock_key("demo");
+        assert_eq!(sc, "{chasqui:demo}:stalls:job-abc");
+        assert_eq!(lk, "{chasqui:demo}:stalled:lock");
+        let stream = stream_key("demo");
+        let tag = |s: &str| {
+            let start = s.find('{').unwrap();
+            let end = s.find('}').unwrap();
+            s[start..=end].to_string()
+        };
+        assert_eq!(tag(&sc), tag(&stream));
+        assert_eq!(tag(&lk), tag(&stream));
     }
 
     /// Job ids with `:` characters (legacy slug ids, user-supplied ids

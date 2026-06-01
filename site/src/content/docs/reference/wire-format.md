@@ -36,6 +36,8 @@ all keys for a queue land on the same slot.
 | `{chasqui:<q>}:didx:<jobId>` | String | Side-index for `cancel_delayed`. |
 | `{chasqui:<q>}:promoter:lock` | String | Promoter leader-election lock. |
 | `{chasqui:<q>}:scheduler:lock` | String | Scheduler leader-election lock. |
+| `{chasqui:<q>}:stalled:lock` | String | Stalled-job detector leader-election lock. |
+| `{chasqui:<q>}:stalls:<jobId>` | String | Per-job stall counter. Written by `STALLED_SCAN_SCRIPT` (INCR + EXPIRE) when the detector observes the entry idle past threshold; `DEL`'d on successful ack (`JOB_OK_SCRIPT`) and on DLQ replay (`REPLAY_DLQ_SCRIPT`). Sliding TTL = `idle_threshold_ms * max_stalled_attempts * 2`. |
 
 ## Main stream entry
 
@@ -253,6 +255,22 @@ stream entry id becomes the dedup id on the DLQ side, so a CLAIM
 race that tries to relocate the same entry twice is a no-op on
 the second attempt.
 
+The `reason` field is a stable string enum: `retries_exhausted`
+(handler failed enough times), `decode_failed` (msgpack envelope
+didn't parse), `malformed` (stream entry shape wrong; carries an
+optional `detail` field), `oversize_payload`, `unrecoverable`
+(handler raised `UnrecoverableError`), `stalled` (stalled-job
+detector relocated a worker-crash loop after
+`max_stalled_attempts` consecutive idle observations).
+
+The stalled-detector relocate path uses a sibling script
+(`RELOCATE_DLQ_PRE_ACKED_SCRIPT`) that skips the XACKDEL gate
+because `STALLED_SCAN_SCRIPT` already removed the entry from the
+PEL at threshold. The IDMP marker on the XADD is the dedup guard
+on this path. The on-wire shape is byte-identical to the gated
+script's XADD half, so DLQ subscribers can't tell the two paths
+apart.
+
 ## Events stream
 
 The `{chasqui:<q>}:events` stream uses **plain ASCII fields**
@@ -261,15 +279,16 @@ generic Redis client. Fields per event:
 
 | Field | Type | When |
 |---|---|---|
-| `e` | string | Event name (`"waiting"`, `"active"`, `"completed"`, `"failed"`, `"retry-scheduled"`, `"delayed"`, `"dlq"`, `"drained"`, `"progress"`). |
+| `e` | string | Event name (`"waiting"`, `"active"`, `"completed"`, `"failed"`, `"retry-scheduled"`, `"delayed"`, `"dlq"`, `"drained"`, `"progress"`, `"stalled"`). |
 | `id` | string | Job id. Absent for queue-scoped events. |
 | `n` | string | Dispatch name. Absent / empty when no name was set. |
-| `attempt` | int (decimal string) | Per-attempt events. |
+| `attempt` | int (decimal string) | Per-attempt events. For `stalled`: current stall count (1-indexed). |
 | `backoff_ms` | int | `retry-scheduled`. |
 | `delay_ms` | int | `delayed`. |
 | `duration_us` | int | `completed`, `failed` — handler wall-clock duration. |
 | `reason` | string | `failed`, `dlq` — DLQ reason. |
 | `progress` | int (decimal string) | `progress` — clamped `0..=100` value the engine persisted. |
+| `prev` | string | `stalled` — always `"active"` (every stalled entry was PEL-resident when the detector saw it). Mirrors the BullMQ `Worker.on('stalled', (jobId, prev))` payload shape. |
 | `ts` | int | Emit time (epoch ms). |
 
 Numeric fields are decimal strings on the wire; the Node and
