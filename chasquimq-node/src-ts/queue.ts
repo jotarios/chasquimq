@@ -290,10 +290,27 @@ export class Queue<
     merged: JobsOptions,
   ): Promise<Job<DataType, ResultType, NameType>> {
     const repeat = merged.repeat as RepeatOptions;
+    // A user-supplied `jobId` (either the top-level `JobsOptions.jobId` or the
+    // nested `RepeatOptions.jobId`) is rejected loudly rather than silently
+    // dropped: the scheduler mints a fresh ULID per fire, so a "stable" id the
+    // caller might rely on for dedup would be a correctness foot-gun. The
+    // auto-derived `repeatJobKey` (the spec key, distinct from a per-fire job
+    // id) is the supported handle and is NOT rejected here.
+    if (merged.jobId !== undefined || repeat.jobId !== undefined) {
+      throw new NotSupportedError(
+        "jobId on repeatable jobs is not yet supported; the scheduler mints a fresh id per fire.",
+      );
+    }
     const pattern = translateRepeatPattern(repeat);
     const buf = encodePayload(data);
     const startAfterMs = coerceDateLike(repeat.startDate);
     const endBeforeMs = coerceDateLike(repeat.endDate);
+    // Per-fire retry override: reuse the exact `attempts`/`backoff` -> native
+    // retry translation the normal `add()` path uses (`buildRetryOverride`),
+    // so a repeatable spec's fired jobs honor the same per-job budget a
+    // one-off `add(name, data, { attempts, backoff })` would. `undefined`
+    // (no `attempts`/`backoff`) leaves fired jobs on the queue-wide budget.
+    const retry = buildRetryOverride(merged);
     const producer = await this.producer();
     const resolvedKey = await producer.upsertRepeatable({
       key: merged.repeatJobKey ?? "",
@@ -304,6 +321,7 @@ export class Queue<
       startAfterMs,
       endBeforeMs,
       missedFires: translateMissedFires(repeat.missedFires),
+      retry,
     });
     // The repeatable upsert is a *spec*, not a job invocation; the engine
     // mints a fresh ULID for each fire. Returning a Job here gives callers
