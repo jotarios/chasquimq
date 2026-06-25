@@ -504,11 +504,21 @@ class Queue:
     ) -> Job:
         """Upsert a repeatable / cron spec. Returns a :class:`Job`
         whose ``id`` is the resolved spec key — pair with
-        :meth:`remove_repeatable_by_key` to delete."""
-        # `attempts` / `backoff` / `job_id` accepted for API symmetry with
-        # :meth:`add`; the engine's repeatable path does not yet thread
-        # per-fire retry overrides, so they are ignored at the wire layer.
-        del attempts, backoff, job_id
+        :meth:`remove_repeatable_by_key` to delete.
+
+        ``attempts`` / ``backoff`` set a **per-fire retry override** that
+        beats the queue-wide worker budget for every job the scheduler
+        mints from this spec. They use the same shape as :meth:`add`.
+
+        ``job_id`` is rejected: the scheduler mints a fresh id per fire,
+        so a caller-supplied stable id would silently not stick. Passing
+        it raises :class:`NotSupportedError`.
+        """
+        if job_id is not None:
+            raise NotSupportedError(
+                "job_id on repeatable jobs is not yet supported; the "
+                "scheduler mints a fresh id per fire."
+            )
 
         spec: dict[str, Any] = {
             "key": "",
@@ -524,6 +534,12 @@ class Queue:
             spec["end_before_ms"] = end_before_ms
         if missed_fires is not None:
             spec["missed_fires"] = _missed_fires_to_dict(missed_fires)
+        # Reuse the exact retry-override shape `add()` builds for the wire
+        # (`{"max_attempts": int?, "backoff": {...}?}`) so the native
+        # `dict_to_retry_override` parser handles both paths identically.
+        retry = _build_retry_override(attempts, backoff)
+        if retry is not None:
+            spec["retry"] = retry
 
         producer = self._get_producer()
         resolved_key = await producer.upsert_repeatable(spec)
