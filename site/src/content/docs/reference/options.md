@@ -99,6 +99,9 @@ exists.
 | Promote batch | (engine default) | (engine default) | `ConsumerConfig::delayed_promote_batch` (**256**) | Max promotions per tick. |
 | Promoter lock TTL (s) | (engine default) | (engine default) | `ConsumerConfig::delayed_lock_ttl_secs` (**5**) | Leader-election lock TTL. |
 | Catch-up policy | `RepeatOptions.missedFires` (**`{ kind: 'skip' }`**) | `Queue.add(missed_fires=MissedFiresPolicy.skip())` | `RepeatableSpec::missed_fires` (**`Skip`**) | What to do with windows missed during scheduler downtime. |
+| Per-fire attempts | `JobsOptions.attempts` with `repeat` set | `Queue.upsert_repeatable_job(attempts=...)` | `RepeatableSpec::retry` → `JobRetryOverride::max_attempts` | Per-fire override of the queue-wide attempt budget, threaded onto every job the spec fires. **Default queue-wide.** |
+| Per-fire backoff | `JobsOptions.backoff` with `repeat` set | `Queue.upsert_repeatable_job(backoff=...)` | `RepeatableSpec::retry` → `JobRetryOverride::backoff` | Per-fire backoff override applied to every fired job. **Default queue-wide.** |
+| Stable id per fire | `JobsOptions.jobId` / `RepeatOptions.jobId` with `repeat` → `NotSupportedError` | `Queue.upsert_repeatable_job(job_id=...)` → `NotSupportedError` | (n/a) | Rejected loudly — the scheduler mints a fresh id per fire. Tracked follow-up. |
 
 ## DLQ
 

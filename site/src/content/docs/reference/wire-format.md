@@ -132,6 +132,40 @@ encoding makes that unsafe), so an inert override
 strings from a future SDK decode as `BackoffKind::Unknown` and
 route through the exponential math at the consumer.
 
+## Repeatable spec body
+
+A repeatable spec is stored in the `spec` field of the
+`{chasqui:<q>}:repeat:spec:<key>` hash as an `rmp-serde`-encoded
+`StoredSpec` — again a **positional array**. The trailing fields
+follow the same one-trailing-optional rule as the `Job<T>`
+envelope:
+
+```
+[key, job_name, pattern, payload, limit, start_after_ms,
+ end_before_ms, fired, missed_fires, retry?]
+```
+
+- `missed_fires` is **always serialized** (no `skip_serializing_if`).
+  It used to be the lone trailing-optional slot, but `retry` took
+  that role, so it became unconditional to keep its position fixed.
+  A default-policy (`Skip`) spec therefore encodes as a **9-field**
+  array — one field wider than the historical 8-field legacy shape.
+  Old readers tolerate the extra trailing field; new readers default
+  a missing one to `Skip`.
+- `retry` is the new **trailing-optional** (`skip_serializing_if =
+  Option::is_none`), the per-fire [`JobRetryOverride`](#jobretryoverride-shape)
+  threaded onto every fired job. Omitted entirely when `None`, so a
+  spec with no per-fire override still encodes as the 9-field shape.
+
+A positional array can carry **at most one** trailing
+conditionally-omitted field: two would create a hole where the
+present value lands in the skipped field's slot at decode time.
+Making `missed_fires` unconditional pins its position so `retry`
+can own the trailing-optional slot cleanly. Specs written before
+this layout existed (8-field legacy, or 9-field with a non-default
+`missed_fires`) still decode — see the
+[deploy-order rule](#deploy-order-rules) below.
+
 ## Delayed ZSET member
 
 The delayed ZSET (`{chasqui:<q>}:delayed`) stores raw bytes as
@@ -307,10 +341,23 @@ deploys:
   emit `retry = Some(...)`. Producing such a payload while a
   stale consumer is still running will route those jobs to the
   DLQ as [`CMQ-021`](/reference/error-codes/#cmq-021--dlq-decode-failed).
-- **`MissedFiresPolicy` other than `Skip` requires scheduler-first deploy.** Same rationale for `RepeatableSpec.missed_fires`.
-- The default `retry = None` and `missed_fires = Skip` paths
-  encode identically to the pre-existing wire shape, so the
-  steady-state hot path is back-compatible in both directions.
+- **`StoredSpec.retry = Some(...)` requires scheduler-first deploy.**
+  A repeatable spec carrying a per-fire retry override encodes as a
+  10-element array (the trailing `retry` slot present); a
+  pre-this-change scheduler rejects the array length and cannot
+  decode it. Roll out new schedulers everywhere first, then start
+  writing retry-bearing specs. A spec is re-encoded on every
+  `upsert_repeatable`, so a stale scheduler only breaks if a *new*
+  retry-bearing spec is written while it is still running — the same
+  contract as `Job::retry`. (Before this change the deploy-order
+  trigger was a non-`Skip` `RepeatableSpec.missed_fires`, which used
+  to be the trailing-optional slot; it is now always present, so it
+  no longer changes the array length on its own.)
+- The default `Job::retry = None` and a retry-less repeatable spec
+  encode identically to the pre-existing wire shape — for the spec,
+  that's the 9-field default-policy shape an old reader still decodes
+  — so the steady-state hot path is back-compatible in both
+  directions.
 
 The full deploy-order log lives in
 [`docs/history.md`](https://github.com/jotarios/chasquimq/blob/main/docs/history.md).
