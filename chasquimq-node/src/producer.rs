@@ -734,6 +734,10 @@ fn native_spec_into_engine(spec: RepeatableSpec) -> napi::Result<EngineRepeatabl
         start_after_ms: f64_opt_to_u64_opt(spec.start_after_ms, "startAfterMs")?,
         end_before_ms: f64_opt_to_u64_opt(spec.end_before_ms, "endBeforeMs")?,
         missed_fires,
+        // Per-fire retry overrides are not yet surfaced on the Node shim —
+        // that is a separate phase. Keep `None` so the engine spec compiles;
+        // the field is purely additive (retry-less specs encode unchanged).
+        retry: None,
     })
 }
 

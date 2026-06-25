@@ -700,6 +700,7 @@ impl<T: Serialize> Producer<T> {
             end_before_ms: spec.end_before_ms,
             fired: 0,
             missed_fires: spec.missed_fires,
+            retry: spec.retry,
         };
         // The scheduler re-HGETs + double-decodes this blob every tick for
         // the spec's lifetime, so the envelope length is the figure that

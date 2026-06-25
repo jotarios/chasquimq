@@ -31,6 +31,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::job::JobRetryOverride;
 
 /// What the scheduler does when it finds a spec whose `next_fire_ms` is more
 /// than one cadence in the past — i.e. the scheduler was down (or partitioned
@@ -124,6 +125,12 @@ impl RepeatPattern {
 /// options. The default ([`MissedFiresPolicy::Skip`]) drops missed windows
 /// and resumes on the first future fire — safe for any payload, no
 /// thundering herd on restart.
+///
+/// Per-fire retry behaviour is governed by [`RepeatableSpec::retry`]: when
+/// set, every job this spec fires carries that [`JobRetryOverride`], so the
+/// scheduler-minted jobs honour a per-spec `max_attempts` / `backoff` instead
+/// of the queue-wide [`crate::config::ConsumerConfig`] defaults. Leave it
+/// `None` (the default) to inherit the queue's retry policy.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RepeatableSpec<T> {
     /// Stable identifier. Auto-derived from `job_name::pattern_signature` if
@@ -157,6 +164,12 @@ pub struct RepeatableSpec<T> {
     /// unchanged into the new shape with `Skip`.
     #[serde(default, skip_serializing_if = "is_default_missed_fires_policy")]
     pub missed_fires: MissedFiresPolicy,
+    /// Per-fire retry override. When `Some`, every job this spec fires carries
+    /// this [`JobRetryOverride`] in its `Job<T>` payload, so the scheduler-
+    /// minted jobs honour a per-spec `max_attempts` / `backoff` instead of
+    /// the queue-wide [`crate::config::ConsumerConfig`] retry defaults.
+    /// `None` (the default) inherits the queue policy.
+    pub retry: Option<JobRetryOverride>,
 }
 
 fn is_default_missed_fires_policy(p: &MissedFiresPolicy) -> bool {
@@ -170,8 +183,9 @@ impl<T> RepeatableSpec<T> {
     /// [`with_limit`](Self::with_limit) /
     /// [`with_start_after_ms`](Self::with_start_after_ms) /
     /// [`with_end_before_ms`](Self::with_end_before_ms) /
-    /// [`with_missed_fires`](Self::with_missed_fires) setters to override
-    /// individual fields.
+    /// [`with_missed_fires`](Self::with_missed_fires) /
+    /// [`with_retry`](Self::with_retry) setters to override individual
+    /// fields.
     ///
     /// Defaults:
     /// - `key`: empty (auto-derived from `job_name::pattern_signature` —
@@ -180,6 +194,7 @@ impl<T> RepeatableSpec<T> {
     /// - `start_after_ms` / `end_before_ms`: `None` (no time window).
     /// - `missed_fires`: [`MissedFiresPolicy::Skip`] (drop missed windows
     ///   on scheduler restart — safe default, no thundering herd).
+    /// - `retry`: `None` (fired jobs inherit the queue-wide retry policy).
     ///
     /// The struct fields remain `pub` for back-compat with callers that
     /// destructure or use field-by-field literals; the constructor is an
@@ -195,6 +210,7 @@ impl<T> RepeatableSpec<T> {
             start_after_ms: None,
             end_before_ms: None,
             missed_fires: MissedFiresPolicy::default(),
+            retry: None,
         }
     }
 
@@ -229,6 +245,15 @@ impl<T> RepeatableSpec<T> {
     /// [`MissedFiresPolicy`].
     pub fn with_missed_fires(mut self, policy: MissedFiresPolicy) -> Self {
         self.missed_fires = policy;
+        self
+    }
+
+    /// Set a per-fire retry override. Every job this spec fires will carry
+    /// this [`JobRetryOverride`] in its payload, overriding the queue-wide
+    /// `max_attempts` / `backoff` for those jobs. Parity with
+    /// [`crate::producer::AddOptions::with_retry`].
+    pub fn with_retry(mut self, retry: JobRetryOverride) -> Self {
+        self.retry = Some(retry);
         self
     }
 
@@ -273,8 +298,36 @@ pub struct RepeatableMeta {
 /// Trailing optional fields with `#[serde(default, skip_serializing_if =
 /// ...)]` are safe to add — pre-existing encoded specs decode cleanly into
 /// the new shape (the missing trailing slots fall through to `Default`).
-/// **Adding a non-trailing field, or removing the `skip_serializing_if`,
-/// would shift positions and break decode of every spec already in Redis.**
+/// **Adding a non-trailing field would shift positions and break decode of
+/// every spec already in Redis.**
+///
+/// **Trailing-optional layout (load-bearing — read before touching the field
+/// order)**. A positional array can carry **at most one** trailing field that
+/// is conditionally omitted on the wire. Two independent `skip_serializing_if`
+/// fields at the tail create a *hole*: when the first is skipped but the
+/// second is present, the second value lands in the first's slot at decode
+/// time and corrupts (or fails) the decode. The current layout is therefore:
+///
+/// 1. `..fired` — the always-present prefix (positions 0–7).
+/// 2. `missed_fires` — **always serialized now** (`#[serde(default)]` only, no
+///    `skip_serializing_if`). It used to be the trailing-optional slot, but
+///    `retry` took that role, so `missed_fires` had to become unconditional to
+///    keep its position fixed. A default-policy (`Skip`) spec therefore now
+///    encodes as a 9-field array (one field wider than the historical 8-field
+///    legacy shape) — this is intentional and back-compatible (old readers
+///    tolerate the extra trailing field; new readers default a missing one to
+///    `Skip`).
+/// 3. `retry` — the new trailing-optional (`skip_serializing_if =
+///    Option::is_none`). Omitted entirely when `None`, so a spec with no
+///    per-fire override still encodes as the 9-field shape above.
+///
+/// **Deploy-order requirement** (mirrors [`crate::job::Job::retry`]). A
+/// `StoredSpec` with `retry = Some(...)` is a 10-element array that a
+/// pre-this-slice scheduler **cannot** decode (it would reject the array
+/// length). Roll out new schedulers *before* writing retry-bearing specs.
+/// A spec is re-encoded on every `upsert_repeatable`, so a stale scheduler
+/// only breaks if a *new* (retry-bearing) spec is written while it is still
+/// running — same contract as `Job::retry`.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct StoredSpec {
     pub key: String,
@@ -290,11 +343,20 @@ pub(crate) struct StoredSpec {
     /// Number of times the spec has fired so far. Used to enforce `limit`.
     #[serde(default)]
     pub fired: u64,
-    /// Catch-up policy. Trailing-optional with `skip_serializing_if` so
-    /// pre-existing specs (encoded before this field existed) decode
-    /// cleanly with `Skip` (the default). See [`MissedFiresPolicy`].
-    #[serde(default, skip_serializing_if = "is_default_missed_fires_policy")]
+    /// Catch-up policy. **Always serialized** (`#[serde(default)]` only) so it
+    /// keeps a fixed position now that `retry` is the trailing-optional —
+    /// see the struct-level layout note. Pre-existing specs encoded before
+    /// this field existed (the 8-field legacy shape) still decode cleanly
+    /// with `Skip` (the default). See [`MissedFiresPolicy`].
+    #[serde(default)]
     pub missed_fires: MissedFiresPolicy,
+    /// Per-fire retry override threaded onto every fired job's `Job<T>`
+    /// payload by the scheduler. Trailing-optional with `skip_serializing_if`
+    /// — omitted from the wire when `None`, so retry-less specs keep the
+    /// 9-field shape. See the struct-level deploy-order note. See
+    /// [`JobRetryOverride`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<JobRetryOverride>,
 }
 
 // Hand-rolled `serde_bytes`-compatible module — we don't want to take the
@@ -615,6 +677,7 @@ mod tests {
             start_after_ms: None,
             end_before_ms: None,
             missed_fires: MissedFiresPolicy::Skip,
+            retry: None,
         };
         assert_eq!(s.resolved_key(), "explicit");
     }
@@ -630,6 +693,7 @@ mod tests {
             start_after_ms: None,
             end_before_ms: None,
             missed_fires: MissedFiresPolicy::Skip,
+            retry: None,
         };
         assert_eq!(s.resolved_key(), "my-job::every:1000");
     }
@@ -981,12 +1045,12 @@ mod tests {
         assert_eq!(next, AdvanceOutcome::Future(61_000)); // 1_000 + 60_000
     }
 
-    /// Pre-this-PR shape: the legacy `StoredSpec` without the
-    /// `missed_fires` field. Verifies that an existing rmp-serde-encoded
-    /// spec already in Redis decodes cleanly into the new shape with
-    /// `missed_fires = Skip` (the default). This is the deploy-safety test
-    /// — if it ever fails, in-place upgrades will lose all live recurring
-    /// jobs.
+    /// Pre-missed_fires shape: the original 8-field `StoredSpec` without
+    /// either `missed_fires` or `retry`. Verifies that an existing
+    /// rmp-serde-encoded spec already in Redis decodes cleanly into the new
+    /// shape with `missed_fires = Skip` and `retry = None` (both defaults).
+    /// This is the deploy-safety test — if it ever fails, in-place upgrades
+    /// will lose all live recurring jobs.
     #[derive(Serialize)]
     struct LegacyStoredSpec {
         key: String,
@@ -1000,6 +1064,33 @@ mod tests {
         fired: u64,
     }
 
+    /// Pre-this-slice 9-field shape: `StoredSpec` *with* `missed_fires` as its
+    /// last field but *without* `retry`. This is the on-wire shape an old
+    /// scheduler wrote for a non-default policy (`missed_fires != Skip`), and
+    /// also the shape an *old reader* expects. Used to prove (11b) that a
+    /// non-default policy survives the layout change and (11e) that an old
+    /// reader can still decode a new default spec.
+    #[derive(Serialize, Deserialize)]
+    struct PreRetryStoredSpec {
+        key: String,
+        job_name: String,
+        pattern: RepeatPattern,
+        #[serde(with = "serde_bytes")]
+        payload: Vec<u8>,
+        limit: Option<u64>,
+        start_after_ms: Option<u64>,
+        end_before_ms: Option<u64>,
+        #[serde(default)]
+        fired: u64,
+        // Old wire layout: missed_fires was the trailing-optional with
+        // skip_serializing_if. We model the *present* case here (non-default
+        // policy), which is exactly the on-wire shape under scrutiny.
+        #[serde(default)]
+        missed_fires: MissedFiresPolicy,
+    }
+
+    /// 11a — an old default spec (8-field, no `missed_fires`, no `retry`)
+    /// decodes into the new `StoredSpec` with both trailing fields defaulted.
     #[test]
     fn legacy_storedspec_decodes_with_default_policy() {
         let legacy = LegacyStoredSpec {
@@ -1018,16 +1109,176 @@ mod tests {
         assert_eq!(decoded.job_name, "legacy-job");
         assert_eq!(decoded.fired, 42);
         assert_eq!(decoded.missed_fires, MissedFiresPolicy::Skip);
+        assert_eq!(decoded.retry, None);
     }
 
+    /// 11b — THE anti-corruption guard. An old 9-field spec with a
+    /// **non-default** `missed_fires` (`FireAll { max_catchup: 12 }`) as its
+    /// trailing field — encoded via the old-shape `PreRetryStoredSpec` — must
+    /// decode into the new `StoredSpec` with the policy *intact* and
+    /// `retry == None`. This proves the policy survives `retry` taking the
+    /// trailing slot (guards against the rejected Option-C nested-tail
+    /// corruption class, where the bare enum was silently lost).
     #[test]
-    fn new_storedspec_with_default_policy_omits_field_on_wire() {
-        // skip_serializing_if + Default::default keeps the encoded shape
-        // byte-compatible with the legacy form when the policy is Skip.
-        // This is what makes the back-compat work in *both* directions:
-        // an old reader sees no extra trailing field on a default-policy
-        // spec, and a new reader sees no field at all and falls back to
-        // Default.
+    fn old_non_default_policy_spec_keeps_policy_intact() {
+        let old = PreRetryStoredSpec {
+            key: "k".into(),
+            job_name: "j".into(),
+            pattern: RepeatPattern::Every { interval_ms: 1_000 },
+            payload: vec![0xC0],
+            limit: None,
+            start_after_ms: None,
+            end_before_ms: None,
+            fired: 7,
+            missed_fires: MissedFiresPolicy::FireAll { max_catchup: 12 },
+        };
+        let bytes = rmp_serde::to_vec(&old).expect("encode old 9-field");
+        let decoded: StoredSpec = rmp_serde::from_slice(&bytes).expect("decode into new shape");
+        assert_eq!(
+            decoded.missed_fires,
+            MissedFiresPolicy::FireAll { max_catchup: 12 },
+            "non-default missed_fires must survive the layout change",
+        );
+        assert_eq!(decoded.fired, 7);
+        assert_eq!(decoded.retry, None);
+    }
+
+    /// 11c — THE anti-hole guard. A new spec with `missed_fires = Skip`
+    /// (the default) *and* `retry = Some(...)` must round-trip correctly.
+    /// Because `missed_fires` is now always serialized (no
+    /// skip_serializing_if), there is no positional hole when the skip-if-none
+    /// `retry` is present — the bug that sank Option B.
+    #[test]
+    fn new_skip_policy_with_retry_round_trips() {
+        let s = StoredSpec {
+            key: "k".into(),
+            job_name: "j".into(),
+            pattern: RepeatPattern::Every { interval_ms: 1_000 },
+            payload: vec![0xC0],
+            limit: None,
+            start_after_ms: None,
+            end_before_ms: None,
+            fired: 0,
+            missed_fires: MissedFiresPolicy::Skip,
+            retry: Some(JobRetryOverride {
+                max_attempts: Some(3),
+                backoff: None,
+            }),
+        };
+        let bytes = rmp_serde::to_vec(&s).expect("encode");
+        let decoded: StoredSpec = rmp_serde::from_slice(&bytes).expect("decode");
+        assert_eq!(decoded.missed_fires, MissedFiresPolicy::Skip);
+        assert_eq!(
+            decoded.retry,
+            Some(JobRetryOverride {
+                max_attempts: Some(3),
+                backoff: None,
+            }),
+        );
+    }
+
+    /// 11d — a new spec with `retry = None` encodes *without* the trailing
+    /// `retry` field: it produces exactly the 9-field (missed_fires-present,
+    /// retry-absent) shape. We assert the encoded byte length matches the
+    /// equivalent `PreRetryStoredSpec`, i.e. one field shorter than a
+    /// retry-bearing spec.
+    #[test]
+    fn new_retry_none_omits_trailing_field() {
+        let no_retry = StoredSpec {
+            key: "k".into(),
+            job_name: "j".into(),
+            pattern: RepeatPattern::Every { interval_ms: 1_000 },
+            payload: vec![0xC0],
+            limit: None,
+            start_after_ms: None,
+            end_before_ms: None,
+            fired: 0,
+            missed_fires: MissedFiresPolicy::FireOnce,
+            retry: None,
+        };
+        let old_shape = PreRetryStoredSpec {
+            key: "k".into(),
+            job_name: "j".into(),
+            pattern: RepeatPattern::Every { interval_ms: 1_000 },
+            payload: vec![0xC0],
+            limit: None,
+            start_after_ms: None,
+            end_before_ms: None,
+            fired: 0,
+            missed_fires: MissedFiresPolicy::FireOnce,
+        };
+        let no_retry_bytes = rmp_serde::to_vec(&no_retry).expect("encode no-retry");
+        let old_shape_bytes = rmp_serde::to_vec(&old_shape).expect("encode 9-field");
+        assert_eq!(
+            no_retry_bytes, old_shape_bytes,
+            "a retry=None StoredSpec must encode as the 9-field (missed_fires-present, retry-absent) shape",
+        );
+
+        // Sanity: a retry-bearing spec is strictly longer (the extra trailing
+        // field is actually emitted).
+        let with_retry = StoredSpec {
+            retry: Some(JobRetryOverride {
+                max_attempts: Some(1),
+                backoff: None,
+            }),
+            ..StoredSpec {
+                key: "k".into(),
+                job_name: "j".into(),
+                pattern: RepeatPattern::Every { interval_ms: 1_000 },
+                payload: vec![0xC0],
+                limit: None,
+                start_after_ms: None,
+                end_before_ms: None,
+                fired: 0,
+                missed_fires: MissedFiresPolicy::FireOnce,
+                retry: None,
+            }
+        };
+        let with_retry_bytes = rmp_serde::to_vec(&with_retry).expect("encode with-retry");
+        assert!(
+            with_retry_bytes.len() > no_retry_bytes.len(),
+            "retry=Some must add a trailing field on the wire",
+        );
+    }
+
+    /// 11e — DOWNGRADE / forward-compat. A new default spec (`retry = None`)
+    /// must be decodable by an *old-shape reader* (`PreRetryStoredSpec`, which
+    /// has `missed_fires` last and no `retry`). The old reader reads back
+    /// `missed_fires` correctly and simply never sees the (absent) `retry`.
+    #[test]
+    fn old_reader_decodes_new_default_spec() {
+        let new_default = StoredSpec {
+            key: "k".into(),
+            job_name: "j".into(),
+            pattern: RepeatPattern::Every { interval_ms: 1_000 },
+            payload: vec![0xC0],
+            limit: None,
+            start_after_ms: None,
+            end_before_ms: None,
+            fired: 5,
+            missed_fires: MissedFiresPolicy::FireAll { max_catchup: 9 },
+            retry: None,
+        };
+        let bytes = rmp_serde::to_vec(&new_default).expect("encode new default");
+        let old: PreRetryStoredSpec =
+            rmp_serde::from_slice(&bytes).expect("old reader decodes new default spec");
+        assert_eq!(old.key, "k");
+        assert_eq!(old.fired, 5);
+        assert_eq!(
+            old.missed_fires,
+            MissedFiresPolicy::FireAll { max_catchup: 9 },
+        );
+    }
+
+    /// 12 (REGRESSION, repurposed from `new_storedspec_with_default_policy_
+    /// omits_field_on_wire`). Under Option A, a default-policy spec is NO
+    /// LONGER byte-identical to the 8-field legacy shape — `missed_fires` is
+    /// now always present. This guards the NEW wire contract: a default-policy
+    /// `StoredSpec` (`missed_fires = Skip`, `retry = None`) encodes as the
+    /// 9-field shape (legacy-8 + always-present `missed_fires`, no `retry`),
+    /// and an old-shape reader still decodes it.
+    #[test]
+    fn default_policy_storedspec_wire_shape() {
         let new_default = StoredSpec {
             key: "k".into(),
             job_name: "j".into(),
@@ -1038,8 +1289,31 @@ mod tests {
             end_before_ms: None,
             fired: 0,
             missed_fires: MissedFiresPolicy::Skip,
+            retry: None,
         };
-        let legacy_eq = LegacyStoredSpec {
+        // The NEW contract: it equals the 9-field shape (missed_fires present,
+        // retry absent), NOT the 8-field legacy shape.
+        let nine_field = PreRetryStoredSpec {
+            key: "k".into(),
+            job_name: "j".into(),
+            pattern: RepeatPattern::Every { interval_ms: 1_000 },
+            payload: vec![0xC0],
+            limit: None,
+            start_after_ms: None,
+            end_before_ms: None,
+            fired: 0,
+            missed_fires: MissedFiresPolicy::Skip,
+        };
+        let new_bytes = rmp_serde::to_vec(&new_default).expect("encode new");
+        let nine_bytes = rmp_serde::to_vec(&nine_field).expect("encode 9-field");
+        assert_eq!(
+            new_bytes, nine_bytes,
+            "default-policy StoredSpec must now encode as the 9-field (always-present missed_fires, no retry) shape",
+        );
+
+        // And the always-present missed_fires means it is NO LONGER identical
+        // to the 8-field legacy shape — the intentional Option-A break.
+        let eight_field = LegacyStoredSpec {
             key: "k".into(),
             job_name: "j".into(),
             pattern: RepeatPattern::Every { interval_ms: 1_000 },
@@ -1049,14 +1323,20 @@ mod tests {
             end_before_ms: None,
             fired: 0,
         };
-        let new_bytes = rmp_serde::to_vec(&new_default).expect("encode new");
-        let legacy_bytes = rmp_serde::to_vec(&legacy_eq).expect("encode legacy");
-        assert_eq!(
-            new_bytes, legacy_bytes,
-            "default-policy StoredSpec must encode identically to the legacy 8-field shape",
+        let eight_bytes = rmp_serde::to_vec(&eight_field).expect("encode 8-field");
+        assert_ne!(
+            new_bytes, eight_bytes,
+            "Option A intentionally drops the missed_fires skip: default spec is one field wider than the 8-field legacy shape",
         );
+
+        // Old reader still decodes the new default spec (downgrade-safe).
+        let old: PreRetryStoredSpec =
+            rmp_serde::from_slice(&new_bytes).expect("old reader decodes new default spec");
+        assert_eq!(old.missed_fires, MissedFiresPolicy::Skip);
     }
 
+    /// Retained from before: a non-default policy round-trips. Now also
+    /// asserts `retry` defaults to `None` on the decoded spec.
     #[test]
     fn new_storedspec_with_non_default_policy_round_trips() {
         let s = StoredSpec {
@@ -1069,6 +1349,7 @@ mod tests {
             end_before_ms: None,
             fired: 0,
             missed_fires: MissedFiresPolicy::FireAll { max_catchup: 12 },
+            retry: None,
         };
         let bytes = rmp_serde::to_vec(&s).expect("encode");
         let decoded: StoredSpec = rmp_serde::from_slice(&bytes).expect("decode");
@@ -1076,5 +1357,6 @@ mod tests {
             decoded.missed_fires,
             MissedFiresPolicy::FireAll { max_catchup: 12 }
         );
+        assert_eq!(decoded.retry, None);
     }
 }

@@ -856,6 +856,10 @@ fn dict_to_repeatable_spec(d: &Bound<'_, PyDict>) -> PyResult<RepeatableSpec<Raw
         start_after_ms,
         end_before_ms,
         missed_fires,
+        // Per-fire retry overrides are not yet surfaced on the Python shim —
+        // that is a separate phase. Keep `None` so the engine spec compiles;
+        // the field is purely additive (retry-less specs encode unchanged).
+        retry: None,
     })
 }
 
