@@ -21,7 +21,7 @@
 
 use crate::config::SchedulerConfig;
 use crate::error::{Error, Result};
-use crate::job::{Job, now_ms};
+use crate::job::{Job, JobRetryOverride, now_ms};
 use crate::metrics::{LockOutcome, dispatch};
 use crate::redis::commands::{
     ACQUIRE_LOCK_SCRIPT, RELEASE_LOCK_SCRIPT, SCHEDULE_REPEATABLE_SCRIPT, eval_acquire_lock_args,
@@ -347,7 +347,8 @@ where
             // `cadence_next == now_ms` is the on-time case, not catch-up;
             // routing it through `Skip` would silently drop the fire.
             Some(next) if next >= now_ms => {
-                let bytes = encode_fire::<T>(&payload_bytes, spec_key, &stored.job_name)?;
+                let bytes =
+                    encode_fire::<T>(&payload_bytes, spec_key, &stored.job_name, stored.retry)?;
                 fires.push((fire_at_ms as i64, bytes));
                 next
             }
@@ -449,7 +450,8 @@ where
                 // dated at the original `fire_at_ms`. Then advance past
                 // `now_ms` so we don't immediately reprocess on the next
                 // tick.
-                let bytes = encode_fire::<U>(payload_bytes, spec_key, &stored.job_name)?;
+                let bytes =
+                    encode_fire::<U>(payload_bytes, spec_key, &stored.job_name, stored.retry)?;
                 fires.push((fire_at_ms as i64, bytes));
                 Ok(self
                     .resolve_first_future(stored, fire_at_ms, now_ms, cadence_next)
@@ -471,7 +473,8 @@ where
                         );
                         break;
                     }
-                    let bytes = encode_fire::<U>(payload_bytes, spec_key, &stored.job_name)?;
+                    let bytes =
+                        encode_fire::<U>(payload_bytes, spec_key, &stored.job_name, stored.retry)?;
                     fires.push((at as i64, bytes));
                     count += 1;
                     match next_after {
@@ -681,6 +684,7 @@ fn encode_fire<U>(
     payload_bytes: &[u8],
     spec_key: &str,
     job_name: &str,
+    retry: Option<JobRetryOverride>,
 ) -> std::result::Result<Bytes, TickError>
 where
     U: Serialize + DeserializeOwned,
@@ -693,7 +697,11 @@ where
         }
     };
     let job_id = ulid::Ulid::new().to_string();
-    let job = Job::with_id(job_id, payload);
+    let mut job = Job::with_id(job_id, payload);
+    // Thread the spec's per-fire retry override onto the job payload. `None`
+    // keeps the legacy 4-field `Job<T>` wire shape (skip_serializing_if), so
+    // retry-less repeatable specs fire byte-identically to before this slice.
+    job.retry = retry;
     let job_bytes = rmp_serde::to_vec(&job).map_err(|e| TickError::Engine(Error::Encode(e)))?;
     Ok(encode_delayed_member(job_name, &job_bytes))
 }
