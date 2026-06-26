@@ -725,6 +725,15 @@ fn native_spec_into_engine(spec: RepeatableSpec) -> napi::Result<EngineRepeatabl
         None => EngineMissedFiresPolicy::default(),
         Some(p) => native_missed_fires_into_engine(p)?,
     };
+    // Per-fire retry override: reuse the exact native -> engine conversion the
+    // `add()` path uses (`to_engine_retry_override`), so a spec's fired jobs
+    // carry the same `maxAttempts` / `backoff` semantics a one-off `add` would.
+    // `None` (the common path) leaves fired jobs on the queue-wide budget and
+    // encodes the spec unchanged on the wire.
+    let retry = match spec.retry {
+        None => None,
+        Some(r) => Some(to_engine_retry_override(r)?),
+    };
     Ok(EngineRepeatableSpec {
         key: spec.key.unwrap_or_default(),
         job_name: spec.job_name,
@@ -734,6 +743,7 @@ fn native_spec_into_engine(spec: RepeatableSpec) -> napi::Result<EngineRepeatabl
         start_after_ms: f64_opt_to_u64_opt(spec.start_after_ms, "startAfterMs")?,
         end_before_ms: f64_opt_to_u64_opt(spec.end_before_ms, "endBeforeMs")?,
         missed_fires,
+        retry,
     })
 }
 
@@ -822,20 +832,32 @@ fn to_engine_backoff(spec: BackoffSpec) -> napi::Result<EngineBackoffSpec> {
     })
 }
 
+/// Translate a native [`JobRetryOverride`] (JS-side, optional `maxAttempts`
+/// / `backoff`) into the engine's [`EngineJobRetryOverride`]. The single
+/// source of truth for the retry-override FFI shape — both the `add()` path
+/// (via [`to_engine_add_options`]) and the repeatable-upsert path (via
+/// [`native_spec_into_engine`]) call through here so the two surfaces can
+/// never drift apart. The nested `BackoffSpec` goes through
+/// [`to_engine_backoff`], which rejects unknown `kind`s and out-of-range
+/// numbers at the boundary.
+fn to_engine_retry_override(retry: JobRetryOverride) -> napi::Result<EngineJobRetryOverride> {
+    let mut over = EngineJobRetryOverride {
+        max_attempts: retry.max_attempts,
+        backoff: None,
+    };
+    if let Some(b) = retry.backoff {
+        over.backoff = Some(to_engine_backoff(b)?);
+    }
+    Ok(over)
+}
+
 fn to_engine_add_options(opts: AddOptions) -> napi::Result<EngineAddOptions> {
     let mut ao = EngineAddOptions::new();
     if let Some(id) = opts.id {
         ao = ao.with_id(id);
     }
     if let Some(retry) = opts.retry {
-        let mut over = EngineJobRetryOverride {
-            max_attempts: retry.max_attempts,
-            backoff: None,
-        };
-        if let Some(b) = retry.backoff {
-            over.backoff = Some(to_engine_backoff(b)?);
-        }
-        ao = ao.with_retry(over);
+        ao = ao.with_retry(to_engine_retry_override(retry)?);
     }
     if let Some(name) = opts.name {
         ao = ao.with_name(name);

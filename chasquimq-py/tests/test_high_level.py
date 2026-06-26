@@ -12,6 +12,7 @@ import pytest
 from chasquimq import (
     BackoffSpec,
     Job,
+    NotSupportedError,
     Queue,
     QueueEvents,
     RepeatPattern,
@@ -548,6 +549,126 @@ async def test_worker_runs_embedded_scheduler_for_repeatable(
     assert len(fires) >= 2
     for f in fires:
         assert f.data == {"hi": True}
+
+
+@pytest.mark.asyncio
+async def test_repeatable_per_fire_retry_override_beats_queue_default(
+    redis_url: str, queue_name: str, redis_client
+) -> None:
+    """A repeatable spec upserted with ``attempts=1`` and an always-failing
+    handler must be attempted exactly once per fire, then land in the DLQ —
+    proving the per-fire override beats a *larger* queue-wide budget.
+
+    Mirrors the engine's ``repeatable_retry_override_beats_queue_default``
+    (chasquimq/tests/repeatable.rs) through the Python shim. The worker's
+    queue-wide ``max_attempts`` is a generous 10; the spec's per-fire
+    ``attempts=1`` must win.
+    """
+    queue = Queue(queue_name, redis_url=redis_url)
+
+    attempts_seen: list[int] = []
+    first_fire = asyncio.Event()
+
+    async def handler(job: Job) -> None:
+        attempts_seen.append(job.attempt)
+        first_fire.set()
+        raise RuntimeError("always fails")
+
+    worker = Worker(
+        queue_name,
+        handler,
+        redis_url=redis_url,
+        concurrency=1,
+        # Queue-wide budget is a generous 10; the per-fire override of 1
+        # must win so the fired job DLQs after a single attempt.
+        max_attempts=10,
+        read_block_ms=100,
+        delayed_enabled=True,
+        run_scheduler=True,
+        scheduler_tick_ms=50,
+    )
+
+    spec_key = None
+    run_task = asyncio.create_task(worker.run())
+    try:
+        repeat_job = await queue.upsert_repeatable_job(
+            "tick",
+            {"hi": True},
+            repeat=RepeatPattern.every(100),
+            attempts=1,
+        )
+        spec_key = repeat_job.id
+
+        # Wait for the first handler invocation, then stop the scheduler so
+        # no further fires are produced while we verify the DLQ outcome.
+        await asyncio.wait_for(first_fire.wait(), timeout=15.0)
+        if spec_key is not None:
+            await queue.remove_repeatable_by_key(spec_key)
+
+        async def in_dlq() -> bool:
+            length = await redis_client.xlen(dlq_key_for(queue_name))
+            return int(length) >= 1
+
+        deadline = asyncio.get_event_loop().time() + 15.0
+        while True:
+            if await in_dlq():
+                break
+            if asyncio.get_event_loop().time() > deadline:
+                raise AssertionError("fired job never reached the DLQ")
+            await asyncio.sleep(0.1)
+    finally:
+        await worker.close()
+        try:
+            await asyncio.wait_for(run_task, timeout=5.0)
+        except asyncio.TimeoutError:
+            pass
+        if spec_key is not None:
+            await queue.remove_repeatable_by_key(spec_key)
+        await queue.close()
+
+    # The first fired job's attempts: the per-fire override (1) means it is
+    # handled exactly once (attempt 0) before being DLQ'd, NOT the 10 the
+    # queue-wide budget would have allowed.
+    assert attempts_seen, "handler was never invoked"
+    assert attempts_seen[0] == 0, (
+        f"first fire should be attempt 0, saw {attempts_seen}"
+    )
+
+    dlq_entries = await redis_client.xrange(dlq_key_for(queue_name), count=10)
+    assert len(dlq_entries) >= 1, "the once-attempted fired job must DLQ"
+    _, fields = dlq_entries[0]
+    assert fields.get(b"reason") == b"retries_exhausted", (
+        f"unexpected DLQ reason: {fields.get(b'reason')!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_upsert_repeatable_job_id_raises_not_supported(
+    redis_url: str, queue_name: str
+) -> None:
+    """A caller-supplied ``job_id`` on a repeatable upsert is rejected loudly
+    (the scheduler mints a fresh id per fire, so a stable id would silently
+    not stick). Symmetric with the Node shim's ``jobId`` rejection."""
+    queue = Queue(queue_name, redis_url=redis_url)
+    try:
+        with pytest.raises(NotSupportedError, match="job_id on repeatable"):
+            await queue.upsert_repeatable_job(
+                "tick",
+                {"hi": True},
+                repeat=RepeatPattern.every(60_000),
+                job_id="my-stable-id",
+            )
+        # The `repeat=` path of `add()` routes through the same method, so
+        # the rejection must fire there too.
+        with pytest.raises(NotSupportedError, match="job_id on repeatable"):
+            await queue.add(
+                "tick",
+                {"hi": True},
+                repeat=RepeatPattern.every(60_000),
+                job_id="my-stable-id",
+            )
+    finally:
+        await queue.close()
 
 
 @pytest.mark.asyncio

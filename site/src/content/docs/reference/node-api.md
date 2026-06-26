@@ -862,12 +862,12 @@ interface JobsOptions {
 ```
 
 - `delay` — ms before the job becomes processable. **Default `0`.** Negative or non-finite → `RangeError`.
-- `attempts` — total attempt budget for this job, overrides queue-wide `maxAttempts`. **Default queue-wide.**
-- `backoff` — per-job backoff override. Either a plain `number` (fixed delay in ms) or a [`BackoffOptions`](#backoffoptions) object.
+- `attempts` — total attempt budget for this job, overrides queue-wide `maxAttempts`. **Default queue-wide.** When combined with `repeat`, it becomes a **per-fire** override threaded onto every job the spec fires.
+- `backoff` — per-job backoff override. Either a plain `number` (fixed delay in ms) or a [`BackoffOptions`](#backoffoptions) object. When combined with `repeat`, it applies per-fire to every job the spec fires.
 - `removeOnComplete` — accepted; no-op (engine `XACKDEL`s).
 - `removeOnFail` — accepted; reserved for future DLQ trim policy.
 - `priority` — accepted; ignored with a one-time console warning. Streams are FIFO.
-- `jobId` — stable id for at-most-once / idempotent scheduling.
+- `jobId` — stable id for at-most-once / idempotent scheduling. **Throws `NotSupportedError` when combined with `repeat`** — the scheduler mints a fresh id per fire, so a stable id can't stick yet (stable-id-per-fire is a tracked follow-up). Use `repeatJobKey` / the returned spec key as the stable handle for a repeatable spec.
 - `lifo` — accepted; ignored with a one-time console warning.
 - `timestamp` — submission time in ms. **Default `Date.now()`.**
 - `repeat` — schedule a recurring job. See [`RepeatOptions`](#repeatoptions).
@@ -928,7 +928,7 @@ neither is rejected.
 - `immediately` — accepted; no-op in v1.
 - `startDate`, `endDate` — `Date`, ms since epoch, or ISO string.
 - `tz` — `"UTC"` / `"Z"`, fixed offset (`"+05:30"`), or any IANA name. IANA names are DST-aware. Ignored when `every` is set.
-- `jobId` — reserved for future explicit-id-per-fire wiring.
+- `jobId` — **throws `NotSupportedError`** (same as the top-level `JobsOptions.jobId` on a repeatable add). The scheduler mints a fresh id per fire; explicit-id-per-fire is a tracked follow-up.
 - `missedFires` — catch-up policy. **Default `{ kind: "skip" }`.** See [`MissedFiresOption`](#missedfiresoption).
 
 ### `MissedFiresOption`

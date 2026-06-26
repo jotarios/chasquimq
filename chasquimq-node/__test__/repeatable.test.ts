@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { Queue, Worker } from '../dist/index.js'
+import { Queue, Worker, Producer, NotSupportedError } from '../dist/index.js'
 
 const REDIS_URL = process.env.REDIS_URL
 const skipIfNoRedis = REDIS_URL ? describe : describe.skip
@@ -195,6 +195,76 @@ skipIfNoRedis('Queue repeatable / cron jobs (engine slice 10)', () => {
 
     await queue.removeRepeatableByKey(job.id)
   }, 10_000)
+
+  it('per-fire attempts override beats a larger queue-wide maxAttempts → 1 attempt then DLQ', async () => {
+    // Contract: a repeatable spec's `attempts` is a *per-fire* retry
+    // override that wins over the worker's queue-wide `maxAttempts`. Here
+    // the queue-wide budget is generous (10) but the spec pins
+    // `attempts: 1`, so the fired job must be attempted exactly ONCE and
+    // then land in the DLQ as `retries_exhausted` — proving the override
+    // threaded through `buildRetryOverride` is honored end to end. We cap
+    // the spec at `limit: 1` so it fires exactly once, keeping the call
+    // count deterministic (no second fire racing the settle window).
+    let calls = 0
+    worker = new Worker<{ idx: number }, void>(
+      queueName,
+      // eslint-disable-next-line @typescript-eslint/require-await
+      async () => {
+        calls++
+        throw new Error('always-fails')
+      },
+      {
+        connection: parseConn(REDIS_URL!),
+        concurrency: 1,
+        // Generous queue-wide budget. If the per-fire override were
+        // dropped, the handler would run up to 10 times instead of 1.
+        maxAttempts: 10,
+        autorun: false,
+        schedulerTickMs: 50,
+      },
+    )
+    void worker.run()
+
+    const job = await queue.add(
+      'override-fire',
+      { idx: 0 },
+      {
+        repeat: { every: 300, limit: 1 },
+        attempts: 1,
+        // Tight backoff so a (hypothetical) extra attempt wouldn't be
+        // hidden behind the engine's 1s default backoff during the window.
+        backoff: { type: 'fixed', delay: 30 },
+      },
+    )
+
+    // Wait for the single fire to be attempted, then settle and assert
+    // nothing fired again. `limit: 1` caps the spec at one fire, so
+    // `calls` reflects exactly one fired job.
+    await waitFor(() => calls >= 1, 5_000)
+    await new Promise((r) => setTimeout(r, 600))
+    expect(calls).toBe(1)
+
+    const producer = await Producer.connect(REDIS_URL!, { queueName })
+    const dlq = await producer.peekDlq(10)
+    expect(dlq).toHaveLength(1)
+    expect(dlq[0]!.reason).toBe('retries_exhausted')
+
+    await queue.removeRepeatableByKey(job.id)
+  }, 30_000)
+
+  it('a user-supplied jobId on a repeatable add throws NotSupportedError', async () => {
+    // The scheduler mints a fresh id per fire, so a caller-pinned `jobId`
+    // would be silently dropped — we reject it loudly instead. Pinned for
+    // both the top-level `JobsOptions.jobId` and the nested
+    // `RepeatOptions.jobId`.
+    await expect(
+      queue.add('with-jobid', { idx: 0 }, { repeat: { every: 1000 }, jobId: 'x' }),
+    ).rejects.toBeInstanceOf(NotSupportedError)
+
+    await expect(
+      queue.add('with-repeat-jobid', { idx: 0 }, { repeat: { every: 1000, jobId: 'y' } }),
+    ).rejects.toBeInstanceOf(NotSupportedError)
+  })
 })
 
 async function waitFor(

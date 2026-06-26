@@ -847,6 +847,20 @@ fn dict_to_repeatable_spec(d: &Bound<'_, PyDict>) -> PyResult<RepeatableSpec<Raw
         }
         _ => MissedFiresPolicy::default(),
     };
+    // Per-fire retry override. Reuses the same `dict_to_retry_override`
+    // helper as the `add` path (via `dict_to_add_options`), so a
+    // `{"max_attempts": int?, "backoff": {...}?}` sub-dict is parsed
+    // identically whether it arrives on an immediate add or a repeatable
+    // upsert. Absent → `None` (retry-less specs encode unchanged).
+    let retry = match d.get_item("retry")? {
+        Some(v) if !v.is_none() => {
+            let rd: Bound<'_, PyDict> = v
+                .cast_into::<PyDict>()
+                .map_err(|_| PyValueError::new_err("spec.retry must be a dict or None"))?;
+            Some(dict_to_retry_override(&rd)?)
+        }
+        _ => None,
+    };
     Ok(RepeatableSpec {
         key,
         job_name,
@@ -856,6 +870,7 @@ fn dict_to_repeatable_spec(d: &Bound<'_, PyDict>) -> PyResult<RepeatableSpec<Raw
         start_after_ms,
         end_before_ms,
         missed_fires,
+        retry,
     })
 }
 

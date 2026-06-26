@@ -68,6 +68,51 @@ await queue.upsert_repeatable_job(
 
 The first fire lands one interval after upsert. There is no immediate fire on `every`.
 
+## Per-fire retry overrides
+
+`attempts` and `backoff` on the upsert set a **per-fire retry override**: every job the scheduler mints from the spec carries it, so its `maxAttempts` / `backoff` win over the worker's queue-wide config — exactly like the same options on a one-off `Queue.add`. This lets a recurring job have a tighter (or looser) retry policy than the rest of the queue without touching the worker config.
+
+<Tabs syncKey="binding">
+<TabItem label="Node">
+
+```ts
+import { BackoffSpec } from "chasquimq";
+
+await queue.add(
+  "nightly-sync",
+  { source: "crm" },
+  {
+    repeat: { pattern: "0 3 * * *", tz: "UTC" },
+    // Every fire of this spec gets at most 3 attempts with an
+    // exponential backoff, regardless of the worker's maxAttempts.
+    attempts: 3,
+    backoff: BackoffSpec.exponential(1_000, { maxDelayMs: 30_000 }),
+  },
+);
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+from chasquimq import BackoffSpec, RepeatPattern
+
+await queue.upsert_repeatable_job(
+    "nightly-sync",
+    {"source": "crm"},
+    repeat=RepeatPattern.cron("0 3 * * *", tz="UTC"),
+    # Every fire of this spec gets at most 3 attempts with an
+    # exponential backoff, regardless of the worker's max_attempts.
+    attempts=3,
+    backoff=BackoffSpec.exponential(1_000, max_ms=30_000),
+)
+```
+
+</TabItem>
+</Tabs>
+
+Omit `attempts` / `backoff` to let fired jobs inherit the queue-wide retry policy. See [Retry and backoff](/concepts/retry-and-backoff/) for the curve itself.
+
 ## Catch-up policy when the scheduler was offline
 
 If your worker process restarted and missed one or more cron fires, the engine's `MissedFiresPolicy` decides what happens.
@@ -188,7 +233,7 @@ Worker("emails", handler, run_scheduler=False)
 
 - **`startDate` and `endDate` are honored.** Pass via `repeat.startDate` / `repeat.endDate` (Node) or `start_after_ms` / `end_before_ms` (Python) for absolute bounds.
 - **`limit` caps total fires.** Once the spec has fired `limit` times, the engine removes it. Useful for "fire 10 times then stop" without a manual remove.
-- **Per-fire retry overrides are not threaded yet.** `attempts` / `backoff` on the upsert call are accepted for symmetry with `Queue.add` but ignored at the wire layer. The fired job uses queue-wide defaults. Tracked as a 1.x follow-up.
+- **A stable id per fire is not supported.** Passing `jobId` (Node) / `job_id` (Python) — including `repeat.jobId` on the Node `add` path — raises `NotSupportedError`: the scheduler mints a fresh id per fire, so a caller-pinned id would silently not stick. Use the resolved spec key (returned as `job.id`) as the stable handle. Tracked as a 1.x follow-up.
 - **`repeat.immediately` is accepted but no-op.** First fire always lands one interval after upsert.
 
 For the underlying mechanics: [The scheduler](/concepts/the-scheduler/).

@@ -1,10 +1,13 @@
 //! Integration tests for slice 10: repeatable jobs (cron + fixed-interval).
 
-use chasquimq::config::{ConsumerConfig, ProducerConfig, SchedulerConfig};
+use chasquimq::config::{ConsumerConfig, ProducerConfig, RetryConfig, SchedulerConfig};
 use chasquimq::consumer::Consumer;
-use chasquimq::producer::{Producer, repeat_key as repeat_key_fn, repeat_spec_key, stream_key};
+use chasquimq::producer::{
+    Producer, dlq_key, repeat_key as repeat_key_fn, repeat_spec_key, stream_key,
+};
 use chasquimq::repeat::{MissedFiresPolicy, RepeatPattern, RepeatableSpec};
 use chasquimq::scheduler::Scheduler;
+use chasquimq::{HandlerError, Job, JobRetryOverride};
 use fred::clients::Client;
 use fred::interfaces::ClientLike;
 use fred::prelude::Config;
@@ -307,6 +310,7 @@ async fn every_pattern_fires_repeatedly() {
             start_after_ms: None,
             end_before_ms: None,
             missed_fires: Default::default(),
+            retry: None,
         })
         .await
         .expect("upsert");
@@ -356,6 +360,7 @@ async fn cron_pattern_fires_at_least_once() {
             start_after_ms: None,
             end_before_ms: None,
             missed_fires: Default::default(),
+            retry: None,
         })
         .await
         .expect("upsert");
@@ -403,6 +408,7 @@ async fn limit_caps_total_fires_and_removes_spec() {
             start_after_ms: None,
             end_before_ms: None,
             missed_fires: Default::default(),
+            retry: None,
         })
         .await
         .expect("upsert");
@@ -462,6 +468,7 @@ async fn remove_repeatable_stops_future_fires() {
             start_after_ms: None,
             end_before_ms: None,
             missed_fires: Default::default(),
+            retry: None,
         })
         .await
         .expect("upsert");
@@ -519,6 +526,7 @@ async fn list_repeatable_returns_specs() {
             start_after_ms: None,
             end_before_ms: None,
             missed_fires: Default::default(),
+            retry: None,
         })
         .await
         .expect("upsert a");
@@ -535,6 +543,7 @@ async fn list_repeatable_returns_specs() {
             start_after_ms: None,
             end_before_ms: None,
             missed_fires: Default::default(),
+            retry: None,
         })
         .await
         .expect("upsert b");
@@ -573,6 +582,7 @@ async fn upsert_overwrites_existing_spec() {
             start_after_ms: None,
             end_before_ms: None,
             missed_fires: Default::default(),
+            retry: None,
         })
         .await
         .expect("upsert v1");
@@ -586,6 +596,7 @@ async fn upsert_overwrites_existing_spec() {
             start_after_ms: None,
             end_before_ms: None,
             missed_fires: Default::default(),
+            retry: None,
         })
         .await
         .expect("upsert v2");
@@ -632,6 +643,7 @@ async fn leader_election_no_double_fire() {
             start_after_ms: None,
             end_before_ms: None,
             missed_fires: Default::default(),
+            retry: None,
         })
         .await
         .expect("upsert");
@@ -691,6 +703,7 @@ async fn catchup_skip_advances_past_missed_fires() {
             start_after_ms: None,
             end_before_ms: None,
             missed_fires: MissedFiresPolicy::Skip,
+            retry: None,
         })
         .await
         .expect("upsert");
@@ -748,6 +761,7 @@ async fn catchup_fire_once_emits_one_job() {
             start_after_ms: None,
             end_before_ms: None,
             missed_fires: MissedFiresPolicy::FireOnce,
+            retry: None,
         })
         .await
         .expect("upsert");
@@ -803,6 +817,7 @@ async fn catchup_fire_all_capped_at_max_catchup() {
             start_after_ms: None,
             end_before_ms: None,
             missed_fires: MissedFiresPolicy::FireAll { max_catchup: 3 },
+            retry: None,
         })
         .await
         .expect("upsert");
@@ -858,6 +873,7 @@ async fn catchup_fire_all_uncapped_under_limit() {
             start_after_ms: None,
             end_before_ms: None,
             missed_fires: MissedFiresPolicy::FireAll { max_catchup: 100 },
+            retry: None,
         })
         .await
         .expect("upsert");
@@ -913,6 +929,7 @@ async fn catchup_respects_spec_limit() {
             start_after_ms: None,
             end_before_ms: None,
             missed_fires: MissedFiresPolicy::FireAll { max_catchup: 100 },
+            retry: None,
         })
         .await
         .expect("upsert");
@@ -976,6 +993,7 @@ async fn catchup_with_iana_tz_cron_replays_through_scheduler() {
             start_after_ms: None,
             end_before_ms: None,
             missed_fires: MissedFiresPolicy::FireAll { max_catchup: 5 },
+            retry: None,
         })
         .await
         .expect("upsert");
@@ -1036,6 +1054,7 @@ async fn catchup_no_op_when_on_time() {
             start_after_ms: None,
             end_before_ms: None,
             missed_fires: MissedFiresPolicy::FireAll { max_catchup: 100 },
+            retry: None,
         })
         .await
         .expect("upsert");
@@ -1118,6 +1137,7 @@ async fn consumer_auto_embeds_scheduler() {
             start_after_ms: None,
             end_before_ms: None,
             missed_fires: Default::default(),
+            retry: None,
         })
         .await
         .expect("upsert");
@@ -1135,6 +1155,150 @@ async fn consumer_auto_embeds_scheduler() {
         counter.load(Ordering::SeqCst) >= 3,
         "embedded scheduler must fire repeatable specs; saw {} fires",
         counter.load(Ordering::SeqCst)
+    );
+
+    let _: () = admin.quit().await.unwrap();
+}
+
+/// A consumer config whose queue-wide retry budget is `max_attempts` and whose
+/// backoff is tight (20ms initial, no jitter) so a failing job marches to the
+/// DLQ quickly without waiting on long exponential delays. Pairs with a
+/// standalone scheduler — `run_scheduler: false`.
+fn failing_consumer_cfg(queue: &str, consumer_id: &str, max_attempts: u32) -> ConsumerConfig {
+    ConsumerConfig {
+        queue_name: queue.to_string(),
+        group: "default".to_string(),
+        consumer_id: consumer_id.to_string(),
+        max_attempts,
+        block_ms: 50,
+        delayed_poll_interval_ms: 25,
+        delayed_promote_batch: 256,
+        delayed_max_stream_len: 100_000,
+        delayed_lock_ttl_secs: 5,
+        delayed_enabled: true,
+        concurrency: 8,
+        run_scheduler: false,
+        retry: RetryConfig {
+            initial_backoff_ms: 20,
+            max_backoff_ms: 200,
+            multiplier: 2.0,
+            jitter_ms: 0,
+        },
+        ..Default::default()
+    }
+}
+
+/// Spawn a consumer whose handler **always fails**, counting each invocation.
+fn spawn_failing_consumer(
+    queue: &str,
+    consumer_id: &str,
+    max_attempts: u32,
+    calls: Arc<AtomicUsize>,
+    shutdown: CancellationToken,
+) -> tokio::task::JoinHandle<chasquimq::Result<()>> {
+    let consumer: Consumer<Sample> = Consumer::new(
+        redis_url(),
+        failing_consumer_cfg(queue, consumer_id, max_attempts),
+    );
+    tokio::spawn(async move {
+        consumer
+            .run(
+                move |_job: Job<Sample>| {
+                    let calls = calls.clone();
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        Err::<chasquimq::Bytes, _>(HandlerError::new(std::io::Error::other(
+                            "always-fail",
+                        )))
+                    }
+                },
+                shutdown,
+            )
+            .await
+    })
+}
+
+/// A repeatable spec carrying a per-fire `retry { max_attempts: 1 }` override
+/// must beat a *larger* queue-wide budget: the fired job is attempted exactly
+/// once, then lands in the DLQ. This proves `encode_fire` threads
+/// `StoredSpec.retry` onto the fired `Job<T>` and the consumer honors it over
+/// the queue default.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires REDIS_URL"]
+async fn repeatable_retry_override_beats_queue_default() {
+    let admin = admin().await;
+    let queue = "repeat_retry_override";
+    flush_all(&admin, queue).await;
+
+    let producer: Producer<Sample> = Producer::connect(&redis_url(), producer_cfg(queue))
+        .await
+        .expect("producer");
+
+    // Queue-wide budget is a generous 10; the per-fire override of 1 must win.
+    let calls = Arc::new(AtomicUsize::new(0));
+    let shutdown_consumer = CancellationToken::new();
+    let h_consumer =
+        spawn_failing_consumer(queue, "c1", 10, calls.clone(), shutdown_consumer.clone());
+
+    let shutdown_sched = CancellationToken::new();
+    // 50ms tick over a ~100ms-period spec: one fire is enough for the
+    // assertion, and we stop the scheduler immediately after the first fire
+    // is observed so it can't enqueue more while we settle the DLQ.
+    let h_sched = spawn_scheduler(queue, "s1", 50, shutdown_sched.clone());
+
+    producer
+        .upsert_repeatable(RepeatableSpec {
+            key: String::new(),
+            job_name: "tick".into(),
+            pattern: RepeatPattern::Every { interval_ms: 100 },
+            payload: Sample { n: 0 },
+            limit: None,
+            start_after_ms: None,
+            end_before_ms: None,
+            missed_fires: Default::default(),
+            retry: Some(JobRetryOverride {
+                max_attempts: Some(1),
+                backoff: None,
+            }),
+        })
+        .await
+        .expect("upsert");
+
+    // Wait for the first handler invocation, then stop the scheduler so no
+    // further fires are produced while we verify the DLQ outcome.
+    wait_until(Duration::from_secs(5), || {
+        let calls = calls.clone();
+        async move { calls.load(Ordering::SeqCst) >= 1 }
+    })
+    .await;
+    shutdown_sched.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), h_sched).await;
+
+    // The single fired job must DLQ after exactly one attempt.
+    let dlq = dlq_key(queue);
+    wait_until(Duration::from_secs(5), || {
+        let admin = admin.clone();
+        let dlq = dlq.clone();
+        async move { xlen(&admin, &dlq).await >= 1 }
+    })
+    .await;
+
+    // Stop the consumer so it can't pick up any racing later fire and inflate
+    // the count, then assert the per-fire override was honored: exactly ONE
+    // attempt for the fired job, not the queue-wide 10.
+    shutdown_consumer.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), h_consumer).await;
+
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "per-fire retry override (max_attempts=1) must beat the queue-wide budget (10): \
+         the fired job should be attempted exactly once before DLQ, saw {} attempts",
+        calls.load(Ordering::SeqCst),
+    );
+    assert!(
+        xlen(&admin, &dlq).await >= 1,
+        "the once-attempted fired job must land in the DLQ",
     );
 
     let _: () = admin.quit().await.unwrap();

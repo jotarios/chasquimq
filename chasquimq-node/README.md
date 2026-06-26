@@ -428,6 +428,41 @@ events.on("stalled", ({ jobId, attempt, prev }) => {
 | `stalledDetectorEnabled` | `true` | Toggle the embedded detector. Set `false` for pure-consumer benchmarks or deployments running a separate detector process. |
 | `stalledInterval` | `30_000` | Scan-tick interval (ms). The embedded spawn overrides this from the engine's `claim_min_idle_ms` to preserve the per-crash counting invariant (`tick == idle == claim_min_idle`); rarely worth setting. |
 
+### Repeatable jobs
+
+Set `repeat` on `Queue.add` to upsert a recurring *spec* — `(name, payload, pattern)`. The engine fires a fresh job from it on each window. The return value's `id` is the resolved spec key; pair it with `removeRepeatableByKey` to delete.
+
+```ts
+import { BackoffSpec } from "chasquimq"
+
+// Cron (DST-aware via IANA tz), or `{ every: ms }` for a fixed interval.
+const spec = await queue.add(
+  "nightly-sync",
+  { source: "crm" },
+  { repeat: { pattern: "0 3 * * *", tz: "UTC" } },
+)
+
+await queue.removeRepeatableByKey(spec.id)
+```
+
+**Per-fire retry overrides.** `attempts` and `backoff` on the same call set a per-fire override: every job the scheduler mints from the spec carries it, so its `maxAttempts` / `backoff` win over the worker's queue-wide config — exactly like `attempts` / `backoff` on a one-off `Queue.add`. Omit them to inherit the queue-wide retry policy.
+
+```ts
+await queue.add(
+  "nightly-sync",
+  { source: "crm" },
+  {
+    repeat: { pattern: "0 3 * * *", tz: "UTC" },
+    // Every fire gets at most 3 attempts, regardless of the worker's
+    // maxAttempts.
+    attempts: 3,
+    backoff: BackoffSpec.exponential(1_000, { maxDelayMs: 30_000 }),
+  },
+)
+```
+
+> **`jobId` is not supported on a repeatable add** — passing `jobId` (or the nested `repeat.jobId`) throws `NotSupportedError`. The scheduler mints a fresh id per fire, so a caller-pinned id would silently not stick; use the resolved spec key (the returned `job.id`, or `repeatJobKey`) as the stable handle. Stable-id-per-fire is a tracked follow-up.
+
 ## Power-user surface
 
 The native engine handles ship from the same top-level package:

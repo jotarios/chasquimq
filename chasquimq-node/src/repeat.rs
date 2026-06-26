@@ -10,6 +10,7 @@
 //! `producer.rs::upsert_repeatable` / `list_repeatable`. Failure to translate
 //! (unknown `kind`, missing required field) becomes a `napi::Error`.
 
+use crate::producer::JobRetryOverride;
 use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
 
@@ -51,6 +52,13 @@ pub struct RepeatableSpec {
     pub start_after_ms: Option<f64>,
     pub end_before_ms: Option<f64>,
     pub missed_fires: Option<MissedFiresPolicy>,
+    /// Per-fire retry override. When set, every job this spec fires carries
+    /// this `JobRetryOverride` in its encoded payload, so the per-fire
+    /// `maxAttempts` / `backoff` win over the worker's queue-wide config.
+    /// `None` (the common path) leaves fired jobs on the queue-wide budget.
+    /// Mirrors the same `JobRetryOverride` shape the `add()` path threads
+    /// through `AddOptions.retry`.
+    pub retry: Option<JobRetryOverride>,
 }
 
 #[napi(object)]

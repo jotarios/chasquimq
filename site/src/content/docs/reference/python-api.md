@@ -192,8 +192,17 @@ the resolved spec key — pair with
 [`remove_repeatable_by_key`](#await-queueremove_repeatable_by_keykey)
 to delete.
 
-`attempts` / `backoff` / `job_id` are accepted for API symmetry
-with `add` but not threaded into per-fire jobs in v1.
+- `attempts` / `backoff` — a **per-fire retry override** (same shape
+  as [`add`](#await-queueaddname-data-delay_ms-delay-attempts-backoff-job_id-repeat-missed_fires)).
+  Every job the scheduler mints from this spec carries the override,
+  so its per-fire `max_attempts` / `backoff` win over the worker's
+  queue-wide config exactly like a one-off `add`. Omit to inherit the
+  queue-wide policy.
+- `job_id` — **raises `NotSupportedError`.** The scheduler mints a
+  fresh id per fire, so a caller-supplied stable id would silently
+  not stick; the rejection is loud rather than dropped. Use the
+  returned spec key (the engine-derived `<name>::<pattern_signature>`)
+  as the stable handle. Stable-id-per-fire is a tracked follow-up.
 
 ### `await queue.get_repeatable_jobs(limit=100)`
 
