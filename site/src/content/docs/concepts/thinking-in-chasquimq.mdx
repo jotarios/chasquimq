@@ -42,7 +42,7 @@ Five tasks: producer, reader, workers, retry relocator, DLQ relocator. The reade
 Edge cases:
 
 - `delay > 0` → instead of `XADD`, the engine writes to the delayed sorted set (`{...}:delayed`, scored by run-at-ms). The promoter task, embedded in every `Worker`, periodically `ZRANGEBYSCORE`s due entries and atomically promotes them via Lua.
-- `repeat: { ... }` → no immediate enqueue. Instead, the producer upserts a *spec* into `{...}:repeat` (sorted set keyed by next fire time) plus `{...}:repeat:specs` (hash of full spec body). The scheduler — also auto-spawned by `Worker` — fires fresh jobs from the spec on each window.
+- `repeat: { ... }` → no immediate enqueue. Instead, the producer upserts a *spec* into `{...}:repeat` (sorted set keyed by next fire time) plus a per-spec `{...}:repeat:spec:<key>` hash holding the full spec body. The scheduler — also auto-spawned by `Worker` — fires fresh jobs from the spec on each window.
 - `addUnique(name, data, { jobId })` → the producer pre-pends a Lua-gated `SET NX EX` dedup marker (`{...}:dlid:<job_id>`) for delayed jobs, or uses Redis 8.6 `XADD ... IDMP <producer_id> <job_id>` for immediate jobs. Either way, a duplicate `addUnique` returns the same id, no second entry.
 
 ## What happens on the consumer side
@@ -74,7 +74,7 @@ The CLAIM path is the safety net for crashed workers. If a worker dies after rea
 
 ## Repeatable specs are not jobs
 
-A repeatable spec is a *recipe*. The engine fires fresh jobs from it on each window — a new ULID, a new entry on the stream, a new ack/retry/DLQ lifecycle. The spec itself lives in the `:repeat` ZSET and the `:repeat:specs` hash; it never enters the stream.
+A repeatable spec is a *recipe*. The engine fires fresh jobs from it on each window — a new ULID, a new entry on the stream, a new ack/retry/DLQ lifecycle. The spec itself lives in the `:repeat` ZSET and a per-spec `:repeat:spec:<key>` hash; it never enters the stream.
 
 This is why `chasqui repeatable list` reports specs by their resolved key (`<jobName>::<patternSignature>`), not by job id — there is no single id, just the recipe.
 

@@ -7,7 +7,7 @@ sidebar:
 
 import { Tabs, TabItem } from "@astrojs/starlight/components";
 
-Repeatable specs upsert a *recipe* — `(name, payload, pattern)` — and the engine fires fresh jobs from it on each window. The spec lives in `{chasqui:<queue>}:repeat` (sorted set keyed by next fire time) plus `{chasqui:<queue>}:repeat:specs` (hash).
+Repeatable specs upsert a *recipe* — `(name, payload, pattern)` — and the engine fires fresh jobs from it on each window. The spec lives in `{chasqui:<queue>}:repeat` (sorted set keyed by next fire time) plus a per-spec `{chasqui:<queue>}:repeat:spec:<key>` hash holding the encoded spec body.
 
 ## Cron pattern
 
