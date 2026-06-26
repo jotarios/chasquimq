@@ -41,7 +41,7 @@ The lock TTL is generous (default 30s). If the lock-holder crashes mid-tick, the
 
 ## The scheduler (repeatable specs)
 
-The scheduler is the same shape as the promoter, but operating on `{chasqui:<queue>}:repeat` (a sorted set scored by next-fire-ms) plus `{chasqui:<queue>}:repeat:specs` (a hash mapping spec key → encoded `RepeatSpec`).
+The scheduler is the same shape as the promoter, but operating on `{chasqui:<queue>}:repeat` (a sorted set scored by next-fire-ms) plus a per-spec `{chasqui:<queue>}:repeat:spec:<key>` hash holding the encoded `RepeatSpec`.
 
 Each tick:
 
