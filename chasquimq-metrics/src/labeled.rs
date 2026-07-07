@@ -6,8 +6,8 @@
 //! following this pattern — it's intentionally small.
 
 use chasquimq::{
-    DlqRouted, JobOutcome, JobOutcomeKind, LockOutcome, MetricsSink, PromoterTick, ReaderBatch,
-    RetryScheduled,
+    DlqRouted, JobOutcome, JobOutcomeKind, LockOutcome, MetricsSink, PromoterTick, RateLimitedTick,
+    ReaderBatch, RetryScheduled, StalledTick,
 };
 use metrics::{counter, gauge, histogram};
 use std::sync::Arc;
@@ -156,5 +156,22 @@ impl<S: MetricsSink> MetricsSink for QueueLabeled<S> {
         )
         .increment(1);
         self.inner.dlq_routed(dlq);
+    }
+
+    fn stalled_tick(&self, tick: StalledTick) {
+        counter!("chasquimq_stalled_scanned_total", "queue" => self.queue.clone())
+            .increment(tick.scanned);
+        counter!("chasquimq_stalled_incremented_total", "queue" => self.queue.clone())
+            .increment(tick.incremented);
+        counter!("chasquimq_stalled_relocated_total", "queue" => self.queue.clone())
+            .increment(tick.relocated);
+        self.inner.stalled_tick(tick);
+    }
+
+    fn rate_limited_tick(&self, tick: RateLimitedTick) {
+        counter!("chasquimq_rate_limited_total", "queue" => self.queue.clone()).increment(1);
+        histogram!("chasquimq_rate_limit_wait_seconds", "queue" => self.queue.clone())
+            .record(tick.wait_ms as f64 / 1_000.0);
+        self.inner.rate_limited_tick(tick);
     }
 }
