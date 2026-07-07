@@ -68,9 +68,19 @@ Full numbers, methodology, and reproducibility instructions: [`benchmarks/latenc
 These are conscious omissions, not "we ran out of time":
 
 - **Priority queues.** Streams are FIFO by construction. A parallel priority ZSET would either require interleaving reads (defeats batched `XREADGROUP`) or per-job round trips back into priority order. Either way, the engine's headline performance lever — batched reads — is gone. Better to stay BullMQ-on-priority than ship a slow ChasquiMQ-on-priority.
-- **Rate limiting on the queue.** A leaky-bucket on the consumer side adds per-job round trips. Better implemented at the handler level (token bucket per downstream API).
-- **Pause/resume.** Implementable at the consumer side (gate dispatch with a flag) but the engine continues to read. Without a way to pause the engine itself, "pause" is an illusion. v1.x.
 - **DAG flows / parent-child jobs.** Streams aren't the right primitive for DAG semantics. A separate workflow store + ChasquiMQ as the execution layer is the right shape; that's a separate project, not a ChasquiMQ feature.
+
+## Rate limiting without a per-job round trip
+
+An early note here argued *against* a queue rate limiter — the reflex being that a leaky-bucket on the consumer side adds a per-job round trip, which is exactly the overhead the engine exists to avoid. The shipped design sidesteps that:
+
+- **One `EVALSHA` per read attempt, not per job.** The token bucket is checked once before each `XREADGROUP`, not once per job. A batch of 64 jobs costs one limiter round trip, not 64. When the limiter is unset the check is a single skipped branch.
+- **Delay the whole read; FIFO is preserved.** When throttled, the reader sleeps `wait_ms` at the batch boundary and re-checks — no job is reordered, held, or requeued. The gate sits before the read, so a granted batch dispatches in stream order exactly as an un-limited reader would.
+- **One global bucket, shared across all workers.** `max` jobs per `duration` is a queue-wide ceiling. N workers draw from one Redis token bucket (`{chasqui:<queue>}:limiter`) using a `redis.call('TIME')` shared clock — no per-worker clock skew, no per-worker budget to reconcile.
+- **Cold-start burst allowance.** A fresh or idle bucket starts full, so the first window admits up to `max` before the `max`/`duration` steady state — standard token-bucket behavior, worth stating so a first-window burst isn't read as a leak.
+- **CPU, honestly.** Near-zero while throttled at coarse rates (the reader parks in a sleep). At very high `max`/second the deficit-of-one wait clamps to ~1 ms, so the reader re-checks about every millisecond — one cheap `EVALSHA` per re-check, real but small load, not "zero CPU."
+
+Per-key sub-limits (a `groupKey`) are reserved for a follow-up and rejected today. Full mechanics: [Rate limiting](/concepts/rate-limiting/) and the [engine deep-dive](https://github.com/jotarios/chasquimq/blob/main/docs/engine.md#rate-limiting).
 
 ## What we did do because it was measured
 

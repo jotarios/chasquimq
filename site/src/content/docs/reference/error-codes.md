@@ -315,17 +315,24 @@ list of stubbed methods.
 
 ### CMQ-101 — Node: rate-limit
 
-**When:** Reserved. `Worker.rateLimit` throws this in a future
-slice when leaky-bucket rate limiting lands in the engine. v1
-throws `NotSupportedError` instead.
+**When:** Reserved. Tied to the manual *per-invocation*
+`Worker.rateLimit(expireTimeMs)` call, which still throws
+`NotSupportedError`. This is **not** the shipped standing rate
+limiter: the global per-queue token bucket is configured via
+[`WorkerOptions.limiter`](/reference/node-api/#limiteroptions),
+and bad `limiter` input throws a plain `Error`, not this code.
 
-**Why:** Currently a placeholder for forward compatibility.
+**Why:** A placeholder for the manual throttle-until API, which is
+a different surface from the constructor `limiter` (already shipped).
 
-**Fix:** Don't catch this code today; it cannot fire in v1.
-Implement application-level rate limiting (token bucket, queue
-depth thresholding) until engine support arrives.
+**Fix:** For a queue-wide rate cap, set `limiter: { max, duration }`
+on the `Worker` constructor — see the
+[Rate limiting concept](/concepts/rate-limiting/). Don't catch this
+code for the standing limiter; it can only fire from the unimplemented
+manual `rateLimit()` call.
 
-**See also:** [Node API: Worker](/reference/node-api/#worker).
+**See also:** [Node API: `LimiterOptions`](/reference/node-api/#limiteroptions),
+[Rate limiting](/concepts/rate-limiting/).
 
 ### CMQ-102 — Node: result wait timeout
 

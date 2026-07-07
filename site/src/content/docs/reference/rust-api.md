@@ -22,7 +22,7 @@ language shims so cross-references resolve.
 
 ## On this page
 
-- [Configs](#configs) — `ProducerConfig`, `ConsumerConfig`, `PromoterConfig`, `SchedulerConfig`, `RetryConfig`, `ConnectionTuning`.
+- [Configs](#configs) — `ProducerConfig`, `ConsumerConfig`, `PromoterConfig`, `SchedulerConfig`, `RetryConfig`, `RateLimit`, `ConnectionTuning`.
 - [Job types](#job-types) — `Job<T>`, `JobId`, `JobRetryOverride`, `AddOptions`, `JobHandle`.
 - [Producer](#producer) — every method.
 - [Consumer](#consumer) — constructor and `run`.
@@ -89,6 +89,7 @@ pub struct ConsumerConfig {
     pub store_results: bool,
     pub result_ttl_secs: u64,
     pub pause_poll_ms: u64,
+    pub rate_limit: Option<RateLimit>,
     pub metrics: Arc<dyn MetricsSink>,
     pub connection: ConnectionTuning,
 }
@@ -122,6 +123,7 @@ pub struct ConsumerConfig {
 - `store_results` — opt-in result backend. **Default `false`.**
 - `result_ttl_secs` — TTL for stored results when `store_results == true`. **Default `3600` (1h).**
 - `pause_poll_ms` — how often a consumer re-checks the durable cross-process pause key (`{chasqui:<queue>}:paused`), and the worst-case latency for a cross-process pause/resume to be observed. Not on the per-job hot path: when not paused the reader pays one atomic load + one time comparison per batch, no Redis round trip. **Default `250`.**
+- `rate_limit` — optional global per-queue rate limit. **Default `None`** (no limiting — a single skipped branch per batch, zero overhead). When set, the reader evaluates a shared token bucket once per read attempt before `XREADGROUP`. See [`RateLimit`](#ratelimit).
 - `metrics` — `Arc<dyn MetricsSink>` for the embedded promoter / scheduler / hot-path subsystems. **Default `crate::metrics::noop_sink()`.**
 - `connection` — TCP keepalive, reconnect policy, and credential-rotation hook. The embedded promoter and scheduler inherit this through their parent `ConsumerConfig`. See [`ConnectionTuning`](#connectiontuning).
 
@@ -193,6 +195,47 @@ The queue-wide retry curve. Per-job overrides via
 - `max_backoff_ms` — cap on the computed backoff per attempt. **Default `30_000`.**
 - `multiplier` — exponential growth factor. **Default `2.0`.**
 - `jitter_ms` — symmetric ±jitter added per retry. **Default `100`.**
+
+### `RateLimit`
+
+```rust
+#[derive(Debug, Clone)]
+pub struct RateLimit {
+    pub max: u32,
+    pub duration_ms: u64,
+    pub group_key: Option<String>,
+}
+```
+
+Global per-queue rate limit, set on
+[`ConsumerConfig::rate_limit`](#consumerconfig) (`Option<RateLimit>`,
+default `None`). At most `max` **jobs** are admitted per `duration_ms`
+window, shared across **every** worker on the queue — a single token
+bucket in Redis at `{chasqui:<queue>}:limiter` (carrying the same
+`{chasqui:<queue>}` hash tag as the stream, so it co-locates on one
+Cluster slot). N workers draw from one budget, not N.
+
+No `Default` impl — there is no sensible default `max`/`duration`;
+either configure a limit or leave `rate_limit = None`.
+
+- `max` — jobs admitted per window. `ConsumerConfig::validate()`
+  rejects `0`. A fresh or idle bucket starts full, so the first window
+  admits a burst up to `max` before settling to `max`/`duration`
+  (standard token-bucket behavior).
+- `duration_ms` — refill window length in ms. `validate()` rejects `0`.
+- `group_key` — **reserved; rejected in this version.** `validate()`
+  returns `Error::Config("rate_limit.group_key is not supported in
+  this version (global per-queue limiter only); omit it")` when set.
+  Name-scoped sub-buckets are a documented follow-up; reserving the
+  field keeps that addition non-breaking.
+
+Mechanics: the reader runs one `EVALSHA` against the bucket before each
+`XREADGROUP` (never per job) using a `redis.call('TIME')` shared clock;
+a throttle delays the whole read at the batch boundary so FIFO is
+preserved. Emits [`RateLimitedTick`](#ratelimitedtick) per throttle and
+the `e=rate-limited` event. See the
+[Rate limiting concept](/concepts/rate-limiting/) and the
+[engine deep-dive](https://github.com/jotarios/chasquimq/blob/main/docs/engine.md#rate-limiting).
 
 ### `ConnectionTuning`
 
@@ -961,6 +1004,7 @@ pub trait MetricsSink: Send + Sync + 'static {
     fn job_outcome(&self, _outcome: JobOutcome) {}
     fn retry_scheduled(&self, _retry: RetryScheduled) {}
     fn dlq_routed(&self, _dlq: DlqRouted) {}
+    fn rate_limited_tick(&self, _tick: RateLimitedTick) {}
 }
 ```
 
@@ -1077,6 +1121,23 @@ pub struct DlqRouted {
 
 Emitted after the DLQ relocator atomically moved an entry to the
 DLQ stream. See [`DlqReason`](#dlqreason).
+
+#### `RateLimitedTick`
+
+```rust
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RateLimitedTick {
+    pub wait_ms: u64,
+}
+```
+
+Emitted once per throttle sleep by the [rate limiter](#ratelimit)
+reader gate — `wait_ms` is how long the reader is about to sleep
+before re-checking the bucket. The `chasquimq-metrics` adapters map
+this to `chasquimq_rate_limited_total` (counter) and
+`chasquimq_rate_limit_wait_seconds` (histogram); the engine also
+writes an `e=rate-limited` event (field `wait_ms`) once per throttle
+*entry* per reader.
 
 ## DLQ
 

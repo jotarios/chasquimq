@@ -69,7 +69,7 @@ main()
 | Surface | What it does |
 |---|---|
 | `Queue<DataType, ResultType, NameType>` | Producer + queue inspection. `add` / `addBulk` / `addUnique` / `getJob` / `getJobs` / `getJobState` / `getJobCounts` / `getJobLogs` / `getWaitingCount` / `getActiveCount` / `getDelayedCount` / `getCompletedCount` / `getFailedCount` / `count` / `getJobResult` / `peekDlq` / `replayDlq` / `cancelDelayed` / `getRepeatableJobs` / `removeRepeatableByKey` / `pause` / `resume` / `isPaused` / `remove` / `removeReport` / `drain` / `clean` / `obliterate`. `[Symbol.asyncDispose]`. |
-| `Worker<DataType, ResultType, NameType>` | Consumer pool. tokio-side dispatch, opt-in result storage (`storeResults: true`), `EventEmitter` events (`ready` / `active` / `completed` / `failed` / `error` / `closing` / `closed` / `drained` / `paused` / `resumed` / `progress` / `stalled`), `pause` / `resume` / `isPaused`. `[Symbol.asyncDispose]`. |
+| `Worker<DataType, ResultType, NameType>` | Consumer pool. tokio-side dispatch, opt-in result storage (`storeResults: true`), global per-queue rate limit (`limiter: { max, duration }`), `EventEmitter` events (`ready` / `active` / `completed` / `failed` / `error` / `closing` / `closed` / `drained` / `paused` / `resumed` / `progress` / `stalled`), `pause` / `resume` / `isPaused`. `[Symbol.asyncDispose]`. |
 | `Job<DataType, ResultType, NameType>` | Read-only handle. `id`, `name`, `data`, `attemptsMade`, `progress`, `stalledCount`, `updateProgress(n)` (Worker-side only), `log(line)` (Worker-side only), `waitForResult({ timeoutMs, intervalMs, signal })`, `waitUntilFinished(queueEvents, ttl?)`. |
 | `QueueEvents` | Cross-process pub/sub via the events stream. Subscribe to `waiting` / `active` / `completed` / `failed` / `dlq` / `retry-scheduled` / `delayed` / `drained` / `stalled` / `retries-exhausted`, plus per-id channels (`completed:<jobId>` / `failed:<jobId>` / `active:<jobId>` / `stalled:<jobId>`) for targeted subscribers. `[Symbol.asyncDispose]`. |
 | `BackoffSpec` | Builders: `.fixed(delayMs)` / `.exponential(initialMs, { multiplier, maxMs, jitterMs })`. |
@@ -427,6 +427,39 @@ events.on("stalled", ({ jobId, attempt, prev }) => {
 | `maxAttempts` | `25` | Total handler attempts (initial + retries) before DLQ-as-`retries_exhausted`. Per-job override via `Queue.add(name, data, { attempts })`. |
 | `stalledDetectorEnabled` | `true` | Toggle the embedded detector. Set `false` for pure-consumer benchmarks or deployments running a separate detector process. |
 | `stalledInterval` | `30_000` | Scan-tick interval (ms). The embedded spawn overrides this from the engine's `claim_min_idle_ms` to preserve the per-crash counting invariant (`tick == idle == claim_min_idle`); rarely worth setting. |
+
+### Rate limiting
+
+Cap how many **jobs** a queue processes per time window with `limiter` on `WorkerOptions`. The limit is **global per queue** — one shared token bucket in Redis, drawn down by every worker on the queue. Two workers with `{ max: 100, duration: 1000 }` process at most 100 jobs/second *combined*, not 200.
+
+```ts
+const worker = new Worker(
+  "emails",
+  async (job) => {
+    /* ... */
+  },
+  {
+    connection: { host: "127.0.0.1", port: 6379 },
+    // At most 100 jobs per 1000 ms across ALL workers on "emails".
+    limiter: { max: 100, duration: 1000 },
+  },
+)
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `max` | `number` | Max jobs admitted per `duration` window, shared across all workers on the queue. Must be `>= 1`. |
+| `duration` | `number` | Window length in milliseconds. Must be `>= 1`. |
+| `groupKey` | `string` | **Reserved — rejected in this version.** Passing it throws `Error: limiter.groupKey is not supported in this version (global per-queue limiter only)`. Per-key groups are a future follow-up. |
+
+How it works:
+
+- **One EVALSHA per read attempt, not per job.** The engine checks a token bucket once before each stream read, so the limiter adds no per-job round trip. When throttled it delays the *whole* read at the batch boundary — no job is reordered or requeued, FIFO is preserved.
+- **Cold-start burst allowance.** A fresh or idle bucket starts full, so the first window admits up to `max` jobs immediately before settling to the `max`/`duration` steady state. This is standard token-bucket behavior — the first second can pass up to `max` jobs, so don't read a first-window burst as the limiter leaking.
+- **CPU.** Near-zero while throttled at coarse rates (the reader parks in a `wait_ms` sleep). At very high `max`/second the wait clamps to ~1 ms, so the reader re-checks about every millisecond — one cheap `EVALSHA` per re-check, real but small Redis load.
+- **Observability.** Each throttle emits an `e=rate-limited` event (field `wait_ms`) and, via the metrics adapter, `chasquimq_rate_limited_total` / `chasquimq_rate_limit_wait_seconds`.
+
+> `Worker.rateLimit(expireTimeMs)` (the manual per-invocation throttle call) is a separate, still-unimplemented API — it throws `NotSupportedError`. Use the constructor `limiter` for a standing per-queue rate cap.
 
 ### Repeatable jobs
 

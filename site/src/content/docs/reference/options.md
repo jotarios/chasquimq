@@ -67,6 +67,18 @@ exists.
 | Tick interval (ms) | `WorkerOptions.stalledInterval` (**30_000**) | `Worker(stalled_interval_ms=30_000)` | `StalledDetectorConfig::tick_interval_ms` (**30_000**) | Scan-tick interval. The embedded spawn overrides this from `claim_min_idle_ms` to preserve the per-crash counting invariant (`tick == idle == claim_min_idle`); rarely worth setting. |
 | Scan batch | n/a | `Worker(stalled_detector_scan_batch=256)` | `StalledDetectorConfig::scan_batch` (**256**) | `XPENDING ... IDLE - + N` cap per tick. |
 
+## Rate limiting
+
+Global per-queue token bucket: at most `max` **jobs** admitted per `duration` window, shared across **all** workers on the queue (not per worker). Off by default (unset). See [Rate limiting](/concepts/rate-limiting/).
+
+| Option | Node | Python | Rust | Controls |
+|---|---|---|---|---|
+| Max jobs per window | `WorkerOptions.limiter.max` | `Worker(rate_limit_max=...)` | `RateLimit::max` | Jobs admitted per `duration` window, shared across every worker on the queue (one global bucket). Must be `>= 1`. A fresh/idle bucket starts full — the first window admits a burst up to `max` before settling to `max`/`duration`. |
+| Window length (ms) | `WorkerOptions.limiter.duration` | `Worker(rate_limit_duration_ms=...)` | `RateLimit::duration_ms` | Token-refill window in milliseconds. Must be `>= 1`. Required when `max` is set. |
+| Per-key group | `WorkerOptions.limiter.groupKey` → error | `Worker(rate_limit_group_key=...)` → error | `RateLimit::group_key` → `Error::Config` | **Reserved — rejected in this version** ("not supported in this version (global per-queue limiter only)"). Per-key sub-buckets are a documented follow-up. |
+
+The bucket lives at `{chasqui:<queue>}:limiter` and is evaluated once per read attempt (one `EVALSHA` before `XREADGROUP`, never per job); a throttle delays the whole read at the batch boundary, preserving FIFO. Near-zero CPU while throttled at coarse rates; at very high `max`/second the reader re-checks roughly every ~1 ms. Emits `chasquimq_rate_limited_total` / `chasquimq_rate_limit_wait_seconds` and the `e=rate-limited` event. Not surfaced by the CLI (no worker config to interpret the bucket).
+
 ## Result storage
 
 | Option | Node | Python | Rust | Controls |
