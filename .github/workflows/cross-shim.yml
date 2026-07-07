@@ -576,6 +576,140 @@ jobs:
             docker exec "$REDIS_CID" redis-cli --scan --pattern "{chasqui:${QUEUE}}:result:*" || true
           } | tee /tmp/phase10-redis-state.log
 
+      # ----------------------------------------------------------------
+      # Phases 11–12: per-queue rate limiter — the SHARED-BUCKET proof.
+      #
+      # A Node worker and a Python worker run CONCURRENTLY on the same
+      # queue, both configured with the SAME global limiter (10 jobs /
+      # 1000ms). Because both FFI shims land on the same engine
+      # `ConsumerConfig.rate_limit`, they draw from ONE Redis token bucket
+      # (`{chasqui:<queue>}:limiter`). Over a 2-window observation the
+      # queue-wide drained count is therefore bounded by ~the single
+      # limiter's cap (cold-start full burst + 2 windows of refill), NOT
+      # 2x. If the two paths each got their own bucket the drained count
+      # would roughly double and the verifier's EXPECT_MAX ceiling trips.
+      #
+      #   - Producer seeds a burst (120) so neither limited worker drains
+      #     the queue during the snapshot gap.
+      #   - One shim runs `worker.{ts,py}` with LIMITER_MAX/DURATION_MS
+      #     (drains until COUNT/timeout, limited).
+      #   - The OTHER shim runs `verify_rate_limit.{ts,py}` (also limited),
+      #     which snapshots waiting+active before/after a fixed window and
+      #     asserts the queue-wide drained count is within [EXPECT_MIN,
+      #     EXPECT_MAX]. EXPECT_MAX is set generously (45) for the shared
+      #     bucket; a per-shim bucket would drain ~2x and breach it.
+      #
+      # Windows are deliberately coarse (10/1000ms) so timing jitter never
+      # flakes the bound.
+      # ----------------------------------------------------------------
+
+      - name: Flush Redis between phases (phase 10 -> phase 11)
+        shell: bash
+        run: |
+          REDIS_CID=$(docker ps -qf 'ancestor=redis:8.6.2' | head -n1)
+          docker exec "$REDIS_CID" redis-cli FLUSHDB
+
+      - name: Phase 11 — Node worker + Python verifier share ONE limiter bucket
+        id: phase11
+        working-directory: .github/cross-shim-tests
+        env:
+          QUEUE: cross-shim-phase11-${{ github.run_id }}-${{ github.run_attempt }}
+          COUNT: '120'
+          TAG: node
+          JOB_NAME: cross-rl-shared-node-py
+          EXPECT_TAG: node
+          EXPECT_JOB_NAME: cross-rl-shared-node-py
+          MODE: immediate
+          LIMITER_MAX: '10'
+          LIMITER_DURATION_MS: '1000'
+          OBSERVE_WINDOWS: '2'
+          EXPECT_MIN: '1'
+          EXPECT_MAX: '45'
+          TIMEOUT_SECS: '8'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Seed the burst.
+          npx tsx producer.ts 2>&1 | tee /tmp/phase11-producer.log
+          # Node limited worker drains in the background; the Python limited
+          # verifier measures the SHARED-bucket-bounded queue-wide drained
+          # count. Both draw from the same Redis limiter bucket.
+          npx tsx worker.ts 2>&1 | tee /tmp/phase11-worker.log &
+          NODE_WORKER_PID=$!
+          set +e
+          python verify_rate_limit.py 2>&1 | tee /tmp/phase11-verify.log
+          VERIFY_RC=${PIPESTATUS[0]}
+          set -e
+          wait "$NODE_WORKER_PID" || true
+          exit "$VERIFY_RC"
+
+      - name: Dump Redis state on Phase 11 failure
+        if: failure() && steps.phase11.outcome == 'failure'
+        env:
+          QUEUE: cross-shim-phase11-${{ github.run_id }}-${{ github.run_attempt }}
+        shell: bash
+        run: |
+          REDIS_CID=$(docker ps -qf 'ancestor=redis:8.6.2' | head -n1)
+          {
+            echo "=== XLEN main ==="
+            docker exec "$REDIS_CID" redis-cli XLEN "{chasqui:${QUEUE}}:stream" || true
+            echo "=== HGETALL limiter bucket ==="
+            docker exec "$REDIS_CID" redis-cli HGETALL "{chasqui:${QUEUE}}:limiter" || true
+          } | tee /tmp/phase11-redis-state.log
+
+      - name: Flush Redis between phases (phase 11 -> phase 12)
+        shell: bash
+        run: |
+          REDIS_CID=$(docker ps -qf 'ancestor=redis:8.6.2' | head -n1)
+          docker exec "$REDIS_CID" redis-cli FLUSHDB
+
+      - name: Phase 12 — Python worker + Node verifier share ONE limiter bucket
+        id: phase12
+        working-directory: .github/cross-shim-tests
+        env:
+          QUEUE: cross-shim-phase12-${{ github.run_id }}-${{ github.run_attempt }}
+          COUNT: '120'
+          TAG: py
+          JOB_NAME: cross-rl-shared-py-node
+          EXPECT_TAG: py
+          EXPECT_JOB_NAME: cross-rl-shared-py-node
+          MODE: immediate
+          LIMITER_MAX: '10'
+          LIMITER_DURATION_MS: '1000'
+          OBSERVE_WINDOWS: '2'
+          EXPECT_MIN: '1'
+          EXPECT_MAX: '45'
+          TIMEOUT_SECS: '8'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python producer.py 2>&1 | tee /tmp/phase12-producer.log
+          # Python limited worker drains in the background; the Node limited
+          # verifier measures the SHARED-bucket-bounded queue-wide drained
+          # count. Both draw from the same Redis limiter bucket.
+          python worker.py 2>&1 | tee /tmp/phase12-worker.log &
+          PY_WORKER_PID=$!
+          set +e
+          npx tsx verify_rate_limit.ts 2>&1 | tee /tmp/phase12-verify.log
+          VERIFY_RC=${PIPESTATUS[0]}
+          set -e
+          wait "$PY_WORKER_PID" || true
+          exit "$VERIFY_RC"
+
+      - name: Dump Redis state on Phase 12 failure
+        if: failure() && steps.phase12.outcome == 'failure'
+        env:
+          QUEUE: cross-shim-phase12-${{ github.run_id }}-${{ github.run_attempt }}
+        shell: bash
+        run: |
+          REDIS_CID=$(docker ps -qf 'ancestor=redis:8.6.2' | head -n1)
+          {
+            echo "=== XLEN main ==="
+            docker exec "$REDIS_CID" redis-cli XLEN "{chasqui:${QUEUE}}:stream" || true
+            echo "=== HGETALL limiter bucket ==="
+            docker exec "$REDIS_CID" redis-cli HGETALL "{chasqui:${QUEUE}}:limiter" || true
+          } | tee /tmp/phase12-redis-state.log
+
       - name: Upload phase logs
         if: always()
         uses: actions/upload-artifact@v7
@@ -618,4 +752,12 @@ jobs:
             /tmp/phase10-worker.log
             /tmp/phase10-verify.log
             /tmp/phase10-redis-state.log
+            /tmp/phase11-producer.log
+            /tmp/phase11-worker.log
+            /tmp/phase11-verify.log
+            /tmp/phase11-redis-state.log
+            /tmp/phase12-producer.log
+            /tmp/phase12-worker.log
+            /tmp/phase12-verify.log
+            /tmp/phase12-redis-state.log
           if-no-files-found: warn

@@ -32,6 +32,13 @@ Env vars:
                    them back via ``Queue.get_job`` / ``Queue.get_job_logs``.
                    Pair with ``STORE_RESULT=1`` to keep completed jobs
                    discoverable by the introspector.
+  LIMITER_MAX         — optional. When set (with LIMITER_DURATION_MS), the
+                        worker enables a global per-queue rate limiter of
+                        ``max`` jobs per ``duration`` ms window (shared Redis
+                        bucket). Used by the rate-limit cross-shim phase to
+                        prove the Node + Python FFI paths share ONE bucket.
+  LIMITER_DURATION_MS — optional. Window length in ms; required when
+                        LIMITER_MAX is set.
   EXPECT_TAG, TIMEOUT_SECS, REDIS_URL — optional.
 """
 
@@ -56,6 +63,8 @@ async def main() -> int:
     result_value_raw = os.environ.get("RESULT_VALUE", "")
     result_value = json.loads(result_value_raw) if result_value_raw else None
     emit_progress = os.environ.get("EMIT_PROGRESS", "") == "1"
+    limiter_max = os.environ.get("LIMITER_MAX", "")
+    limiter_duration = os.environ.get("LIMITER_DURATION_MS", "")
 
     seen: set[int] = set()
     done = asyncio.Event()
@@ -97,6 +106,11 @@ async def main() -> int:
             done.set()
         return result_value
 
+    limiter_kwargs = {}
+    if limiter_max:
+        limiter_kwargs["rate_limit_max"] = int(limiter_max)
+        limiter_kwargs["rate_limit_duration_ms"] = int(limiter_duration)
+
     worker = Worker(
         queue_name,
         handler,
@@ -106,6 +120,7 @@ async def main() -> int:
         read_block_ms=200,
         run_scheduler=False,
         store_results=store_results,
+        **limiter_kwargs,
     )
 
     run_task = asyncio.create_task(worker.run())
