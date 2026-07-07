@@ -156,6 +156,18 @@ pub fn stalled_lock_key(queue_name: &str) -> String {
     format!("{{chasqui:{queue_name}}}:stalled:lock")
 }
 
+/// Global per-queue rate-limit token bucket, a Redis hash holding the
+/// current token count (`t`) and the last-refill timestamp in ms (`ts`).
+/// Same `{chasqui:<queue>}` hash tag as the stream so the bucket
+/// co-locates on one Redis Cluster slot with the rest of the queue's
+/// keyspace — the reader's rate-limit `EVALSHA` uses `ClusterHash::FirstKey`
+/// and relies on this invariant. Written and read only by
+/// `RATE_LIMIT_ACQUIRE_SCRIPT`; the bucket is shared across every worker
+/// (and both FFI shims) so N workers on one queue share ONE global budget.
+pub fn limiter_key(queue_name: &str) -> String {
+    format!("{{chasqui:{queue_name}}}:limiter")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,6 +217,23 @@ mod tests {
             s[start..=end].to_string()
         };
         assert_eq!(tag(&sc), tag(&stream));
+        assert_eq!(tag(&lk), tag(&stream));
+    }
+
+    /// The rate-limit bucket key shares the same `{chasqui:<queue>}` hash
+    /// tag as the stream so the reader's rate-limit `EVALSHA`
+    /// (`ClusterHash::FirstKey`) routes to the same slot as the queue's
+    /// keyspace under Redis Cluster.
+    #[test]
+    fn limiter_key_shares_queue_hash_tag() {
+        let lk = limiter_key("demo");
+        assert_eq!(lk, "{chasqui:demo}:limiter");
+        let stream = stream_key("demo");
+        let tag = |s: &str| {
+            let start = s.find('{').unwrap();
+            let end = s.find('}').unwrap();
+            s[start..=end].to_string()
+        };
         assert_eq!(tag(&lk), tag(&stream));
     }
 

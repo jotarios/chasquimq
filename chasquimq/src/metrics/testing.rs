@@ -11,7 +11,7 @@
 
 use super::{
     DlqReason, DlqRouted, JobOutcome, JobOutcomeKind, LockOutcome, MetricsSink, PromoterTick,
-    ReaderBatch, RetryScheduled, StalledTick,
+    RateLimitedTick, ReaderBatch, RetryScheduled, StalledTick,
 };
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -24,6 +24,7 @@ pub struct InMemorySink {
     retry_events: Mutex<Vec<RetryScheduled>>,
     dlq_events: Mutex<Vec<DlqRouted>>,
     stalled_ticks: Mutex<Vec<StalledTick>>,
+    rate_limited_ticks: Mutex<Vec<RateLimitedTick>>,
     acquired: AtomicU64,
     held: AtomicU64,
     jobs_completed: AtomicU64,
@@ -183,6 +184,10 @@ impl MetricsSink for InMemorySink {
     fn stalled_tick(&self, tick: StalledTick) {
         self.stalled_ticks.lock().expect("poisoned").push(tick);
     }
+
+    fn rate_limited_tick(&self, tick: RateLimitedTick) {
+        self.rate_limited_ticks.lock().expect("poisoned").push(tick);
+    }
 }
 
 impl InMemorySink {
@@ -208,5 +213,11 @@ impl InMemorySink {
             .iter()
             .map(|t| t.incremented)
             .sum()
+    }
+
+    // -------- rate limiter --------
+
+    pub fn rate_limited_ticks(&self) -> Vec<RateLimitedTick> {
+        self.rate_limited_ticks.lock().expect("poisoned").clone()
     }
 }
