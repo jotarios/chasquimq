@@ -16,7 +16,7 @@
 use crate::credential_provider::PyCredentialProvider;
 use crate::job::Job;
 use crate::payload::RawBytes;
-use chasquimq::config::ConsumerConfig;
+use chasquimq::config::{ConsumerConfig, RateLimit};
 use chasquimq::consumer::Consumer as EngineConsumer;
 use chasquimq::{HandlerError, Job as EngineJob, PauseControl};
 use pyo3::exceptions::PyRuntimeError;
@@ -69,6 +69,9 @@ impl Consumer {
         stalled_detector_enabled = None,
         stalled_interval_ms = None,
         stalled_detector_scan_batch = None,
+        rate_limit_max = None,
+        rate_limit_duration_ms = None,
+        rate_limit_group_key = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -99,6 +102,9 @@ impl Consumer {
         stalled_detector_enabled: Option<bool>,
         stalled_interval_ms: Option<i64>,
         stalled_detector_scan_batch: Option<u32>,
+        rate_limit_max: Option<u32>,
+        rate_limit_duration_ms: Option<i64>,
+        rate_limit_group_key: Option<String>,
     ) -> PyResult<Self> {
         let mut cfg = ConsumerConfig {
             queue_name,
@@ -200,6 +206,38 @@ impl Consumer {
         }
         if let Some(v) = stalled_detector_scan_batch {
             cfg.stalled_detector.scan_batch = v as usize;
+        }
+        // Global per-queue rate limiter. `rate_limit_max` meters **jobs
+        // admitted per `rate_limit_duration_ms` window** across all workers
+        // (shared Redis bucket), not reads. `rate_limit_group_key` is
+        // reserved and rejected in this version — reject it here (before the
+        // engine's own validate()) so the failure surfaces as a clear
+        // PyRuntimeError rather than an opaque native error in `run()`.
+        if rate_limit_group_key.is_some() {
+            return Err(PyRuntimeError::new_err(
+                "rate_limit_group_key is not supported in this version (global per-queue limiter only)",
+            ));
+        }
+        if let Some(max) = rate_limit_max {
+            let dur = rate_limit_duration_ms.ok_or_else(|| {
+                PyRuntimeError::new_err(
+                    "rate_limit_duration_ms is required when rate_limit_max is set",
+                )
+            })?;
+            if max == 0 || dur <= 0 {
+                return Err(PyRuntimeError::new_err(
+                    "rate_limit_max and rate_limit_duration_ms must be positive",
+                ));
+            }
+            cfg.rate_limit = Some(RateLimit {
+                max,
+                duration_ms: dur as u64,
+                group_key: None,
+            });
+        } else if rate_limit_duration_ms.is_some() {
+            return Err(PyRuntimeError::new_err(
+                "rate_limit_duration_ms set without rate_limit_max",
+            ));
         }
 
         let unrecoverable_cls = py
