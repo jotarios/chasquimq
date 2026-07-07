@@ -15,7 +15,7 @@ use crate::credential_provider::{CredentialProviderTsfn, build_js_credential_pro
 use crate::payload::RawBytes;
 use crate::producer::map_engine_err;
 use bytes::Bytes;
-use chasquimq::config::{ConsumerConfig, RetryConfig};
+use chasquimq::config::{ConsumerConfig, RateLimit, RetryConfig};
 use chasquimq::consumer::Consumer as EngineConsumer;
 use chasquimq::{HandlerError, Job as EngineJob, JobHandle as EngineJobHandle, PauseControl};
 use napi::bindgen_prelude::*;
@@ -32,6 +32,21 @@ pub struct RetryOpts {
     pub max_backoff_ms: Option<i64>,
     pub multiplier: Option<f64>,
     pub jitter_ms: Option<i64>,
+}
+
+/// Global per-queue rate limiter options. Maps to engine
+/// `ConsumerConfig::rate_limit`. `max` meters **jobs admitted per
+/// `duration` window** across ALL workers on the queue (one shared Redis
+/// token bucket), not reads or batches. `groupKey` is **reserved and
+/// rejected in this version** (global per-queue limiter only) — passing it
+/// throws before the engine is constructed so the failure surfaces in JS,
+/// not as an opaque native error.
+#[napi(object)]
+pub struct LimiterOpts {
+    pub max: Option<u32>,
+    pub duration: Option<i64>,
+    // NAPI auto-camelCases this to `groupKey` on the TS surface.
+    pub group_key: Option<String>,
 }
 
 #[napi(object)]
@@ -104,6 +119,12 @@ pub struct ConsumerOpts {
     /// Override the detector's per-tick scan cap. Maps to
     /// `stalled_detector.scan_batch`. Default `256`.
     pub stalled_detector_scan_batch: Option<u32>,
+    /// Global per-queue rate limiter. When set, every worker on the queue
+    /// draws from ONE shared Redis token bucket so the queue admits at most
+    /// `limiter.max` jobs per `limiter.duration` ms window across all
+    /// workers and both FFI shims. Maps to `ConsumerConfig::rate_limit`.
+    /// `limiter.groupKey` is reserved and rejected in this version.
+    pub limiter: Option<LimiterOpts>,
 }
 
 /// `Job` is a `#[napi]` class (not a plain object) so it can carry the
@@ -514,6 +535,32 @@ fn build_consumer_config(opts: Option<ConsumerOpts>) -> napi::Result<ConsumerCon
         }
         if let Some(v) = o.stalled_detector_scan_batch {
             cfg.stalled_detector.scan_batch = v as usize;
+        }
+        if let Some(l) = o.limiter {
+            // Reject the reserved group_key here (before the engine's own
+            // validate()) so the failure surfaces as a JS Error rather than
+            // an opaque native error deep in `Consumer::run`.
+            if l.group_key.is_some() {
+                return Err(napi::Error::from_reason(
+                    "limiter.groupKey is not supported in this version (global per-queue limiter only)",
+                ));
+            }
+            let max = l
+                .max
+                .ok_or_else(|| napi::Error::from_reason("limiter.max is required"))?;
+            let dur = l
+                .duration
+                .ok_or_else(|| napi::Error::from_reason("limiter.duration is required"))?;
+            if max == 0 || dur <= 0 {
+                return Err(napi::Error::from_reason(
+                    "limiter.max and limiter.duration must be positive",
+                ));
+            }
+            cfg.rate_limit = Some(RateLimit {
+                max,
+                duration_ms: dur as u64,
+                group_key: None,
+            });
         }
     }
     Ok(cfg)
