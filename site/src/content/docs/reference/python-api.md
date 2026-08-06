@@ -498,6 +498,9 @@ class Worker:
         stalled_detector_enabled: bool = True,
         stalled_interval_ms: int | None = None,
         stalled_detector_scan_batch: int | None = None,
+        rate_limit_max: int | None = None,
+        rate_limit_duration_ms: int | None = None,
+        rate_limit_group_key: str | None = None,
     ) -> None: ...
 ```
 
@@ -545,6 +548,21 @@ on `{chasqui:<queue>}:scheduler:lock`.
   `claim_min_idle_ms` to preserve the per-crash counting invariant.
 - `stalled_detector_scan_batch` — `XPENDING ... IDLE - + N` cap per
   tick. **Default engine: `256`.**
+- `rate_limit_max` — global per-queue rate limit: max **jobs**
+  admitted per `rate_limit_duration_ms` window, shared across
+  **every** worker on the queue (one Redis token bucket, not one per
+  worker). **Default `None`** (no limiting). Must be `>= 1`. A
+  fresh/idle bucket starts full, so the first window admits a burst
+  up to `rate_limit_max` before settling to the steady state
+  (standard token-bucket). See the
+  [Rate limiting concept](/concepts/rate-limiting/).
+- `rate_limit_duration_ms` — window length in ms for `rate_limit_max`.
+  **Required when `rate_limit_max` is set**; must be `>= 1`. Setting
+  it without `rate_limit_max` raises `RuntimeError`.
+- `rate_limit_group_key` — **reserved; rejected in this version.**
+  Passing it raises `RuntimeError('rate_limit_group_key is not
+  supported in this version (global per-queue limiter only)')`.
+  Per-key sub-buckets are a documented follow-up.
 
 ### `await worker.run()`
 

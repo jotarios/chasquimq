@@ -144,6 +144,7 @@ export default defineConfig({
               slug: "concepts/events-and-listeners",
             },
             { label: "Pause and resume", slug: "concepts/pause-and-resume" },
+            { label: "Rate limiting", slug: "concepts/rate-limiting" },
             { label: "Redis Cluster", slug: "concepts/redis-cluster" },
             {
               label: "Architecture decisions",

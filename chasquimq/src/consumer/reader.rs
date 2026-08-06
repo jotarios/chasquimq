@@ -1,11 +1,16 @@
 use crate::config::ConsumerConfig;
 use crate::consumer::dlq::{self, DlqReason, DlqRelocate};
 use crate::consumer::worker::DispatchedJob;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::events::EventsWriter;
 use crate::job::Job;
-use crate::metrics::{self, MetricsSink, ReaderBatch};
-use crate::redis::commands::xreadgroup_args;
+use crate::leader_task::{load_script, sleep_or_shutdown};
+use crate::metrics::{self, MetricsSink, RateLimitedTick, ReaderBatch};
+use crate::redis::commands::{
+    RATE_LIMIT_ACQUIRE_SCRIPT, RateLimitDecision, eval_rate_limit_args, evalsha_rate_limit_args,
+    parse_rate_limit_reply, xreadgroup_args,
+};
+use crate::redis::keys::limiter_key;
 use crate::redis::parse::{EntryShape, parse_xreadgroup_response};
 use bytes::Bytes;
 use fred::clients::Client;
@@ -65,6 +70,15 @@ where
         Duration::from_millis(cfg.pause_poll_ms),
     );
 
+    // Rate-limit gate. Constructed once only when the queue has a limiter
+    // configured; `None` otherwise so the not-limited hot path is a single
+    // skipped `if let Some` branch — no EVALSHA, no allocation, byte-for-byte
+    // the pre-feature reader path.
+    let mut rl_gate = cfg
+        .rate_limit
+        .as_ref()
+        .map(|rl| RateLimitGate::new(&cfg.queue_name, rl.max, rl.duration_ms));
+
     loop {
         if shutdown.is_cancelled() {
             break;
@@ -80,10 +94,27 @@ where
             break;
         }
 
+        // Rate-limit gate. Ordered AFTER the pause gate on purpose: a paused
+        // queue must not spend a limiter token (pause is the coarser gate).
+        // Returns the number of job-tokens granted this round (>= 1) which
+        // caps this read's `COUNT` so `max` meters jobs, not reads. Returns
+        // `None` only when shutdown was observed while throttled, in which
+        // case we break to drain — same contract as the pause gate.
+        let batch_count = match rl_gate.as_mut() {
+            Some(rl) => match rl
+                .acquire(&reader, &shutdown, cfg.batch, &*metrics_sink, &events)
+                .await
+            {
+                Some(granted) => granted,
+                None => break,
+            },
+            None => cfg.batch,
+        };
+
         let args = xreadgroup_args(
             &cfg.group,
             &cfg.consumer_id,
-            cfg.batch,
+            batch_count,
             cfg.block_ms,
             cfg.claim_min_idle_ms,
             &stream_key,
@@ -261,6 +292,151 @@ impl PauseGate {
                     self.last_redis_check = None;
                 }
             }
+        }
+    }
+}
+
+/// Batch-boundary global rate-limit gate.
+///
+/// Sits between the pause gate and `XREADGROUP`. On every batch boundary it
+/// `EVALSHA`s [`RATE_LIMIT_ACQUIRE_SCRIPT`] against the shared per-queue
+/// token bucket (`{chasqui:<queue>}:limiter`), requesting up to `want` (the
+/// reader's batch size) job-tokens. The script grants `min(want, tokens)` in
+/// one round trip; the reader caps this read's `COUNT` to that grant, so the
+/// limiter's `max` meters **jobs**, not reads. When nothing is available the
+/// script returns a `wait_ms`; the gate parks in [`sleep_or_shutdown`] for
+/// `wait_ms`, then RE-CHECKS — it never assumes tokens are available after
+/// the sleep, because concurrent workers on the same queue may have taken them.
+///
+/// ```text
+///  every batch boundary (AFTER pause gate, BEFORE XREADGROUP):
+///    acquire(want):
+///      loop {
+///        {granted, wait_ms} = EVALSHA rate-limit script  (NOSCRIPT -> EVAL)
+///        granted>=1 => reset throttled latch, return Some(granted) (COUNT)
+///        throttle   => emit rate_limited_tick; emit e=rate-limited once per
+///                      throttle *entry* (latch); sleep_or_shutdown(wait_ms):
+///                        slept fully => loop (re-check)
+///                        shutdown    => return None (caller drains)
+///        Err        => transient; warn + back off 200ms (or shutdown)
+///      }
+/// ```
+///
+/// **Zero-overhead when unset:** the whole gate is skipped when the queue
+/// has no limiter — `rl_gate` is `None` and the `if let Some` branch never
+/// runs, so an unlimited reader pays nothing (no EVALSHA, no allocation).
+struct RateLimitGate {
+    bucket_key: Arc<str>,
+    max: u32,
+    duration_ms: u64,
+    /// Loop-local SHA cache for `EVALSHA`; `None` until the first
+    /// `SCRIPT LOAD` (lazy, or after a `NOSCRIPT` self-heal). Kept per-reader
+    /// so a flushed server-side script cache re-heals transparently.
+    sha: Option<String>,
+    /// Latch so the `e=rate-limited` event fires once per throttle *entry*,
+    /// not on every re-check. Reset to `false` the moment a token is granted,
+    /// so a fresh throttle episode re-emits.
+    throttled: bool,
+}
+
+impl RateLimitGate {
+    fn new(queue_name: &str, max: u32, duration_ms: u64) -> Self {
+        Self {
+            bucket_key: Arc::from(limiter_key(queue_name)),
+            max,
+            duration_ms,
+            sha: None,
+            throttled: false,
+        }
+    }
+
+    /// Block until at least one job-token is granted. `want` is the reader's
+    /// batch size (the max tokens to reserve this round). Returns
+    /// `Some(granted)` — the effective `XREADGROUP COUNT`, `1..=want` — when
+    /// tokens were acquired, or `None` only when shutdown fired while
+    /// throttled (caller breaks to drain).
+    async fn acquire(
+        &mut self,
+        reader: &Client,
+        shutdown: &CancellationToken,
+        want: usize,
+        sink: &dyn MetricsSink,
+        events: &EventsWriter,
+    ) -> Option<usize> {
+        // Clamp `want` to u32 for the wire arg (batch is a usize but is never
+        // realistically > u32::MAX; the grant can't exceed `max`, a u32).
+        let want_u32 = want.min(u32::MAX as usize) as u32;
+        loop {
+            match self.evalsha_or_selfheal(reader, want_u32).await {
+                Ok(RateLimitDecision::Granted(granted)) => {
+                    // Tokens reserved. Reset the latch so the next throttle
+                    // episode re-emits `e=rate-limited`.
+                    self.throttled = false;
+                    // `granted` is `1..=want`; the reader uses it as COUNT.
+                    return Some(granted as usize);
+                }
+                Ok(RateLimitDecision::Throttle { wait_ms }) => {
+                    metrics::dispatch("rate_limited_tick", || {
+                        sink.rate_limited_tick(RateLimitedTick { wait_ms })
+                    });
+                    if !self.throttled && events.is_enabled() {
+                        events.emit_rate_limited(wait_ms).await;
+                        self.throttled = true;
+                    }
+                    if !sleep_or_shutdown(Duration::from_millis(wait_ms), shutdown).await {
+                        // Shutdown while throttled -> prompt exit; caller drains.
+                        return None;
+                    }
+                    // Loop: RE-CHECK. Concurrent workers may have taken the
+                    // tokens that refilled, so we never assume they're ours.
+                }
+                Err(e) => {
+                    // Transient (network) failure: back off like the
+                    // XREADGROUP failure path rather than spinning.
+                    tracing::warn!(error = %e, "rate-limit EVALSHA failed; backing off 200ms");
+                    if !sleep_or_shutdown(Duration::from_millis(200), shutdown).await {
+                        return None;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Issue the rate-limit script via `EVALSHA`, self-healing a `NOSCRIPT`
+    /// (flushed server cache) into a fresh `SCRIPT LOAD` + `EVAL`. Modeled on
+    /// the DLQ relocator's `relocate_once`. Parses the reply with the
+    /// fail-CLOSED [`parse_rate_limit_reply`] — an unparseable shape throttles
+    /// rather than reading as a grant.
+    async fn evalsha_or_selfheal(
+        &mut self,
+        reader: &Client,
+        want: u32,
+    ) -> Result<RateLimitDecision> {
+        // Seed the SHA lazily so the very first call after a fresh start does
+        // one SCRIPT LOAD instead of a guaranteed NOSCRIPT round trip.
+        if self.sha.is_none() {
+            self.sha = Some(load_script(reader, RATE_LIMIT_ACQUIRE_SCRIPT).await?);
+        }
+        let sha = self.sha.as_ref().expect("sha seeded above");
+        let cmd = CustomCommand::new_static("EVALSHA", ClusterHash::FirstKey, false);
+        let args = evalsha_rate_limit_args(sha, &self.bucket_key, self.max, self.duration_ms, want);
+        let res: std::result::Result<Value, fred::error::Error> = reader.custom(cmd, args).await;
+        match res {
+            Ok(v) => Ok(parse_rate_limit_reply(&v, self.duration_ms)),
+            Err(e) if format!("{e}").contains("NOSCRIPT") => {
+                self.sha = Some(load_script(reader, RATE_LIMIT_ACQUIRE_SCRIPT).await?);
+                let cmd = CustomCommand::new_static("EVAL", ClusterHash::FirstKey, false);
+                let args = eval_rate_limit_args(
+                    RATE_LIMIT_ACQUIRE_SCRIPT,
+                    &self.bucket_key,
+                    self.max,
+                    self.duration_ms,
+                    want,
+                );
+                let v: Value = reader.custom(cmd, args).await.map_err(Error::Redis)?;
+                Ok(parse_rate_limit_reply(&v, self.duration_ms))
+            }
+            Err(e) => Err(Error::Redis(e)),
         }
     }
 }

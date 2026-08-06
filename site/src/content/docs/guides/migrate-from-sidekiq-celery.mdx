@@ -80,7 +80,7 @@ const worker = new Worker(
 | `raise Sidekiq::JobRetry::Skip` | `throw new UnrecoverableError(...)` (Node) / `raise UnrecoverableError(...)` (Python) |
 | `Sidekiq::DeadSet.new` | `chasqui dlq peek <queue>` / `Queue.peekDlq` |
 | Sidekiq Web UI / Sidekiq Pro Dashboard | `chasqui inspect`, `chasqui watch`, `chasqui events`. No web UI in v1. |
-| `Sidekiq::Throttled` (rate limit) | Not in v1. Tracked as a future. |
+| `Sidekiq::Throttled` (rate limit) | `limiter: { max: 100, duration: 1000 }` on the `Worker` — a global per-queue token bucket shared across all workers. |
 | `sidekiq -q high -q default` (priority queues) | Multiple `Queue` / `Worker` instances per queue name. |
 | `sidekiq-cron` | `repeat: { pattern: '0 9 * * *', tz: 'Europe/Madrid' }` |
 
@@ -97,7 +97,7 @@ const worker = new Worker(
 | Celery beat (`@periodic_task`) | `repeat=RepeatPattern.cron("0 9 * * *", tz="Europe/Madrid")` |
 | Result backend (`AsyncResult.get(timeout=...)`) | `Worker(store_results=True)` + `job.wait_for_result(timeout=...)` |
 | Flower dashboard | `chasqui watch`, `chasqui events`. No web UI in v1. |
-| `@task(rate_limit='100/m')` | Not in v1. |
+| `@task(rate_limit='100/m')` | `rate_limit_max=100, rate_limit_duration_ms=60_000` on the `Worker` — global per-queue, shared across all workers (not per worker like Celery's). |
 | Routing via exchanges | Multiple queues per concern. ChasquiMQ has no exchange concept. |
 
 ## RQ / Dramatiq
@@ -112,7 +112,7 @@ These are real semantic differences, not just syntax:
 - **No `success_callback` / `link` / `chain`.** Parent/child workflows are not in v1. Compose by enqueueing a follow-up from inside the handler.
 - **No exchanges, no routing keys.** One queue per concern. Multiple queues live in the same Redis. Workers subscribe per queue.
 - **No web dashboard.** CLI only (`chasqui inspect`, `chasqui watch`, `chasqui events`). The PRD explicitly out-of-scopes "complex UI dashboards."
-- **No rate limiter, no pause/resume in v1.** Tracked as future v1.x work.
+- **Rate limiting is a global per-queue token bucket, not per worker.** `limiter: { max, duration }` (Node) / `rate_limit_max` + `rate_limit_duration_ms` (Python) caps jobs/window across all workers on the queue — unlike Celery's per-worker `rate_limit`. Per-key groups are reserved for a follow-up. See [Rate limiting](/concepts/rate-limiting/).
 
 ## What's strictly better
 
@@ -124,7 +124,7 @@ These are real semantic differences, not just syntax:
 
 ## When NOT to migrate
 
-- You need rate limiting, pause/resume, or priority as a queue feature today. Stay where you are; revisit when v1.x lands.
+- You need per-key rate limiting (a separate budget per job kind) or priority as a queue feature today. Global per-queue rate limiting and pause/resume are shipped; per-key rate-limit groups and priority are not. Stay where you are for those; revisit when they land.
 - You depend on parent/child workflows / DAGs. Stay where you are.
 - Your team owns a battle-tested Sidekiq Pro / Celery deployment with custom monitoring, and the throughput is fine. The migration costs more than the win.
 

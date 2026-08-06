@@ -41,6 +41,7 @@
 //! | `dlq`              | `attempt`, `reason`, `n` (opt)             |
 //! | `drained`          | (no `id`/`n` — emitted with `id=""`)       |
 //! | `stalled`          | `attempt` (current stall count), `prev=active`, `n` (opt) |
+//! | `rate-limited`     | `wait_ms` (no `id`/`n` — queue-scoped, emitted with `id=""`) |
 //!
 //! `attempt` is 1-indexed (matches `JobOutcome.attempt`). Numeric values are
 //! always decimal strings. The `n` field is the slice-5 payoff: subscribers
@@ -262,6 +263,23 @@ impl EventsWriter {
     pub(crate) async fn emit_drained(&self) {
         // No job id and no name — drained is queue-scoped, not per-job.
         self.xadd("drained", "", "", &[]).await;
+    }
+
+    /// Emit a `rate-limited` event (the reader hit the per-queue token
+    /// bucket and is about to park for `wait_ms` before re-checking).
+    /// Queue-scoped like `drained` — no job id / name.
+    ///
+    /// The reader emits this once per throttle **entry per reader** (guarded
+    /// by a latch that resets when a token is next granted), not every
+    /// re-check, so an idle-throttled reader doesn't flood the stream. It is
+    /// per-*reader*: M consumers on one queue (or a Node + Python worker both
+    /// limited) emit up to M `rate-limited` events per throttle episode, and a
+    /// bucket flapping around `tokens≈1` can re-toggle the latch and re-emit.
+    /// Subscribers should aggregate, not assume exactly-one.
+    pub(crate) async fn emit_rate_limited(&self, wait_ms: u64) {
+        let wait_s = wait_ms.to_string();
+        self.xadd("rate-limited", "", "", &[("wait_ms", &wait_s)])
+            .await;
     }
 
     async fn xadd(&self, event_name: &str, id: &str, name: &str, extra: &[(&str, &str)]) {

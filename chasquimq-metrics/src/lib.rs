@@ -49,7 +49,12 @@
 //! | `chasquimq_handler_duration_seconds{name=...}` | histogram | Wall-clock per handler invocation (Prometheus convention) |
 //! | `chasquimq_retries_scheduled_total{name=...}` | counter | Retries that were actually rescheduled (script gate fired) |
 //! | `chasquimq_retry_backoff_seconds` | histogram | Backoff applied per retry (Prometheus convention) |
-//! | `chasquimq_dlq_routed_total{reason=...,name=...}` | counter | DLQ relocations by reason (`retries_exhausted` / `decode_failed` / `malformed` / `oversize_payload`) |
+//! | `chasquimq_dlq_routed_total{reason=...,name=...}` | counter | DLQ relocations by reason (`retries_exhausted` / `decode_failed` / `malformed` / `oversize_payload` / `stalled`) |
+//! | `chasquimq_stalled_scanned_total` | counter | PEL entries the stalled detector scanned this tick |
+//! | `chasquimq_stalled_incremented_total` | counter | Stall counters that went up but stayed below the threshold |
+//! | `chasquimq_stalled_relocated_total` | counter | Stalled entries relocated to the DLQ (`XACKDEL` gate held) |
+//! | `chasquimq_rate_limited_total` | counter | Reader batch boundaries throttled by the per-queue rate limiter |
+//! | `chasquimq_rate_limit_wait_seconds` | histogram | Sleep applied per throttle before re-checking the token bucket (Prometheus convention) |
 //!
 //! Per-job metrics carry a `name` label sourced from the source stream
 //! entry's `n` field (slice 5 of name-on-the-wire). Empty name renders as

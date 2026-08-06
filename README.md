@@ -221,7 +221,7 @@ In-repo: [`docs/engine.md`](docs/engine.md) (engine internals), [`docs/history.m
 | Rotating-token credential hook (ElastiCache IAM) | ✓ (Rust) | — | — | — |
 | CLI dashboard | ✓ (`chasqui`) | 3rd-party | 3rd-party | — |
 | Priorities | Future | ✓ | ✓ | — |
-| Rate limiter | Future | ✓ | ✓ | — |
+| Rate limiter | ✓ (global per-queue) | ✓ | ✓ | — |
 | Pause / Resume | ✓ | ✓ | ✓ | — |
 | Job maintenance (`remove` / `drain` / `clean` / `obliterate`) | ✓ | ✓ | ✓ | — |
 | Parent / child dependencies | Future | ✓ | — | — |
@@ -249,7 +249,7 @@ Phases 1–4 shipped (engine, delayed jobs + retries, Node bindings, Python bind
 
 1.x cloud-Redis polish (May 2026) added TLS (`rediss://`), TCP keepalive + reconnect-policy tuning, `Producer::shutdown` clean disconnect, and a `CredentialProvider` hook for rotating-token auth (ElastiCache IAM) — see [`docs/history.md`](docs/history.md#slice-11--aws-lambda-prerequisites-cloud-redis-polish) for the slice writeup.
 
-Future v1.x candidates: priorities, rate limiter, parent/child dependencies, fair queues, web UI.
+Future v1.x candidates: priorities, parent/child dependencies, fair queues, web UI.
 
 ## Contributing
 

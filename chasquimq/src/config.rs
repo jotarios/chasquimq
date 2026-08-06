@@ -102,6 +102,41 @@ impl Default for RetryConfig {
     }
 }
 
+/// Global per-queue rate limit. When set on [`ConsumerConfig::rate_limit`],
+/// every worker on the queue draws from ONE shared token bucket in Redis
+/// (`{chasqui:<queue>}:limiter`), so the queue admits at most `max` jobs per
+/// `duration_ms` window **regardless of how many workers (or FFI shims) run**
+/// — the bucket is shared cross-process, not per-worker.
+///
+/// The reader consults the bucket once per batch boundary (before
+/// `XREADGROUP`), never per job, so a limited queue costs one `EVALSHA` per
+/// read attempt rather than a per-job round trip. While throttled the reader
+/// parks in a shutdown-aware sleep (near-zero CPU at coarse rates; see the
+/// engine docs for the very-high-rate caveat). FIFO is preserved — the whole
+/// read is delayed at the batch boundary, no job is reordered or requeued.
+///
+/// A fresh or idle bucket starts full, so the first window admits a burst of
+/// up to `max` before settling to the steady-state `max`/`duration_ms` — the
+/// standard token-bucket allowance.
+///
+/// No `Default`: there is no sensible default `max`/`duration_ms`; the
+/// limiter is opt-in via `Some(RateLimit { .. })`.
+#[derive(Debug, Clone)]
+pub struct RateLimit {
+    /// Tokens admitted per `duration_ms` window. Must be `>= 1`
+    /// (`validate()` rejects `0`).
+    pub max: u32,
+    /// Window length in milliseconds. Must be `>= 1` (`validate()` rejects
+    /// `0`).
+    pub duration_ms: u64,
+    /// **Reserved for a follow-up; rejected in this version.** When
+    /// `Some(..)`, `validate()` errors — the current limiter is global
+    /// per-queue only. Shipping the field now (rather than omitting it)
+    /// means a later name-scoped-groups slice is additive, not a breaking
+    /// API change: it flips the rejection into a wire-through.
+    pub group_key: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct ConsumerConfig {
     pub queue_name: String,
@@ -234,6 +269,13 @@ pub struct ConsumerConfig {
     ///
     /// Defaults to [`StalledDetectorConfig::default`].
     pub stalled_detector: StalledDetectorConfig,
+    /// Opt-in global per-queue rate limit. `None` (default) means no
+    /// limiter — the reader path is byte-for-byte the pre-feature path (one
+    /// skipped branch, no `EVALSHA`, no allocation). When `Some(..)`, every
+    /// worker on the queue draws from ONE shared Redis token bucket so the
+    /// queue admits at most `RateLimit::max` jobs per `RateLimit::duration_ms`
+    /// window across all workers and both FFI shims. See [`RateLimit`].
+    pub rate_limit: Option<RateLimit>,
     /// Forwarded to the inline promoter the consumer spawns when
     /// `delayed_enabled` is true. Defaults to [`crate::metrics::NoopSink`].
     pub metrics: std::sync::Arc<dyn crate::metrics::MetricsSink>,
@@ -278,6 +320,7 @@ impl std::fmt::Debug for ConsumerConfig {
             .field("events_progress_enabled", &self.events_progress_enabled)
             .field("stalled_detector_enabled", &self.stalled_detector_enabled)
             .field("stalled_detector", &self.stalled_detector)
+            .field("rate_limit", &self.rate_limit)
             .field("metrics", &"<dyn MetricsSink>")
             .field("connection", &self.connection)
             .finish()
@@ -327,6 +370,7 @@ impl Default for ConsumerConfig {
             events_progress_enabled: true,
             stalled_detector_enabled: true,
             stalled_detector: StalledDetectorConfig::default(),
+            rate_limit: None,
             metrics: crate::metrics::noop_sink(),
             connection: ConnectionTuning::default(),
         }
@@ -376,6 +420,23 @@ impl ConsumerConfig {
                      once per crash and break per-crash counting",
                     self.stalled_detector.tick_interval_ms, self.stalled_detector.idle_threshold_ms,
                 )));
+            }
+        }
+        if let Some(rl) = &self.rate_limit {
+            if rl.max == 0 {
+                return Err(crate::Error::Config("rate_limit.max must be >= 1".into()));
+            }
+            if rl.duration_ms == 0 {
+                return Err(crate::Error::Config(
+                    "rate_limit.duration_ms must be >= 1".into(),
+                ));
+            }
+            if rl.group_key.is_some() {
+                return Err(crate::Error::Config(
+                    "rate_limit.group_key is not supported in this version (global per-queue \
+                     limiter only); omit it"
+                        .into(),
+                ));
             }
         }
         Ok(())
@@ -707,6 +768,86 @@ mod tests {
             msg.contains("idle_threshold_ms"),
             "error must name the field: {msg}"
         );
+    }
+
+    #[test]
+    fn validate_rejects_rate_limit_max_zero() {
+        let cfg = ConsumerConfig {
+            rate_limit: Some(RateLimit {
+                max: 0,
+                duration_ms: 1_000,
+                group_key: None,
+            }),
+            ..ConsumerConfig::default()
+        };
+        let err = cfg.validate().expect_err("rate_limit.max=0 must reject");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("rate_limit.max"),
+            "error must name the field: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_rate_limit_duration_zero() {
+        let cfg = ConsumerConfig {
+            rate_limit: Some(RateLimit {
+                max: 100,
+                duration_ms: 0,
+                group_key: None,
+            }),
+            ..ConsumerConfig::default()
+        };
+        let err = cfg
+            .validate()
+            .expect_err("rate_limit.duration_ms=0 must reject");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("rate_limit.duration_ms"),
+            "error must name the field: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_rate_limit_group_key() {
+        let cfg = ConsumerConfig {
+            rate_limit: Some(RateLimit {
+                max: 100,
+                duration_ms: 1_000,
+                group_key: Some("tenant".to_string()),
+            }),
+            ..ConsumerConfig::default()
+        };
+        let err = cfg
+            .validate()
+            .expect_err("rate_limit.group_key must reject as reserved");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("group_key") && msg.contains("not supported"),
+            "error must explain the reserved field: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_valid_global_rate_limit() {
+        let cfg = ConsumerConfig {
+            rate_limit: Some(RateLimit {
+                max: 500,
+                duration_ms: 1_000,
+                group_key: None,
+            }),
+            ..ConsumerConfig::default()
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_no_rate_limit() {
+        let cfg = ConsumerConfig {
+            rate_limit: None,
+            ..ConsumerConfig::default()
+        };
+        assert!(cfg.validate().is_ok());
     }
 
     #[test]

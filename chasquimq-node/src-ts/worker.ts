@@ -19,7 +19,10 @@
  *   - `pause()` / `resume()` / `isPaused()` (gating job dispatch
  *     client-side while the engine continues to pull jobs is not yet
  *     implemented).
- *   - `rateLimit()` (no leaky-bucket primitive in the engine yet).
+ *   - `rateLimit()` — the *manual* per-invocation `worker.rateLimit(ms)`
+ *     throttle-until call. (The queue-wide constructor `limiter` option,
+ *     which meters jobs/window via a shared Redis bucket, IS supported —
+ *     see {@link WorkerOptions.limiter}.)
  *   - Sandboxed processors via string/URL path (the constructor throws).
  *   - `stalled` / `drained` events (the engine's events stream lands in
  *     a later slice).
@@ -218,6 +221,23 @@ export interface WorkerOptions {
    * `ConsumerConfig::events_progress_enabled`.
    */
   eventsProgressEnabled?: boolean
+
+  /**
+   * Global per-queue rate limit shared across every worker on the queue.
+   * `max` meters **jobs admitted per `duration` (ms) window** — not reads
+   * or batches — across ALL workers (and both FFI shims) via one shared
+   * Redis token bucket. So `{ max: 100, duration: 1000 }` admits at most
+   * 100 jobs/sec queue-wide regardless of how many workers run. Maps to
+   * `ConsumerConfig::rate_limit`.
+   *
+   * `groupKey` is **reserved and rejected in this version** (global
+   * per-queue limiter only); passing it throws from the constructor.
+   *
+   * Distinct from {@link Worker.rateLimit} — that is a manual
+   * per-invocation throttle-until call and is unrelated to this
+   * constructor-time queue-wide limiter.
+   */
+  limiter?: { max: number; duration: number; groupKey?: string }
 }
 
 // ---------------------------------------------------------------------------
@@ -343,6 +363,30 @@ export class Worker<
       warnMaxStalledCountSemanticsOnce(name)
     }
 
+    // Rate-limiter cross-field validation. Fail here (in JS) so a bad
+    // `limiter` config surfaces as a clear `Error` at construction time
+    // rather than an opaque native error deep inside `run()`. `groupKey`
+    // is reserved this version (global per-queue limiter only).
+    if (opts.limiter != null) {
+      if (opts.limiter.groupKey != null) {
+        throw new Error(
+          'limiter.groupKey is not supported in this version (global per-queue limiter only)',
+        )
+      }
+      if (
+        typeof opts.limiter.max !== 'number' ||
+        !Number.isFinite(opts.limiter.max) ||
+        opts.limiter.max <= 0 ||
+        typeof opts.limiter.duration !== 'number' ||
+        !Number.isFinite(opts.limiter.duration) ||
+        opts.limiter.duration <= 0
+      ) {
+        throw new Error(
+          'limiter requires positive `max` and `duration` (ms) when set',
+        )
+      }
+    }
+
     const url = buildRedisUrl(opts.connection)
     const nativeOpts: NativeConsumerOpts = {
       queueName: name,
@@ -370,6 +414,15 @@ export class Worker<
       logMaxLen: opts.logMaxLen,
       logMaxLineBytes: opts.logMaxLineBytes,
       eventsProgressEnabled: opts.eventsProgressEnabled,
+      // Nested NAPI `LimiterOpts`, mirroring how `RetryOpts` is nested.
+      // `undefined` (the common path) leaves the engine with no limiter.
+      limiter: opts.limiter
+        ? {
+            max: opts.limiter.max,
+            duration: opts.limiter.duration,
+            groupKey: opts.limiter.groupKey,
+          }
+        : undefined,
     }
     // Plumb the optional credentialProvider through to the native
     // Consumer constructor. `undefined` (the common path) collapses to

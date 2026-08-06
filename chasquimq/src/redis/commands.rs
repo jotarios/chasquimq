@@ -709,6 +709,106 @@ end
 return {n_entries, incremented, threshold_hits}
 "#;
 
+/// Global per-queue rate limiter — token bucket in a Redis hash.
+///
+/// Called once per reader batch boundary (NOT per job) when the consumer
+/// has a `ConsumerConfig::rate_limit` set. The bucket (`t` = tokens, `ts` =
+/// last-refill ms) is shared across every worker on the queue — including
+/// both FFI shims — because the key carries the queue's `{chasqui:<queue>}`
+/// hash tag and every worker EVALSHAs against the same key. So N workers on
+/// one queue draw from ONE global budget, not N per-process budgets.
+///
+/// **`max` meters JOBS, not reads.** Each call requests `want` tokens (the
+/// reader's batch size) and the script grants up to `min(want, floor(tokens))`
+/// of them in one round trip. The reader then caps its `XREADGROUP COUNT` to
+/// the granted count, so the queue admits at most `max` **jobs** per
+/// `duration_ms` window regardless of batch size — the semantic users reach
+/// for ("throttle this queue to N/sec"). One EVALSHA per read, never per job.
+///
+/// Uses `redis.call('TIME')` for a **shared clock** — the exact pattern in
+/// [`PROMOTE_SCRIPT`] — so per-worker wall-clock skew can't let one worker
+/// admit faster than another. Do not pass a Rust-side timestamp.
+///
+/// **RETURN CONTRACT:** a two-element integer array `{granted, wait_ms}`,
+/// both always non-negative:
+/// - `{g, 0}` with `g >= 1` — `g` job-tokens were reserved; the reader
+///   fetches up to `g` jobs this round (its `COUNT`).
+/// - `{0, wait_ms}` with `wait_ms >= 1` — nothing available; sleep `wait_ms`,
+///   then RE-CHECK (never assume tokens are available after the sleep — a
+///   concurrent worker may take them).
+///
+/// The Rust side (`parse_rate_limit_reply`) fails **CLOSED**: any reply it
+/// cannot parse as `{granted>=1, 0}` is treated as "throttle" (a `wait_ms`
+/// from the reply if present, else a full `duration_ms`), never as a grant.
+/// A gate that fails open silently over-admits and is worse than no limiter.
+/// Every returned number is `math.floor`'d so RESP3 never frames a Lua float;
+/// the parser still tolerates String/Bytes element framing defensively.
+///
+/// **Cold-start burst allowance (documented, intended):** a fresh or idle
+/// bucket starts FULL, so the first window admits up to `max` immediately
+/// before settling to `max`/`duration` steady-state. This is standard
+/// token-bucket semantics; every doc surface states it so nobody files a
+/// "it let 2×max through in the first second" bug.
+///
+/// `#!lua flags=allow-oom` matches the codebase convention — this
+/// control-plane write must not be blocked when Redis is at `maxmemory`.
+///
+/// KEYS[1] = bucket key (`{chasqui:<queue>}:limiter`)
+/// ARGV[1] = max (job-tokens per window)
+/// ARGV[2] = duration_ms (window length)
+/// ARGV[3] = want (max job-tokens to grant this call = reader batch size)
+pub(crate) const RATE_LIMIT_ACQUIRE_SCRIPT: &str = r#"#!lua flags=allow-oom
+-- KEYS[1] = bucket key ({chasqui:<queue>}:limiter)
+-- ARGV[1] = max (job-tokens per window)
+-- ARGV[2] = duration_ms (window length)
+-- ARGV[3] = want (max tokens to grant this call = reader batch size)
+-- Returns {granted, wait_ms}: {g>=1, 0} = grant g jobs; {0, wait_ms>=1} = throttle.
+-- INVARIANT: never returns a negative or a non-integer. Rust fails CLOSED on any
+-- shape it cannot parse as {granted>=1, 0}.
+local max = tonumber(ARGV[1])
+local duration_ms = tonumber(ARGV[2])
+local want = tonumber(ARGV[3])
+if want < 1 then want = 1 end
+local time = redis.call('TIME')
+local now_ms = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
+local state = redis.call('HMGET', KEYS[1], 't', 'ts')
+local tokens, last
+if state[1] == false then
+  tokens = max          -- fresh bucket starts full: the first window admits an initial
+  last = now_ms         -- BURST of up to `max` before steady-state N/window. Intended
+                        -- token-bucket semantic; documented as a burst allowance.
+else
+  tokens = tonumber(state[1])
+  last = tonumber(state[2])
+  local elapsed = now_ms - last
+  if elapsed > 0 then
+    tokens = math.min(max, tokens + elapsed * (max / duration_ms))
+    last = now_ms
+  end
+end
+-- PEXPIRE duration_ms*2 is LOAD-BEARING, do not tighten to duration_ms:
+-- every acquire (granted OR throttled) refreshes it, so the key only expires
+-- after 2*duration of ZERO calls. After that much idle the lazy refill would
+-- compute min(max, tokens + >=2*max) = max anyway, so "expired -> fresh full"
+-- is identical to "lazy-refilled -> full" (no lost-state burst). Tightening to
+-- duration_ms would let a bucket sitting at tokens<1 expire mid-throttle and
+-- reset to full inside one window = a real burst bug.
+if tokens >= 1 then
+  -- Grant up to `want` whole tokens, bounded by what's actually in the bucket.
+  local grant = math.floor(math.min(want, tokens))
+  tokens = tokens - grant
+  redis.call('HSET', KEYS[1], 't', tokens, 'ts', last)
+  redis.call('PEXPIRE', KEYS[1], duration_ms * 2)
+  return {grant, 0}
+else
+  local wait_ms = math.ceil((1 - tokens) * (duration_ms / max))
+  redis.call('HSET', KEYS[1], 't', tokens, 'ts', last)  -- persist refilled (<1) count + ts
+  redis.call('PEXPIRE', KEYS[1], duration_ms * 2)
+  if wait_ms < 1 then wait_ms = 1 end
+  return {0, math.floor(wait_ms)}   -- integer framing (no float reply under RESP3)
+end
+"#;
+
 pub(crate) const ACQUIRE_LOCK_SCRIPT: &str = r#"
 local cur = redis.call('GET', KEYS[1])
 if cur == false then
@@ -1561,6 +1661,107 @@ pub(crate) fn eval_stalled_scan_args(
     args
 }
 
+/// EVALSHA argument vector for [`RATE_LIMIT_ACQUIRE_SCRIPT`]. `numkeys = 1`
+/// (the bucket key). `want` is the max job-tokens to reserve this call (the
+/// reader's batch size) — the script grants up to `min(want, tokens)`.
+pub(crate) fn evalsha_rate_limit_args(
+    sha: &str,
+    bucket_key: &str,
+    max: u32,
+    duration_ms: u64,
+    want: u32,
+) -> Vec<Value> {
+    vec![
+        Value::from(sha),
+        Value::from(1_i64),
+        Value::from(bucket_key),
+        Value::from(max as i64),
+        Value::from(duration_ms as i64),
+        Value::from(want as i64),
+    ]
+}
+
+/// EVAL fallback argument vector for [`RATE_LIMIT_ACQUIRE_SCRIPT`] (used on
+/// the `NOSCRIPT` self-heal path after a fresh `SCRIPT LOAD`).
+pub(crate) fn eval_rate_limit_args(
+    script: &str,
+    bucket_key: &str,
+    max: u32,
+    duration_ms: u64,
+    want: u32,
+) -> Vec<Value> {
+    vec![
+        Value::from(script),
+        Value::from(1_i64),
+        Value::from(bucket_key),
+        Value::from(max as i64),
+        Value::from(duration_ms as i64),
+        Value::from(want as i64),
+    ]
+}
+
+/// Outcome of one [`RATE_LIMIT_ACQUIRE_SCRIPT`] call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RateLimitDecision {
+    /// `n >= 1` job-tokens reserved; the reader fetches up to `n` jobs this
+    /// round (its `XREADGROUP COUNT`).
+    Granted(u32),
+    /// Nothing available; sleep `wait_ms` (>= 1) then re-check.
+    Throttle { wait_ms: u64 },
+}
+
+/// Parse [`RATE_LIMIT_ACQUIRE_SCRIPT`]'s `{granted, wait_ms}` reply.
+///
+/// **Fails CLOSED.** The script contract is a two-element non-negative integer
+/// array: `{g>=1, 0}` = grant `g` jobs, `{0, wait_ms>=1}` = throttle. `fred`
+/// may frame each element as `Integer`, `String`, or `Bytes` depending on
+/// protocol version, so we accept all three per element.
+///
+/// **Any shape that is not an unambiguous `{granted>=1, 0}` grant is treated
+/// as a throttle** — a `wait_ms` from the reply when we can read one, else a
+/// full `duration_ms`. Never a grant. This is deliberately NOT
+/// [`crate::leader_task::value_as_u64`] (which maps every non-`Integer` shape
+/// to `0`): reusing that here would let an unparseable RESP3 reply read as
+/// "granted" and over-admit. A rate gate that fails open is worse than no
+/// gate — so on any ambiguity we throttle.
+pub(crate) fn parse_rate_limit_reply(v: &Value, duration_ms: u64) -> RateLimitDecision {
+    fn as_u64(v: &Value) -> Option<u64> {
+        match v {
+            Value::Integer(n) if *n >= 0 => Some(*n as u64),
+            Value::String(s) => s.parse::<u64>().ok(),
+            Value::Bytes(b) => std::str::from_utf8(b)
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok()),
+            _ => None,
+        }
+    }
+    let throttle_full = RateLimitDecision::Throttle {
+        wait_ms: duration_ms.max(1),
+    };
+    let Value::Array(items) = v else {
+        return throttle_full;
+    };
+    if items.len() != 2 {
+        return throttle_full;
+    }
+    let (Some(granted), Some(wait_ms)) = (as_u64(&items[0]), as_u64(&items[1])) else {
+        return throttle_full;
+    };
+    if granted >= 1 {
+        // Grant. Clamp to u32 (the reader's batch size is a usize but the
+        // grant can never exceed `max`, itself a u32).
+        RateLimitDecision::Granted(granted.min(u32::MAX as u64) as u32)
+    } else if wait_ms >= 1 {
+        // Normal throttle: the script told us how long to wait.
+        RateLimitDecision::Throttle { wait_ms }
+    } else {
+        // granted == 0 AND wait_ms == 0: a nonsensical reply the script never
+        // emits. Fail CLOSED — throttle a full window rather than spin or
+        // admit.
+        throttle_full
+    }
+}
+
 pub(crate) fn evalsha_acquire_lock_args(
     sha: &str,
     lock_key: &str,
@@ -1724,5 +1925,113 @@ mod tests {
     #[test]
     fn schedule_repeatable_script_guards_malformed_members() {
         asserts_bounds_guard(SCHEDULE_REPEATABLE_SCRIPT, "SCHEDULE_REPEATABLE_SCRIPT");
+    }
+
+    /// Structural guard on the rate-limit Lua body: it must use the shared
+    /// Redis clock (`TIME`), read the bucket via `HMGET`, keep the
+    /// load-bearing `PEXPIRE ... * 2` idle-expiry, and frame its return as
+    /// an integer (`math.floor`) so RESP3 never hands the Rust side a float.
+    #[test]
+    fn rate_limit_script_shape() {
+        assert!(
+            RATE_LIMIT_ACQUIRE_SCRIPT.starts_with("#!lua flags=allow-oom"),
+            "rate-limit script must carry the allow-oom shebang like the other control-plane scripts"
+        );
+        assert!(
+            RATE_LIMIT_ACQUIRE_SCRIPT.contains("redis.call('TIME')"),
+            "must use the shared Redis clock, not a Rust-side timestamp"
+        );
+        assert!(
+            RATE_LIMIT_ACQUIRE_SCRIPT.contains("HMGET"),
+            "must read token count + last-refill ts from the bucket hash"
+        );
+        assert!(
+            RATE_LIMIT_ACQUIRE_SCRIPT.contains("duration_ms * 2"),
+            "the load-bearing PEXPIRE duration_ms*2 idle-expiry must not be tightened"
+        );
+        assert!(
+            RATE_LIMIT_ACQUIRE_SCRIPT.contains("math.floor(wait_ms)"),
+            "the throttle return must be integer-framed (math.floor) so RESP3 doesn't send a float"
+        );
+        assert!(
+            RATE_LIMIT_ACQUIRE_SCRIPT.contains("math.min(want, tokens)"),
+            "grants must be bounded by the requested `want` (reader batch size) so `max` meters jobs"
+        );
+    }
+
+    /// `parse_rate_limit_reply` fails CLOSED. This is the regression test
+    /// for the fail-open bug: any reply that is not an unambiguous
+    /// `{granted>=1, 0}` grant must throttle, never read as granted.
+    #[test]
+    fn parse_rate_limit_reply_fails_closed() {
+        use RateLimitDecision::*;
+        let dur = 1000_u64;
+        let full = Throttle { wait_ms: dur };
+        // Grant: {g>=1, 0}, any per-element framing.
+        assert_eq!(
+            parse_rate_limit_reply(
+                &Value::Array(vec![Value::Integer(8), Value::Integer(0)]),
+                dur
+            ),
+            Granted(8)
+        );
+        assert_eq!(
+            parse_rate_limit_reply(
+                &Value::Array(vec![Value::String("3".into()), Value::String("0".into())]),
+                dur
+            ),
+            Granted(3)
+        );
+        assert_eq!(
+            parse_rate_limit_reply(
+                &Value::Array(vec![
+                    Value::Bytes(Bytes::from_static(b"5")),
+                    Value::Bytes(Bytes::from_static(b"0")),
+                ]),
+                dur
+            ),
+            Granted(5)
+        );
+        // Throttle: {0, wait_ms} carries the wait through.
+        assert_eq!(
+            parse_rate_limit_reply(
+                &Value::Array(vec![Value::Integer(0), Value::Integer(50)]),
+                dur
+            ),
+            Throttle { wait_ms: 50 }
+        );
+        // {0, 0} is nonsensical → throttle a full window (never a grant).
+        assert_eq!(
+            parse_rate_limit_reply(
+                &Value::Array(vec![Value::Integer(0), Value::Integer(0)]),
+                dur
+            ),
+            full
+        );
+        // Every ambiguous / unexpected shape THROTTLES (fail closed):
+        // a bare integer (old single-value contract), Null, Double, negative
+        // element, wrong arity, unparseable element.
+        assert_eq!(parse_rate_limit_reply(&Value::Integer(0), dur), full);
+        assert_eq!(parse_rate_limit_reply(&Value::Integer(8), dur), full);
+        assert_eq!(parse_rate_limit_reply(&Value::Null, dur), full);
+        assert_eq!(parse_rate_limit_reply(&Value::Double(1.5), dur), full);
+        assert_eq!(
+            parse_rate_limit_reply(&Value::Array(vec![Value::Integer(8)]), dur),
+            full
+        );
+        assert_eq!(
+            parse_rate_limit_reply(
+                &Value::Array(vec![Value::Integer(-1), Value::Integer(0)]),
+                dur
+            ),
+            full
+        );
+        assert_eq!(
+            parse_rate_limit_reply(
+                &Value::Array(vec![Value::String("nope".into()), Value::Integer(0)]),
+                dur
+            ),
+            full
+        );
     }
 }

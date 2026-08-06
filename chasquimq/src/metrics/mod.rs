@@ -277,6 +277,12 @@ pub trait MetricsSink: Send + Sync + 'static {
     /// `LockOutcome::Held` once on transition (via `promoter_lock_outcome`,
     /// reused) and skip the tick entirely.
     fn stalled_tick(&self, _tick: StalledTick) {}
+    /// One reader batch boundary throttled by the per-queue rate limiter.
+    /// `wait_ms` is how long the reader is about to sleep before re-checking
+    /// the token bucket. Fires once per re-check while throttled (roughly one
+    /// per `wait_ms` at coarse rates), never per job. Not emitted when a token
+    /// is granted immediately.
+    fn rate_limited_tick(&self, _tick: RateLimitedTick) {}
 }
 
 /// One stalled-detector leader tick. See [`MetricsSink::stalled_tick`].
@@ -285,6 +291,15 @@ pub struct StalledTick {
     pub scanned: u64,
     pub incremented: u64,
     pub relocated: u64,
+}
+
+/// One rate-limited reader batch boundary. See
+/// [`MetricsSink::rate_limited_tick`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RateLimitedTick {
+    /// Milliseconds the reader is about to sleep before re-checking the
+    /// token bucket.
+    pub wait_ms: u64,
 }
 
 /// Default sink — drops every event.

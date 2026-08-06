@@ -21,6 +21,14 @@
 //                 them back via `Queue.getJob` / `Queue.getJobLogs`.
 //                 Pair with `STORE_RESULT=1` to keep completed jobs
 //                 discoverable by the introspector.
+//
+// LIMITER_MAX          — optional. When set (with LIMITER_DURATION_MS), the
+//                        worker enables a global per-queue rate limiter of
+//                        `max` jobs per `duration` ms window (shared Redis
+//                        bucket). Used by the rate-limit cross-shim phase to
+//                        prove the Node + Python FFI paths share ONE bucket.
+// LIMITER_DURATION_MS  — optional. Window length in ms; required when
+//                        LIMITER_MAX is set.
 
 import { Worker } from '../../chasquimq-node/dist/index.js'
 
@@ -37,6 +45,11 @@ async function main(): Promise<number> {
     ? JSON.parse(resultValueRaw)
     : undefined
   const emitProgress = process.env.EMIT_PROGRESS === '1'
+  const limiterMaxRaw = process.env.LIMITER_MAX ?? ''
+  const limiterDurationRaw = process.env.LIMITER_DURATION_MS ?? ''
+  const limiter = limiterMaxRaw
+    ? { max: Number(limiterMaxRaw), duration: Number(limiterDurationRaw) }
+    : undefined
 
   const seen = new Set<number>()
   const errors: string[] = []
@@ -95,6 +108,7 @@ async function main(): Promise<number> {
       drainDelay: 200,
       runScheduler: false,
       storeResults,
+      limiter,
     },
   )
 

@@ -132,6 +132,9 @@ class Worker:
         stalled_detector_enabled: bool = True,
         stalled_interval_ms: Optional[int] = None,
         stalled_detector_scan_batch: Optional[int] = None,
+        rate_limit_max: Optional[int] = None,
+        rate_limit_duration_ms: Optional[int] = None,
+        rate_limit_group_key: Optional[str] = None,
     ) -> None:
         self._queue_name = queue_name
         self._handler = handler
@@ -187,6 +190,19 @@ class Worker:
             consumer_kwargs["stalled_interval_ms"] = stalled_interval_ms
         if stalled_detector_scan_batch is not None:
             consumer_kwargs["stalled_detector_scan_batch"] = stalled_detector_scan_batch
+        # Global per-queue rate limiter. ``rate_limit_max`` meters **jobs
+        # admitted per ``rate_limit_duration_ms`` window** shared across all
+        # workers on the queue (one Redis token bucket), not reads or
+        # batches. ``rate_limit_group_key`` is reserved and rejected by the
+        # native layer in this version (global per-queue limiter only). These
+        # ride ``consumer_kwargs`` so they reach both the immediate and
+        # deferred (credential-provider) construction paths.
+        if rate_limit_max is not None:
+            consumer_kwargs["rate_limit_max"] = rate_limit_max
+        if rate_limit_duration_ms is not None:
+            consumer_kwargs["rate_limit_duration_ms"] = rate_limit_duration_ms
+        if rate_limit_group_key is not None:
+            consumer_kwargs["rate_limit_group_key"] = rate_limit_group_key
 
         if credential_provider is not None:
             # The native consumer captures the running asyncio loop at

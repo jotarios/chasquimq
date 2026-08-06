@@ -5,8 +5,8 @@
 //! demonstrated in `examples/`.
 
 use chasquimq::{
-    DlqRouted, JobOutcome, JobOutcomeKind, LockOutcome, MetricsSink, PromoterTick, ReaderBatch,
-    RetryScheduled,
+    DlqRouted, JobOutcome, JobOutcomeKind, LockOutcome, MetricsSink, PromoterTick, RateLimitedTick,
+    ReaderBatch, RetryScheduled, StalledTick,
 };
 use metrics::{counter, gauge, histogram};
 
@@ -117,5 +117,16 @@ impl MetricsSink for MetricsFacadeSink {
             "name" => dlq.name,
         )
         .increment(1);
+    }
+
+    fn stalled_tick(&self, tick: StalledTick) {
+        counter!("chasquimq_stalled_scanned_total").increment(tick.scanned);
+        counter!("chasquimq_stalled_incremented_total").increment(tick.incremented);
+        counter!("chasquimq_stalled_relocated_total").increment(tick.relocated);
+    }
+
+    fn rate_limited_tick(&self, tick: RateLimitedTick) {
+        counter!("chasquimq_rate_limited_total").increment(1);
+        histogram!("chasquimq_rate_limit_wait_seconds").record(tick.wait_ms as f64 / 1_000.0);
     }
 }

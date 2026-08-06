@@ -489,7 +489,11 @@ State predicates.
 async rateLimit(expireTimeMs: number): Promise<void>
 ```
 
-Throws `NotSupportedError` in v1.
+The manual *per-invocation* "throttle this worker until `expireTimeMs`"
+call. **Still throws `NotSupportedError`** — a different API from the
+standing per-queue rate limit. For a queue-wide rate cap, set
+[`WorkerOptions.limiter`](#limiteroptions) on the constructor instead;
+that is shipped.
 
 ### `Symbol.asyncDispose`
 
@@ -812,6 +816,7 @@ interface WorkerOptions {
   logMaxLen?: number;
   logMaxLineBytes?: number;
   eventsProgressEnabled?: boolean;
+  limiter?: LimiterOptions;
 }
 ```
 
@@ -841,6 +846,41 @@ interface WorkerOptions {
   The persisted progress key is always written; this only mutes
   the events fan-out a `QueueEvents` subscriber would observe.
   **Default `true`.**
+- `limiter` — global per-queue rate limit. Unset by default (no
+  limiting). See [`LimiterOptions`](#limiteroptions) and the
+  [Rate limiting concept](/concepts/rate-limiting/).
+
+### `LimiterOptions`
+
+```ts
+interface LimiterOptions {
+  max: number;
+  duration: number;
+  groupKey?: string;
+}
+```
+
+Global per-queue token bucket: at most `max` **jobs** admitted per
+`duration` window, shared across **every** worker on the queue —
+one bucket in Redis (`{chasqui:<queue>}:limiter`), not one per
+worker. Two workers with `{ max: 100, duration: 1000 }` process at
+most 100 jobs/second *combined*.
+
+- `max` — jobs per window. **Required; must be `>= 1`.** A fresh or
+  idle bucket starts full, so the first window admits a burst up to
+  `max` before settling to the `max`/`duration` steady state
+  (standard token-bucket behavior).
+- `duration` — window length in ms. **Required; must be `>= 1`.**
+- `groupKey` — **reserved; rejected in this version.** Passing it
+  throws `Error('limiter.groupKey is not supported in this version
+  (global per-queue limiter only)')`. Per-key sub-buckets are a
+  documented follow-up.
+
+The bucket is evaluated once per read attempt (one `EVALSHA` before
+`XREADGROUP`, never per job); a throttle delays the whole read at the
+batch boundary, so FIFO is preserved. Distinct from
+[`Worker.rateLimit`](#workerratelimitexpiretimems) (the manual
+per-invocation call, still `NotSupportedError`).
 
 ### `JobsOptions`
 
@@ -1056,7 +1096,7 @@ The shim throws typed errors so application code can branch on
 - [`WaitForResultTimeoutError`](/reference/error-codes/#cmq-102--node-result-wait-timeout) — `Job.waitForResult` timed out.
 - `WaitUntilFinishedTimeoutError` — `Job.waitUntilFinished` saw neither a `completed` nor a `failed` event within the supplied `ttl`. Distinct from a failed job: a failed job rejects with `new Error(failedReason)`; this error fires only when the events stream itself goes silent.
 - [`NotSupportedError`](/reference/error-codes/#cmq-100--node-feature-not-supported) — caller asked for a v1-stubbed feature.
-- [`RateLimitError`](/reference/error-codes/#cmq-101--node-rate-limit) — reserved; `Worker.rateLimit` throws this in a future slice.
+- [`RateLimitError`](/reference/error-codes/#cmq-101--node-rate-limit) — reserved; tied to the manual `Worker.rateLimit(expireTimeMs)` call (still `NotSupportedError`), not the shipped constructor [`limiter`](#limiteroptions). Bad `limiter` input throws a plain `Error`, not this.
 
 See [error codes](/reference/error-codes/) for the full table with
 **When**, **Why**, **Fix**, and **See also** for each.

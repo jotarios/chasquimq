@@ -18,8 +18,8 @@ pub mod stalled;
 
 pub use bytes::Bytes;
 pub use config::{
-    ConnectionTuning, ConsumerConfig, ProducerConfig, PromoterConfig, RetryConfig, SchedulerConfig,
-    StalledDetectorConfig,
+    ConnectionTuning, ConsumerConfig, ProducerConfig, PromoterConfig, RateLimit, RetryConfig,
+    SchedulerConfig, StalledDetectorConfig,
 };
 pub use consumer::{Consumer, PauseControl};
 pub use error::{Error, HandlerError, Result};
@@ -27,7 +27,7 @@ pub use introspect::{Introspector, JobCounts, JobInfo, JobState, JobsPage};
 pub use job::{BackoffKind, BackoffSpec, Job, JobId, JobRetryOverride};
 pub use metrics::{
     DlqReason, DlqRouted, JobOutcome, JobOutcomeKind, LockOutcome, MetricsSink, NoopSink,
-    PromoterTick, ReaderBatch, RetryScheduled, StalledTick, noop_sink,
+    PromoterTick, RateLimitedTick, ReaderBatch, RetryScheduled, StalledTick, noop_sink,
 };
 pub use producer::{DlqEntry, DrainOptions, Producer, RemovalReport};
 pub use progress::JobHandle;
